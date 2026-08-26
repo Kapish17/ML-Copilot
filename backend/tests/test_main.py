@@ -33,5 +33,16 @@ def test_health_response_shape(client: TestClient) -> None:
 
 
 def test_unknown_route_returns_404(client: TestClient) -> None:
-    """No other routes are registered in this commit."""
-    assert client.get("/not-a-route").status_code == 404
+    """An unknown path answers 404 using the shared error envelope."""
+    response = client.get("/not-a-route")
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "not_found"
+
+
+def test_openapi_documents_the_dataset_endpoint(client: TestClient) -> None:
+    """The v1 dataset routes are mounted and documented."""
+    paths = client.get("/openapi.json").json()["paths"]
+
+    assert "/api/v1/datasets/profile" in paths
+    assert "post" in paths["/api/v1/datasets/profile"]

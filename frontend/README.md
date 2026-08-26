@@ -25,4 +25,7 @@ uvicorn app.main:app --reload
 # interactive API docs: http://127.0.0.1:8000/docs
 ```
 
-See the [root README](../README.md) for the overall project status.
+The dataset profiling endpoint (`POST /api/v1/datasets/profile`) already returns
+a stable JSON contract, including a single error envelope for every failure, so
+the upload and profile views can be built against it as it stands. See the
+[root README](../README.md) for the request and response shapes.

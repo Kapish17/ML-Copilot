@@ -1,5 +1,6 @@
 """HTTP layer.
 
-Feature routers (datasets, training runs, explanations, chat) will be added
-here in later commits and mounted onto the FastAPI application.
+``dependencies``     shared FastAPI dependencies (settings, services)
+``error_handlers``   translation of exceptions into the API error envelope
+``v1``               version 1 of the public API
 """

@@ -1,6 +1,8 @@
 # Runtime dependencies
 fastapi==0.141.1
 uvicorn==0.52.4
+python-multipart==0.0.32
+pandas==3.0.5
 
 # Test dependencies
 pytest==9.1.1
