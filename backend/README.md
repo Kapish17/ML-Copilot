@@ -113,11 +113,22 @@ uvicorn app.main:app --reload
 ## Test
 
 ```bash
-pytest
+pytest              # from the repository root: backend and ML suites
+pytest backend/tests   # this service only
 ```
 
-Run both commands from this `backend/` directory — `app` is imported as a
-top-level package.
+Run `uvicorn` from this `backend/` directory — `app` is imported as a
+top-level package. Test configuration lives in the repository root
+`pytest.ini`, which puts both `backend/` and the repository root on the import
+path.
+
+## Relationship to the ML layer
+
+The ML layer lives in the top-level `ml/` package and is a separate component
+with its own dependencies. It does **not** import this service, and this
+service does not yet import it. The handoff is one-directional and structural:
+the ML layer consumes a dataset profile by shape, and preprocessing is not
+exposed over HTTP in this commit. See `ml/README.md`.
 
 ## Dependencies
 

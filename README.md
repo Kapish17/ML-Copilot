@@ -6,9 +6,10 @@ evaluates candidate models, explains what the models learned, and answers
 follow-up questions in natural language — with every run tracked and every
 answer grounded in retrievable context.
 
-> **Status: early development.** The backend can currently ingest a CSV file and
-> return a full dataset profile. Everything marked *planned* below is not
-> implemented yet.
+> **Status: early development.** The backend can ingest a CSV file and return a
+> full dataset profile, and the ML layer can turn a profiled dataset into
+> model-ready training and test data. **No model is trained yet.** Everything
+> marked *planned* below is not implemented.
 
 ---
 
@@ -26,7 +27,8 @@ answer grounded in retrievable context.
 | Capability | Description | Status |
 | --- | --- | --- |
 | Dataset ingestion & profiling | CSV validation, structural profile, data-quality findings, target analysis | **implemented** |
-| Automated ML pipeline | Preprocessing, feature handling, model training and evaluation | planned |
+| Preprocessing & feature engineering | Feature selection, imputation, encoding, scaling, datetime expansion, leakage-safe train/test split | **implemented** |
+| Model training & evaluation | Model selection, training, metrics | planned |
 | Explainable AI | Global and per-prediction feature attributions (SHAP) | planned |
 | Retrieval-augmented answers | Grounded responses over docs and past experiment results | planned |
 | Agentic workflows | Multi-step, tool-using analysis planned and executed by an agent | planned |
@@ -46,10 +48,11 @@ answer grounded in retrievable context.
              └─┬────────┬──────────┬─┘
                │        │          │
    ┌───────────▼──┐ ┌───▼───────┐ ┌▼──────────────┐
-   │  ML layer    │ │ RAG layer │ │  Agent layer  │   (planned)
-   │ pipelines,   │ │ ingestion,│ │ tools,        │
-   │ evaluation,  │ │ retrieval,│ │ workflows,    │
+   │  ML layer    │ │ RAG layer │ │  Agent layer  │
+   │ preprocessing│ │ ingestion,│ │ tools,        │
+   │ ✓ training,  │ │ retrieval,│ │ workflows,    │
    │ explainability│ │ prompts  │ │ state         │
+   │ (planned)    │ │ (planned) │ │  (planned)    │
    └───────┬──────┘ └─────┬─────┘ └───────┬───────┘
            │              │               │
    ┌───────▼──────┐ ┌─────▼─────┐ ┌───────▼───────┐
@@ -69,7 +72,8 @@ layer.
 | --- | --- | --- |
 | Backend API | Python, FastAPI, Uvicorn | **implemented** |
 | Data handling | pandas | **implemented** |
-| Machine learning | scikit-learn | planned |
+| Preprocessing | scikit-learn (`Pipeline`, `ColumnTransformer`) | **implemented** |
+| Model training | scikit-learn estimators | planned |
 | Explainability | SHAP | planned |
 | Experiment tracking | MLflow | planned |
 | LLM integration | Provider-agnostic LLM client | planned |
@@ -85,7 +89,7 @@ layer.
 ml-copilot/
 ├── backend/       FastAPI service (api, core, models, schemas, services, tests)
 ├── frontend/      Next.js application (placeholder)
-├── ml/            Training pipelines, features, evaluation, experiments
+├── ml/            Preprocessing and feature engineering; training comes later
 ├── rag/           Ingestion, retrieval and prompt assets
 ├── agents/        Agent tools, workflows and state
 ├── data/          Local datasets — raw and processed (git-ignored contents)
@@ -96,8 +100,31 @@ ml-copilot/
 └── docker-compose.yml   Skeleton for the future local stack
 ```
 
-Directories outside `backend/` are still placeholders; they hold the structure
-the project will grow into.
+`backend/` and `ml/` hold implemented code. The remaining directories are
+placeholders holding the structure the project will grow into.
+
+---
+
+## Data ingestion formats
+
+**CSV is the only implemented input format.** Excel, JSON, Parquet, SQL
+databases and HTTP/API sources are planned.
+
+The ML pipeline is intentionally **format-agnostic**: everything downstream of
+ingestion operates on a standardised `pandas.DataFrame`, never on a file, a
+path or a CSV-specific object.
+
+```
+ingestion adapter  ->  DataFrame  ->  profiling  ->  configuration  ->  preprocessing  ->  training
+   (CSV today;                                                                            (planned)
+    Excel, JSON,
+    Parquet, SQL,
+    API planned)
+```
+
+Adding a format therefore means writing one adapter that returns a DataFrame.
+Profiling, preprocessing and the future training code need no changes and have
+no knowledge of where the data came from.
 
 ---
 
@@ -347,6 +374,110 @@ constants on the `Settings` object.
 
 ---
 
+## Preprocessing and feature engineering
+
+The ML layer (`ml/`) turns a profiled dataset into model-ready training and
+test data. It is a plain Python package with no web dependency: it takes a
+DataFrame and a configuration and returns arrays, names and an account of every
+decision. **It does not train models.**
+
+`ml/README.md` documents it in full; the essentials follow.
+
+### Configuration
+
+A `PreprocessingConfig` says which column plays which role and how features are
+treated. It can be **inferred from the Commit 2 profile** — profiling already
+knows the semantic types, the constant columns, the free-text columns and the
+possible identifiers, and that answer is reused rather than recomputed — and
+**anything explicit overrides the inference**:
+
+```python
+from ml import infer_configuration, prepare_dataset
+
+inferred = infer_configuration(profile, target_column="churn")
+config = inferred.config.with_overrides(scaling_strategy="none", test_size=0.25)
+prepared = prepare_dataset(frame, config, decisions=inferred.decisions)
+```
+
+### Feature groups
+
+| Group | Source types | Treatment |
+| --- | --- | --- |
+| numeric | `integer`, `float` | impute (median by default) → scale (standard by default), plus a missing indicator |
+| categorical | `categorical` | impute (most frequent by default) → one-hot encode, unknown categories tolerated |
+| boolean | `boolean` | cast to 0/1 → impute; not scaled |
+| datetime | `datetime` | expand to year, month, day, day of week → impute |
+
+Columns that are not features are **never dropped silently**. Every column gets
+a decision with a reason code — `profile_possible_id`, `free_text`,
+`constant_column`, `high_cardinality`, `excluded_by_caller` and so on — and any
+of them can be reinstated explicitly. Identifier-like and suspicious columns are
+excluded from the feature set by default but remain in the dataset.
+
+### Feature names
+
+Names survive every transformation, which is what later makes feature
+importance, SHAP and LLM explanations possible:
+
+| Original | After preprocessing |
+| --- | --- |
+| `monthly_charges` | `monthly_charges` |
+| `contract` | `contract_Month-to-month`, `contract_One-year`, `contract_Two-year` |
+| `signup_date` | `signup_date_year`, `signup_date_month`, `signup_date_day`, `signup_date_day_of_week` |
+| `age` (had gaps) | `age`, `missingindicator_age` |
+
+### Feature engineering
+
+Only safe, general-purpose transformations: datetime components, missing
+indicators, and one-hot encoding. No polynomial expansion, no automatic
+interactions, no domain-specific features, and nothing that would generate
+hundreds of unreadable columns.
+
+### Train/test split
+
+`test_size` and `random_state` are configurable and the same seed always
+reproduces the same split. Classification splits are stratified; regression
+splits are not. Stratification is skipped — with the reason reported, never
+silently — when the target has one class, when a class has a single row, or
+when the test half is too small to hold every class. Cross-validation is not
+implemented; the splitting functions are written so it can reuse them.
+
+### Leakage prevention
+
+Preprocessing is fitted on the training rows and on nothing else:
+
+1. validate the configuration against the dataset,
+2. separate the target from the features,
+3. split into train and test,
+4. `fit_transform` the preprocessor on the **training features only**,
+5. `transform` the test features with the already-learned statistics.
+
+So imputation values, scaler statistics, one-hot categories and missing
+indicators all come from training data alone, and the target is never passed to
+a feature transformer. This is checked directly in `ml/tests/test_leakage.py` —
+including a test that corrupts the test rows' feature values and shows that
+neither the fitted statistics nor the transformed training data change.
+
+### Class imbalance
+
+Measured, never corrected. The result reports class counts, percentages,
+majority and minority classes and the imbalance ratio for the full dataset and
+for each split half. No SMOTE, no oversampling, no undersampling.
+
+### Result
+
+`PreparedDataset` carries `X_train`, `X_test`, `y_train`, `y_test`, the fitted
+preprocessor, feature names, feature groups, selected and excluded columns, the
+per-column decisions, row counts and target distributions.
+`prepared.summary()` returns a JSON-friendly view that deliberately omits the
+fitted estimator and the data frames, so ML-internal objects never need to
+appear in an API response.
+
+Preprocessing is **not exposed over HTTP yet** — it is a library API in this
+commit.
+
+---
+
 ## Current implementation status
 
 **Implemented**
@@ -357,11 +488,17 @@ constants on the `Settings` object.
 - Heuristic data-quality detection and optional target-column analysis.
 - Consistent error envelope across every failure mode.
 - Environment-driven configuration for limits and thresholds.
-- Test suite covering the service layer and the API contract.
+- Format-agnostic preprocessing: feature selection, imputation, one-hot
+  encoding, scaling and datetime expansion, driven by a configuration that can
+  be inferred from the profile and overridden explicitly.
+- Reproducible, leakage-safe train/test splitting with stratification for
+  classification.
+- Test suites covering the backend service, the API contract and the ML layer.
 
 **Not implemented yet**
 
-- ML training, evaluation and explainability
+- Model training, evaluation and explainability
+- Ingestion formats other than CSV (Excel, JSON, Parquet, SQL, APIs)
 - RAG ingestion and retrieval
 - LLM integration and agentic workflows
 - Experiment tracking
@@ -406,6 +543,13 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+The ML layer is a separate component with its own dependencies. From the
+repository root, install both for a full development environment:
+
+```bash
+pip install -r backend/requirements.txt -r ml/requirements.txt
+```
+
 ## Running the backend
 
 From the `backend/` directory, with the virtual environment active:
@@ -424,23 +568,32 @@ curl -X POST http://127.0.0.1:8000/api/v1/datasets/profile -F "file=@customers.c
 
 ## Running the tests
 
-From the `backend/` directory:
+From the repository root, which runs both the backend and the ML suites:
 
 ```bash
 pytest
 ```
 
-Add `-v` for per-test output.
+Or one suite at a time:
+
+```bash
+pytest backend/tests
+pytest ml/tests
+```
+
+Add `-v` for per-test output. Every test builds its data in memory — none reads
+an external dataset or touches the network.
 
 ## Roadmap
 
 1. ~~**Project foundation** — repository structure, FastAPI service, tests~~
-2. **Dataset upload and profiling** — validation, profile, data quality, target analysis *(current)*
-3. ML training pipeline and evaluation
-4. Explainability with SHAP
-5. Experiment tracking
-6. RAG layer over documentation and run history
-7. LLM integration
-8. Agentic workflows
-9. Next.js frontend
-10. Containerisation and deployment
+2. ~~**Dataset upload and profiling** — validation, profile, data quality, target analysis~~
+3. **Preprocessing and feature engineering** — configuration, pipeline, leakage-safe split *(current)*
+4. Model training and evaluation
+5. Explainability with SHAP
+6. Experiment tracking
+7. RAG layer over documentation and run history
+8. LLM integration
+9. Agentic workflows
+10. Next.js frontend
+11. Containerisation and deployment

@@ -1,0 +1,11 @@
+# Dependencies of the ML layer.
+#
+# The ML layer is a separate component from the backend service. Install both
+# for a full development environment:
+#
+#   pip install -r backend/requirements.txt -r ml/requirements.txt
+
+# Shared with the backend — keep this pin in sync with backend/requirements.txt.
+pandas==3.0.5
+
+scikit-learn==1.9.0
