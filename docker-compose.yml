@@ -1,0 +1,15 @@
+# ML Copilot — local development stack (skeleton)
+#
+# No services are defined yet. The backend currently runs directly with
+# uvicorn (see README.md), and the infrastructure this project will depend on
+# is added one commit at a time, together with the code that uses it:
+#
+#   api       FastAPI backend (containerised once a Dockerfile is added)
+#   web       Next.js frontend
+#   postgres  metadata: datasets, runs, experiments
+#   qdrant    vector store for the RAG layer
+#
+# Services are intentionally left out until they are actually implemented, so
+# this file never claims more than the project delivers.
+
+services: {}
