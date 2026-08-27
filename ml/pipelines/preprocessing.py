@@ -13,6 +13,7 @@ configuration's feature groups are ever passed in.
 from __future__ import annotations
 
 import pandas as pd
+from sklearn.base import clone
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import MissingIndicator, SimpleImputer
 from sklearn.pipeline import FeatureUnion, Pipeline
@@ -207,6 +208,19 @@ def build_preprocessor(config: PreprocessingConfig) -> ColumnTransformer:
     )
     preprocessor.set_output(transform="pandas")
     return preprocessor
+
+
+def clone_preprocessor(preprocessor: ColumnTransformer) -> ColumnTransformer:
+    """Return an unfitted copy of a preprocessor with the same configuration.
+
+    ``sklearn.base.clone`` copies constructor parameters but not the output
+    configuration set by ``set_output``, so that is reapplied here. Used when a
+    full ``Pipeline(preprocessing, estimator)`` needs its own preprocessing
+    step to fit on the training rows.
+    """
+    copy = clone(preprocessor)
+    copy.set_output(transform="pandas")
+    return copy
 
 
 def feature_names_of(preprocessor: ColumnTransformer) -> tuple[str, ...]:

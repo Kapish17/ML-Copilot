@@ -133,6 +133,79 @@ def regression_frame(rows: int = 100) -> pd.DataFrame:
     )
 
 
+def learnable_classification_frame(rows: int = 300) -> pd.DataFrame:
+    """A binary dataset where the label really does follow the features.
+
+    The churn fixture above is deliberately random, which is right for testing
+    preprocessing but useless for testing that a model beats a baseline. Here
+    the label is a thresholded function of two numeric columns plus a
+    categorical effect, with a little noise so the problem is not trivially
+    separable.
+    """
+    rng = np.random.default_rng(SEED)
+    income = rng.normal(50_000, 15_000, rows).round(2)
+    tenure = rng.integers(0, 120, rows).astype("float64")
+    segment = rng.choice(["retail", "business", "public"], rows)
+    segment_effect = pd.Series(segment).map(
+        {"retail": 0.0, "business": 1.2, "public": -0.8}
+    )
+
+    signal = (
+        (income - income.mean()) / income.std()
+        + (tenure - tenure.mean()) / tenure.std()
+        + segment_effect.to_numpy()
+        + rng.normal(0, 0.4, rows)
+    )
+    return pd.DataFrame(
+        {
+            "income": income,
+            "tenure_months": tenure,
+            "segment": segment,
+            "renewed": np.where(signal > 0, "yes", "no"),
+        }
+    )
+
+
+def multiclass_frame(rows: int = 300) -> pd.DataFrame:
+    """A three-class dataset with a learnable signal."""
+    rng = np.random.default_rng(SEED)
+    first = rng.normal(0, 1, rows)
+    second = rng.normal(0, 1, rows)
+    score = first + second + rng.normal(0, 0.3, rows)
+    grade = np.where(score < -0.8, "low", np.where(score < 0.8, "medium", "high"))
+    return pd.DataFrame(
+        {
+            "first_measure": first.round(4),
+            "second_measure": second.round(4),
+            "grade": grade,
+        }
+    )
+
+
+def constant_target_classification_frame(rows: int = 40) -> pd.DataFrame:
+    """A dataset whose label never varies, so ROC-AUC cannot be computed."""
+    rng = np.random.default_rng(SEED)
+    return pd.DataFrame(
+        {
+            "value": rng.normal(0, 1, rows).round(4),
+            "other": rng.normal(5, 2, rows).round(4),
+            "label": ["only_class"] * rows,
+        }
+    )
+
+
+def constant_target_regression_frame(rows: int = 40) -> pd.DataFrame:
+    """A dataset whose numeric target never varies, so R² is undefined."""
+    rng = np.random.default_rng(SEED)
+    return pd.DataFrame(
+        {
+            "value": rng.normal(0, 1, rows).round(4),
+            "other": rng.normal(5, 2, rows).round(4),
+            "amount": [7.5] * rows,
+        }
+    )
+
+
 def numeric_frame() -> pd.DataFrame:
     """A tiny numeric dataset with one missing value and a binary target."""
     return pd.DataFrame(

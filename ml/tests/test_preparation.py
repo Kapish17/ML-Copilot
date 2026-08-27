@@ -84,6 +84,35 @@ def test_target_is_separated_from_the_features() -> None:
     assert prepared.y_train.tolist() == frame.loc[prepared.y_train.index, "churn"].tolist()
 
 
+def test_raw_split_frames_are_exposed() -> None:
+    """The untouched source columns behind each split half are kept.
+
+    A trained model is fitted on these, which is what lets it accept raw
+    feature rows later instead of a pre-transformed matrix.
+    """
+    frame = classification_frame()
+    prepared = prepare_dataset(frame, _classification_config())
+
+    assert list(prepared.X_train_raw.columns) == list(
+        _classification_config().feature_columns
+    )
+    assert list(prepared.X_train_raw.index) == list(prepared.X_train.index)
+    assert list(prepared.X_test_raw.index) == list(prepared.X_test.index)
+    assert "renewed" not in prepared.X_train_raw.columns
+    assert "churn" not in prepared.X_train_raw.columns
+
+
+def test_raw_split_frames_hold_original_values() -> None:
+    """The raw frames are the source data, not a transformed copy."""
+    frame = classification_frame()
+    prepared = prepare_dataset(frame, _classification_config())
+
+    assert prepared.X_train_raw["contract"].dropna().isin(
+        frame["contract"].dropna().unique()
+    ).all()
+    assert prepared.X_train_raw["age"].isna().sum() > 0, "gaps are still present"
+
+
 def test_target_never_reaches_a_transformer() -> None:
     """The fitted preprocessor was never shown the target column."""
     prepared = prepare_dataset(classification_frame(), _classification_config())

@@ -1,7 +1,12 @@
 # ML Copilot — ML Layer
 
-Preprocessing and feature engineering: everything between a profiled dataset
-and model training. Model training itself is **not** implemented yet.
+Everything between a profiled dataset and a chosen model: feature
+configuration, leakage-safe preprocessing, model training, evaluation, baseline
+comparison and model selection.
+
+**Not implemented:** hyperparameter optimisation, explainability (SHAP),
+experiment tracking (MLflow), model persistence, LLM/RAG/agent integration.
+Trained models live in memory for the lifetime of the process.
 
 ## Format-agnostic by design
 
@@ -10,11 +15,13 @@ never sees a file, a path, an upload, or any CSV-specific object — passing
 anything other than a DataFrame raises an error rather than being coerced.
 
 ```
-ingestion adapter  ->  DataFrame  ->  profiling  ->  configuration  ->  preprocessing  ->  training
-   (CSV today;                                                                            (Commit 4)
-    Excel, JSON,
-    Parquet, SQL,
-    API planned)
+ingestion adapter -> DataFrame -> profiling -> configuration -> preprocessing
+   (CSV today;                                                        |
+    Excel, JSON,                                                      v
+    Parquet, SQL,                        model registry -> training -> evaluation
+    API planned)                                                      |
+                                                                      v
+                                              comparison -> best model
 ```
 
 CSV is the only ingestion format implemented today. Adding Excel, JSON,
@@ -42,8 +49,15 @@ ml/
 │   ├── preparation.py   Validate → split → fit on train → transform
 │   └── result.py        PreparedDataset, the structured outcome
 ├── evaluation/
-│   └── splitting.py     Train/test split and target-distribution reporting
-├── models/              Empty — estimators arrive in a later commit
+│   ├── splitting.py     Train/test split and target-distribution reporting
+│   └── metrics.py       Task metrics, their directions, the primary metric
+├── models/
+│   ├── registry.py      Which estimators exist and how to build them
+│   ├── spec.py          The validated request for one training run
+│   ├── baselines.py     Naive reference models and the improvement over them
+│   ├── training.py      Fitting Pipeline(preprocessing, estimator)
+│   ├── comparison.py    Running several models and ranking them
+│   └── result.py        TrainedModel, the outcome of one run
 ├── tests/               Synthetic-data tests, including leakage proofs
 └── requirements.txt
 ```
@@ -67,9 +81,23 @@ config = inferred.config.with_overrides(
 prepared = prepare_dataset(frame, config, decisions=inferred.decisions)
 
 prepared.X_train        # transformed training features (DataFrame, named)
+prepared.X_train_raw    # the source columns behind them, untransformed
 prepared.y_train        # untouched target values
 prepared.feature_names  # names after encoding and expansion
 prepared.summary()      # JSON-friendly description of the whole run
+```
+
+Then train and choose a model:
+
+```python
+from ml import compare_models, select_best_model, train_model
+
+trained = train_model(prepared, "random_forest_classifier")
+trained.predict(raw_rows)          # raw columns in, predictions out
+trained.summary()                  # JSON-friendly, no sklearn objects
+
+comparison = compare_models(prepared)
+best = select_best_model(comparison)
 ```
 
 A configuration can also be written by hand, without a profile:
@@ -223,20 +251,192 @@ one the data has. Commit 5/6 can act on these numbers.
 ## Result object
 
 `PreparedDataset` carries both the model-ready objects and the account of how
-they were produced: `X_train`, `X_test`, `y_train`, `y_test`, the fitted
-`preprocessor`, `feature_names`, `feature_groups`, `selected_columns`,
-`excluded_columns`, `identifier_columns`, `column_decisions`, row counts,
+they were produced: `X_train`, `X_test`, `X_train_raw`, `X_test_raw`,
+`y_train`, `y_test`, the fitted `preprocessor`, `feature_names`,
+`feature_groups`, `selected_columns`, `excluded_columns`,
+`identifier_columns`, `column_decisions`, row counts,
 `rows_dropped_missing_target`, `stratified` and the target distributions.
+
+The `_raw` frames are the untransformed source columns behind each split half.
+They are what a full `Pipeline(preprocessing, estimator)` is fitted on, so a
+trained model can accept raw feature rows rather than a transformed matrix.
 
 `prepared.summary()` is the boundary for anything leaving the ML layer: it
 returns only JSON-friendly values and deliberately omits the fitted estimator
 and the data frames, so a fitted sklearn object never has to appear in an API
 response.
 
+---
+
+## Model training
+
+### Supported models
+
+A small, deliberate suite rather than a long list. Every entry is a
+`ModelDefinition` in `models/registry.py` carrying a stable identifier, a
+display name, its task, its factory and its default parameters.
+
+| Identifier | Model | Task | Notes |
+| --- | --- | --- | --- |
+| `logistic_regression` | Logistic Regression | classification | Linear baseline; readable coefficients |
+| `random_forest_classifier` | Random Forest Classifier | classification | Robust with little tuning |
+| `hist_gradient_boosting_classifier` | Histogram Gradient Boosting Classifier | classification | Usually strongest on tabular data |
+| `linear_regression` | Linear Regression | regression | Ordinary least squares |
+| `random_forest_regressor` | Random Forest Regressor | regression | Bagged trees |
+| `hist_gradient_boosting_regressor` | Histogram Gradient Boosting Regressor | regression | Boosted trees |
+
+The registry is immutable: `default_registry()` builds a fresh instance each
+call and `registry.extend(definition)` returns a new registry. Adding XGBoost
+or LightGBM later means appending a definition — `train_model` does not change.
+
+### How training works
+
+`train_model(prepared, spec)` validates the request against the registry and
+the dataset's task, builds the estimator, wraps it behind the preprocessing,
+fits, predicts and scores:
+
+```
+raw feature rows -> preprocessing -> estimator -> prediction
+```
+
+The trained artefact is a full `sklearn.pipeline.Pipeline` whose first step is
+a fresh copy of the configured preprocessing, fitted here on the training rows
+alone. A transformed matrix is never the only artefact, so the finished model
+accepts the original columns — gaps and unseen categories included — and
+applies exactly the transformations it was trained with.
+
+`spec` may be a registry identifier for defaults, or a `ModelSpec`:
+
+| Field | Purpose |
+| --- | --- |
+| `model_name` | Registry identifier |
+| `task_type` | Optional; checked against the registry and the dataset |
+| `hyperparameters` | Overrides on top of the model's defaults |
+| `random_state` | Seed; defaults to the seed the dataset was split with |
+| `primary_metric` | Metric this model is ranked by |
+
+Invalid requests fail before any fitting, naming the valid options:
+unknown model, incompatible task, unaccepted hyperparameter, unknown metric.
+Hyperparameter *names* are checked against the estimator's own parameter list;
+their *values* are left to scikit-learn, which validates them properly at fit
+time and whose failure is re-raised as `ModelTrainingError`.
+
+### Metrics
+
+Every metric declares whether higher or lower is better, and a metric that
+cannot be computed is reported as unavailable with the reason rather than
+crashing or returning a meaningless number.
+
+**Classification** — binary problems use `average="binary"` against a positive
+class (the last label in sorted order, reported explicitly); three or more
+classes use macro averaging, so no class dominates. The averaging used, the
+class count, the class distribution and the confusion matrix all come back with
+the scores, because a number like "F1 = 0.82" cannot be read without them.
+
+| Metric | Direction | Notes |
+| --- | --- | --- |
+| `accuracy` | higher is better | Misleading on imbalanced data; never the only metric reported |
+| `precision` | higher is better | |
+| `recall` | higher is better | |
+| `f1` | higher is better | Default primary metric |
+| `roc_auc` | higher is better | Needs probabilities; one-vs-rest macro for multiclass |
+
+ROC-AUC is skipped — with the reason — when the model exposes no
+probabilities, when the test set holds a single class, or when it contains a
+class the model never saw.
+
+**Regression** — MAE, MSE and RMSE are errors, so **lower is better**; R² is a
+share of explained variance, so **higher is better**, with 0 meaning "no better
+than always predicting the mean".
+
+| Metric | Direction | Notes |
+| --- | --- | --- |
+| `mae` | lower is better | Average absolute error, in the target's units |
+| `mse` | lower is better | Punishes large mistakes |
+| `rmse` | lower is better | Back in the target's units; default primary metric |
+| `r2` | higher is better | Skipped when the target does not vary |
+
+### Baseline comparison
+
+A score means nothing without a reference. Every trained model is measured
+against a deliberately naive one on the same test rows, through the same
+pipeline and the same metric code:
+
+- **classification** — always predict the majority training class
+- **regression** — always predict the training mean
+
+`absolute_improvement` and `relative_improvement` are signed so that
+**positive always means better than the baseline**, whichever direction the
+metric runs in. For RMSE, an improvement of 12.0 means 12.0 less error.
+
+On a synthetic churn-style dataset (300 rows, majority class 55%):
+
+```
+baseline f1=0.710 accuracy=0.550
+
+model                                      f1    acc  roc_auc  vs base
+logistic_regression                     0.925  0.917    0.987   +0.216
+random_forest_classifier                0.912  0.900    0.977   +0.202
+hist_gradient_boosting_classifier       0.899  0.883    0.977   +0.189
+```
+
+The baseline's F1 of 0.710 is the point: without it, 0.925 has no scale.
+
+### Comparison and selection
+
+`compare_models(prepared)` trains every registered model for the dataset's
+task, sharing one baseline. Each model runs inside its own error boundary, so a
+model that fails is recorded with its error and the rest still run — one broken
+estimator never sinks the run.
+
+`select_best_model(comparison)` returns the winner, reading the primary
+metric's declared direction: the **maximum** for a score metric, the
+**minimum** for an error metric. Models that failed, or that could not produce
+the primary metric, are not candidates; if nothing is rankable it raises
+`NoSuccessfulModelError` with the collected errors rather than returning
+`None`.
+
+The primary metric is configurable per run
+(`compare_models(prepared, primary_metric="r2")`) or per model
+(`ModelSpec(..., primary_metric="mae")`).
+
+### Result
+
+`TrainedModel` carries the fitted `pipeline`, the `spec`, `metrics`,
+`baseline`, `baseline_comparison`, `primary_metric`, `feature_names`,
+`dataset` information and `training_seconds`. `trained.summary()` is the
+boundary for anything leaving the ML layer — plain JSON-friendly values, with
+the pipeline deliberately omitted, so a fitted estimator has no route into an
+API response. `ModelComparison.as_table()` and `.summary()` do the same for a
+comparison run.
+
+### Programmatic API
+
+Deterministic, structured functions, shaped so a later agent can call them as
+tools. **No agent exists yet.**
+
+| Function | Returns |
+| --- | --- |
+| `list_available_models(task_type=None)` | Serialisable records of every registered model |
+| `get_model_spec(model_name, ...)` | A validated `ModelSpec` |
+| `train_model(prepared, spec)` | A `TrainedModel` |
+| `compare_models(prepared, ...)` | A ranked `ModelComparison` |
+| `select_best_model(comparison)` | The winning `ComparisonEntry` |
+
+### Reproducibility
+
+Estimators that accept a `random_state` are given one: the specification's if
+set, otherwise the seed the dataset was split with, so a whole run is
+reproducible from a single number. Estimators that take no seed — linear
+regression — are never handed one. Repeated training on the same prepared
+dataset gives identical predictions and identical metrics.
+
+---
+
 ## Errors
 
 Plain Python exceptions with no HTTP meaning — the API layer translates them
-when preprocessing is eventually exposed over HTTP.
+when the ML layer is eventually exposed over HTTP.
 
 | Error | Raised when |
 | --- | --- |
@@ -246,7 +446,13 @@ when preprocessing is eventually exposed over HTTP.
 | `DuplicateColumnAssignmentError` | A column is in two feature groups |
 | `EmptyFeatureSetError` | No feature columns remain |
 | `ConfigurationError` | An invalid strategy or split parameter |
-| `InsufficientDataError` | Too few labelled rows to split |
+| `InsufficientDataError` | Too few labelled rows to split, or an empty split half |
+| `UnknownModelError` | The model is not in the registry |
+| `IncompatibleTaskError` | The model does not solve the dataset's task |
+| `InvalidHyperparameterError` | A hyperparameter the estimator does not accept |
+| `InvalidMetricError` | The metric does not exist for the task |
+| `ModelTrainingError` | The estimator failed while fitting or predicting |
+| `NoSuccessfulModelError` | No model in a comparison produced a rankable score |
 
 ## Setup and tests
 
@@ -261,6 +467,29 @@ external dataset or touches the network.
 
 ## Current limitations
 
+**Modelling**
+
+- **No hyperparameter optimisation.** Models run on registry defaults plus any
+  hyperparameters a caller supplies. There is no search, no tuning, no Optuna.
+- **No cross-validation.** Scores come from a single held-out test set, so they
+  carry the variance of one split. The splitting functions are written so a
+  cross-validation strategy can reuse them.
+- **No model persistence.** Trained models live in memory for the lifetime of
+  the process; nothing is written to disk or to a registry.
+- **No explainability.** Feature names are preserved for it, but SHAP and
+  feature importance are not implemented.
+- **Six models only.** No XGBoost or LightGBM yet; the registry is designed so
+  adding them is one definition.
+- The test set is used for the reported metrics *and* for choosing the best
+  model, which optimistically biases the winner's score. A separate validation
+  split belongs with cross-validation.
+- The binary positive class is the last label in sorted order. It is reported
+  explicitly, but it is a convention rather than a choice the caller makes.
+- `training_seconds` is wall-clock time on the machine that ran it — useful for
+  relative comparison, not a benchmark.
+
+**Preprocessing**
+
 - Text columns are excluded rather than encoded; a text representation comes later.
 - Categorical columns above `max_categorical_cardinality` are excluded rather than grouped or target-encoded.
 - One-hot encoding keeps every category (no `drop="first"`), which suits tree models and explanations but is collinear for plain linear models.
@@ -268,3 +497,25 @@ external dataset or touches the network.
 - Rows with a missing target are removed, since a supervised model cannot use them. The count is reported in the result.
 - With `task_type="auto"` and no profile, whether a target is discrete is decided from its dtype and distinct count — supply the task explicitly when that matters.
 - The whole dataset is held in memory; there is no out-of-core path.
+
+## Future model expansion
+
+Adding a model is adding a `ModelDefinition`:
+
+```python
+registry = default_registry().extend(
+    ModelDefinition(
+        identifier="xgboost_classifier",
+        display_name="XGBoost Classifier",
+        task_type=TaskType.CLASSIFICATION,
+        factory=XGBClassifier,
+        default_parameters={"n_estimators": 300},
+        supports_random_state=True,
+        supports_probabilities=True,
+    )
+)
+compare_models(prepared, registry=registry)
+```
+
+`train_model`, the metrics, the baselines, the ranking and the result objects
+all work unchanged, because none of them knows which estimators exist.

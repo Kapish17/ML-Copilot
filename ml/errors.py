@@ -51,3 +51,31 @@ class EmptyFeatureSetError(ConfigurationError):
 
 class InsufficientDataError(MLError):
     """There are too few usable rows to build a train/test split."""
+
+
+class ModelError(MLError):
+    """Base class for failures in the model training and evaluation layer."""
+
+
+class UnknownModelError(ModelError):
+    """The requested model is not in the registry."""
+
+
+class IncompatibleTaskError(ModelError):
+    """The requested model does not support the dataset's task type."""
+
+
+class InvalidHyperparameterError(ModelError):
+    """A hyperparameter is not accepted by the requested estimator."""
+
+
+class InvalidMetricError(ModelError):
+    """The requested metric does not exist for the task type."""
+
+
+class ModelTrainingError(ModelError):
+    """An estimator failed while being fitted or while predicting."""
+
+
+class NoSuccessfulModelError(ModelError):
+    """No model in a comparison run finished successfully."""

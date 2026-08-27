@@ -199,6 +199,8 @@ def prepare_dataset(
         preprocessor=preprocessor,
         X_train=X_train,
         X_test=X_test,
+        X_train_raw=split.X_train,
+        X_test_raw=split.X_test,
         y_train=split.y_train,
         y_test=split.y_test,
         feature_names=feature_names_of(preprocessor),

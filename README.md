@@ -7,9 +7,11 @@ follow-up questions in natural language — with every run tracked and every
 answer grounded in retrievable context.
 
 > **Status: early development.** The backend can ingest a CSV file and return a
-> full dataset profile, and the ML layer can turn a profiled dataset into
-> model-ready training and test data. **No model is trained yet.** Everything
-> marked *planned* below is not implemented.
+> full dataset profile; the ML layer turns a profiled dataset into model-ready
+> data, trains a suite of models, scores them against a naive baseline and
+> picks the best one. **There is no hyperparameter optimisation, no
+> explainability, no experiment tracking, no LLM, no RAG and no agent.**
+> Everything marked *planned* below is not implemented.
 
 ---
 
@@ -28,7 +30,8 @@ answer grounded in retrievable context.
 | --- | --- | --- |
 | Dataset ingestion & profiling | CSV validation, structural profile, data-quality findings, target analysis | **implemented** |
 | Preprocessing & feature engineering | Feature selection, imputation, encoding, scaling, datetime expansion, leakage-safe train/test split | **implemented** |
-| Model training & evaluation | Model selection, training, metrics | planned |
+| Model training & evaluation | Six-model suite, task-appropriate metrics, baseline comparison, best-model selection | **implemented** |
+| Hyperparameter optimisation | Automated search over model settings | planned |
 | Explainable AI | Global and per-prediction feature attributions (SHAP) | planned |
 | Retrieval-augmented answers | Grounded responses over docs and past experiment results | planned |
 | Agentic workflows | Multi-step, tool-using analysis planned and executed by an agent | planned |
@@ -50,7 +53,7 @@ answer grounded in retrievable context.
    ┌───────────▼──┐ ┌───▼───────┐ ┌▼──────────────┐
    │  ML layer    │ │ RAG layer │ │  Agent layer  │
    │ preprocessing│ │ ingestion,│ │ tools,        │
-   │ ✓ training,  │ │ retrieval,│ │ workflows,    │
+   │ ✓ training ✓ │ │ retrieval,│ │ workflows,    │
    │ explainability│ │ prompts  │ │ state         │
    │ (planned)    │ │ (planned) │ │  (planned)    │
    └───────┬──────┘ └─────┬─────┘ └───────┬───────┘
@@ -73,7 +76,9 @@ layer.
 | Backend API | Python, FastAPI, Uvicorn | **implemented** |
 | Data handling | pandas | **implemented** |
 | Preprocessing | scikit-learn (`Pipeline`, `ColumnTransformer`) | **implemented** |
-| Model training | scikit-learn estimators | planned |
+| Model training | scikit-learn estimators | **implemented** |
+| Gradient boosting libraries | XGBoost, LightGBM | planned |
+| Hyperparameter search | Optuna | planned |
 | Explainability | SHAP | planned |
 | Experiment tracking | MLflow | planned |
 | LLM integration | Provider-agnostic LLM client | planned |
@@ -473,8 +478,105 @@ per-column decisions, row counts and target distributions.
 fitted estimator and the data frames, so ML-internal objects never need to
 appear in an API response.
 
-Preprocessing is **not exposed over HTTP yet** — it is a library API in this
-commit.
+Preprocessing is **not exposed over HTTP yet** — it is a library API.
+
+---
+
+## Model training and evaluation
+
+On top of a `PreparedDataset`, the ML layer trains models, scores them against
+a naive baseline and ranks them.
+
+```python
+from ml import compare_models, select_best_model, train_model
+
+trained = train_model(prepared, "random_forest_classifier")
+trained.predict(raw_rows)     # raw columns in, predictions out
+
+comparison = compare_models(prepared)
+best = select_best_model(comparison)
+```
+
+### Supported models
+
+| Identifier | Model | Task |
+| --- | --- | --- |
+| `logistic_regression` | Logistic Regression | classification |
+| `random_forest_classifier` | Random Forest Classifier | classification |
+| `hist_gradient_boosting_classifier` | Histogram Gradient Boosting Classifier | classification |
+| `linear_regression` | Linear Regression | regression |
+| `random_forest_regressor` | Random Forest Regressor | regression |
+| `hist_gradient_boosting_regressor` | Histogram Gradient Boosting Regressor | regression |
+
+A small, deliberate suite. The registry is immutable and additive, so XGBoost
+and LightGBM can be added later as definitions without touching the training
+code.
+
+### The trained artefact preserves preprocessing
+
+Training fits a full pipeline, not a bare estimator:
+
+```
+raw feature rows -> preprocessing -> estimator -> prediction
+```
+
+The preprocessing step inside the model is fitted on the training rows alone,
+so the finished model accepts the original columns — missing values and unseen
+categories included — and applies exactly the transformations it learned. A
+transformed matrix is never the only artefact.
+
+### Metrics
+
+Every metric declares whether higher or lower is better, and one that cannot be
+computed is reported as unavailable with the reason rather than crashing.
+
+**Classification** — accuracy, precision, recall, F1 and ROC-AUC, plus the
+confusion matrix, class count and class distribution. Binary problems use
+binary averaging against an explicitly reported positive class; three or more
+classes use macro averaging. ROC-AUC is skipped when the model exposes no
+probabilities or the test set holds a single class. Accuracy is never reported
+alone.
+
+**Regression** — MAE, MSE and RMSE (errors: **lower is better**) and R²
+(explained variance: **higher is better**, 0 = no better than the mean). R² is
+skipped when the target does not vary.
+
+### Baseline comparison
+
+"F1 = 0.82" means nothing on its own. Every model is measured against a
+deliberately naive one on the same test rows: the **majority class** for
+classification, the **training mean** for regression. Improvements are signed
+so positive always means better than the baseline, whichever way the metric
+runs.
+
+```
+baseline f1=0.710 accuracy=0.550
+
+model                                      f1    acc  roc_auc  vs base
+logistic_regression                     0.925  0.917    0.987   +0.216
+random_forest_classifier                0.912  0.900    0.977   +0.202
+hist_gradient_boosting_classifier       0.899  0.883    0.977   +0.189
+```
+
+### Comparison and selection
+
+`compare_models` trains every registered model for the task against one shared
+baseline, each inside its own error boundary — a model that fails is recorded
+with its error and the others still run. `select_best_model` reads the primary
+metric's declared direction: the **maximum** for a score metric, the
+**minimum** for an error metric. The primary metric defaults to F1 for
+classification and RMSE for regression, and is configurable per run or per
+model.
+
+### Not implemented
+
+**No hyperparameter optimisation** — models run on their defaults plus whatever
+a caller supplies. No cross-validation, no model persistence, no SHAP, no
+MLflow, no XGBoost or LightGBM. Trained models live in memory only.
+
+Training is **not exposed over HTTP yet** — it is a library API, with
+`summary()` as the boundary that keeps sklearn objects out of any future
+response.
 
 ---
 
@@ -493,11 +595,15 @@ commit.
   be inferred from the profile and overridden explicitly.
 - Reproducible, leakage-safe train/test splitting with stratification for
   classification.
+- A six-model training suite whose artefact is a full preprocessing pipeline,
+  with task-appropriate metrics, naive baselines, fault-tolerant model
+  comparison and direction-aware best-model selection.
 - Test suites covering the backend service, the API contract and the ML layer.
 
 **Not implemented yet**
 
-- Model training, evaluation and explainability
+- Hyperparameter optimisation and cross-validation
+- Model persistence and explainability (SHAP)
 - Ingestion formats other than CSV (Excel, JSON, Parquet, SQL, APIs)
 - RAG ingestion and retrieval
 - LLM integration and agentic workflows
@@ -588,8 +694,8 @@ an external dataset or touches the network.
 
 1. ~~**Project foundation** — repository structure, FastAPI service, tests~~
 2. ~~**Dataset upload and profiling** — validation, profile, data quality, target analysis~~
-3. **Preprocessing and feature engineering** — configuration, pipeline, leakage-safe split *(current)*
-4. Model training and evaluation
+3. ~~**Preprocessing and feature engineering** — configuration, pipeline, leakage-safe split~~
+4. **Model training and evaluation** — registry, metrics, baselines, comparison, selection *(current)*
 5. Explainability with SHAP
 6. Experiment tracking
 7. RAG layer over documentation and run history

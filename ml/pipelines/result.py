@@ -23,12 +23,22 @@ from ml.features.types import TaskType
 
 @dataclass(frozen=True)
 class PreparedDataset:
-    """Model-ready data plus a full account of how it was produced."""
+    """Model-ready data plus a full account of how it was produced.
+
+    Both the transformed features (``X_train``, ``X_test``) and the untouched
+    source columns behind them (``X_train_raw``, ``X_test_raw``) are kept. The
+    transformed frames are what an estimator consumes directly; the raw frames
+    are what a full ``Pipeline(preprocessing, estimator)`` is fitted on, so a
+    trained model can accept raw feature rows later instead of pre-transformed
+    matrices.
+    """
 
     config: PreprocessingConfig
     preprocessor: ColumnTransformer
     X_train: pd.DataFrame
     X_test: pd.DataFrame
+    X_train_raw: pd.DataFrame
+    X_test_raw: pd.DataFrame
     y_train: pd.Series
     y_test: pd.Series
     feature_names: tuple[str, ...]
