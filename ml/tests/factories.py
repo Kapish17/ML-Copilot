@@ -12,6 +12,7 @@ profiling output is exercised separately in ``test_profile_integration.py``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
@@ -267,4 +268,113 @@ def categorical_frame() -> pd.DataFrame:
             ],
             "label": ["a", "b", "a", "b", "a", "b", "a", "b"],
         }
+    )
+
+
+def experiment_run(
+    *,
+    experiment_id: str = "exp_0123456789ab_20260101T000000Z_0001",
+    configuration_hash: str = "0123456789ab",
+    name: str = "test run",
+    fingerprint: str = "abcdef0123456789",
+    target_column: str = "renewed",
+    task_type: str = "classification",
+    primary_metric: str = "f1",
+    model_name: str = "logistic_regression",
+    strategy: str = "cross_validation",
+    selection_score: float | None = 0.81,
+    selection_score_std: float | None = 0.02,
+    test_score: float | None = 0.80,
+    baseline_score: float | None = 0.71,
+    created_at: datetime | None = None,
+    tags: tuple[str, ...] = (),
+):
+    """Build a small ExperimentRun without running the whole pipeline.
+
+    The store and comparison tests care about the record's shape and its
+    metadata, not about how a real model scored, so they use this rather than
+    training anything.
+    """
+    from ml.experiments.run import (
+        DatasetSection,
+        EnvironmentSection,
+        EvaluationSection,
+        ExperimentRun,
+        ExplainabilitySection,
+        PreprocessingSection,
+        SelectionSection,
+    )
+
+    improvement = (
+        None
+        if test_score is None or baseline_score is None
+        else round(test_score - baseline_score, 6)
+    )
+    return ExperimentRun(
+        experiment_id=experiment_id,
+        configuration_hash=configuration_hash,
+        created_at=created_at or datetime(2026, 1, 1, tzinfo=timezone.utc),
+        name=name,
+        tags=tags,
+        dataset=DatasetSection(
+            fingerprint=fingerprint,
+            row_count=300,
+            column_count=4,
+            target_column=target_column,
+            task_type=task_type,
+            columns=("income", "tenure_months", "segment", target_column),
+            dtypes={"income": "float64"},
+            source_format="csv",
+        ),
+        preprocessing=PreprocessingSection(
+            config={"scaling_strategy": "standard"},
+            feature_groups={"numeric": ["income", "tenure_months"]},
+            selected_columns=("income", "tenure_months"),
+            transformed_feature_names=("income", "tenure_months"),
+            train_row_count=240,
+            test_row_count=60,
+            test_size=0.2,
+            random_state=42,
+            stratified=True,
+        ),
+        selection=SelectionSection(
+            strategy=strategy,
+            folds=5,
+            primary_metric=primary_metric,
+            primary_metric_direction=(
+                "higher_is_better" if primary_metric != "rmse" else "lower_is_better"
+            ),
+            candidate_models=(model_name,),
+            candidates=({"model_name": model_name, "status": "succeeded"},),
+            selected_model=model_name,
+            selection_score=selection_score,
+            selection_score_std=selection_score_std,
+            scored_on="training_folds",
+        ),
+        evaluation=EvaluationSection(
+            primary_metric=primary_metric,
+            primary_metric_value=test_score,
+            metrics={primary_metric: test_score} if test_score is not None else {},
+            baseline_identifier="majority_class_baseline",
+            baseline_metrics=(
+                {primary_metric: baseline_score} if baseline_score is not None else {}
+            ),
+            baseline_comparison={"absolute_improvement": improvement},
+            test_row_count=60,
+            is_unbiased=True,
+        ),
+        explainability=ExplainabilitySection(
+            status="available",
+            method="shap",
+            explainer="LinearExplainer",
+            feature_importances=({"feature": "income", "importance": 0.5, "rank": 1},),
+            sample_count=240,
+            feature_count=2,
+        ),
+        environment=EnvironmentSection(
+            python_version="3.11.0",
+            platform="Linux-x86_64",
+            packages={"pandas": "3.0.5"},
+            random_state=42,
+        ),
     )

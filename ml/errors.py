@@ -113,3 +113,44 @@ class EmptyExplanationDataError(ExplainabilityError):
 
 class InvalidExplanationRowError(ExplainabilityError):
     """A local explanation was asked for something other than a single row."""
+
+
+class ExperimentError(MLError):
+    """Base class for failures in the experiment-tracking layer."""
+
+
+class SerializationError(ExperimentError):
+    """A value cannot be stored in an experiment record.
+
+    Raised rather than quietly writing something useless — a fitted pipeline or
+    a SHAP explainer has no place in an experiment record, and a silent
+    ``str()`` of one would bloat the file while telling nobody anything.
+    """
+
+
+class InvalidExperimentIdError(ExperimentError):
+    """An experiment identifier is malformed or unsafe to use as a path."""
+
+
+class ExperimentNotFoundError(ExperimentError):
+    """No experiment is stored under the requested identifier."""
+
+
+class MalformedExperimentError(ExperimentError):
+    """A stored experiment record could not be read."""
+
+
+class UnsupportedSchemaVersionError(ExperimentError):
+    """A stored record uses a schema version this code cannot read."""
+
+
+class InvalidExperimentRecordError(ExperimentError):
+    """A stored record is missing a required field or has the wrong type."""
+
+
+class IncomparableExperimentsError(ExperimentError):
+    """Runs cannot be ranked together because their metrics differ.
+
+    Ranking an F1 against an RMSE is meaningless, so it is refused rather than
+    producing a confidently wrong ordering.
+    """

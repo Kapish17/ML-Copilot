@@ -11,9 +11,10 @@ answer grounded in retrievable context.
 > data, cross-validates a suite of models on the training rows, picks a winner
 > without ever reading the test set, retrains it on the full training data,
 > measures it once on the untouched test set, and explains what the chosen
-> model is doing with SHAP. **There is no hyperparameter optimisation, no
-> experiment tracking, no LLM, no RAG and no agent.** Everything marked
-> *planned* below is not implemented.
+> model is doing with SHAP, and records the whole run so it can be found and
+> compared later. **There is no hyperparameter optimisation, no MLflow, no
+> database, no LLM, no RAG and no agent.** Experiment history is kept in local
+> JSON files. Everything marked *planned* below is not implemented.
 
 ---
 
@@ -38,7 +39,7 @@ answer grounded in retrievable context.
 | Explainable AI | Global and per-prediction feature attributions (SHAP) | **implemented** |
 | Retrieval-augmented answers | Grounded responses over docs and past experiment results | planned |
 | Agentic workflows | Multi-step, tool-using analysis planned and executed by an agent | planned |
-| Experiment tracking | Reproducible run history, parameters, metrics and artifacts | planned |
+| Experiment tracking | Reproducible run history — dataset fingerprint, configuration, metrics and explanations, stored locally as JSON | **implemented** (MLflow not implemented) |
 | Web interface | Dataset upload, run monitoring, results and chat | planned |
 
 ## High-level architecture
@@ -62,8 +63,10 @@ answer grounded in retrievable context.
    └───────┬──────┘ └─────┬─────┘ └───────┬───────┘
            │              │               │
    ┌───────▼──────┐ ┌─────▼─────┐ ┌───────▼───────┐
-   │ Experiment   │ │  Qdrant   │ │  PostgreSQL   │   (planned)
+   │ Experiment   │ │  Qdrant   │ │  PostgreSQL   │
    │  tracking    │ │  vectors  │ │   metadata    │
+   │ local JSON ✓ │ │ (planned) │ │   (planned)   │
+   │ MLflow: no   │ │           │ │               │
    └──────────────┘ └───────────┘ └───────────────┘
 ```
 
@@ -83,7 +86,8 @@ layer.
 | Gradient boosting libraries | XGBoost, LightGBM | planned |
 | Hyperparameter search | Optuna | planned |
 | Explainability | SHAP | **implemented** |
-| Experiment tracking | MLflow | planned |
+| Experiment tracking (storage) | Local JSON files behind an `ExperimentStore` interface | **implemented** |
+| Experiment tracking (server) | MLflow | **not implemented** |
 | LLM integration | Provider-agnostic LLM client | planned |
 | Retrieval | Qdrant vector database | planned |
 | Agents | Orchestrated multi-step workflows | planned |
@@ -97,7 +101,7 @@ layer.
 ml-copilot/
 ├── backend/       FastAPI service (api, core, models, schemas, services, tests)
 ├── frontend/      Next.js application (placeholder)
-├── ml/            Preprocessing and feature engineering; training comes later
+├── ml/            Preprocessing, training, selection, explainability, experiment tracking
 ├── rag/           Ingestion, retrieval and prompt assets
 ├── agents/        Agent tools, workflows and state
 ├── data/          Local datasets — raw and processed (git-ignored contents)
@@ -799,6 +803,79 @@ out of any future response.
 
 ---
 
+## Experiment tracking
+
+Everything above is ephemeral: a pipeline run measures a winner, explains it,
+and then the process exits and the result is gone. Experiment tracking gives
+each complete run a small, readable, permanent record, so runs can be compared,
+reproduced, and — in a later commit — read back by an assistant.
+
+> **MLflow is NOT implemented yet.** Neither is PostgreSQL or any other
+> database. Records are JSON files written into a local directory. This is a
+> deliberate intermediate architecture, not a shortcut: local JSON needs no
+> server, no migrations and no dependency, and stays readable in an editor
+> while the pipeline is still changing shape. Storage sits behind an
+> `ExperimentStore` interface, so MLflow or a database replaces it later
+> without touching anything above.
+
+### What is recorded
+
+One `ExperimentRun` per complete pass through the pipeline:
+
+- **identity** — schema version, experiment id, configuration hash, timestamp, name, description, tags
+- **dataset** — content fingerprint, shape, columns and dtypes, target, task, source format, data-quality findings
+- **preprocessing** — configuration, feature groups, per-column decisions, transformed feature names, split sizes, seed, stratification
+- **selection** — strategy, folds, every candidate and its score, the winner, the selection score and spread, and whether test data was touched
+- **evaluation** — the single unbiased test measurement, the baseline and the improvement over it
+- **explainability** — method, explainer and ranked feature importances
+- **environment** — Python version, platform, library versions, random seed
+
+**Not recorded:** the dataset itself, the fitted pipeline, and the SHAP
+explainer. Those are model artefacts, not history; the serialiser refuses them
+rather than trusting callers to leave them out. A typical record is about 6 KiB.
+
+### A dataset is identified by content
+
+The fingerprint is a SHA-256 digest over the column names, dtypes and values —
+never the filename or path. The same table exported twice under different names
+fingerprints identically, so history survives a file being renamed, moved or
+re-exported from another format. An edited value, an added row, a renamed
+column or a different row order all make it a different dataset; the DataFrame
+index does not.
+
+### An experiment id is not just a timestamp
+
+```
+exp_84a8d53a1f5f_20260828T134042Z_b8c1
+    └ configuration  └ UTC time     └ collision suffix
+```
+
+The first segment hashes the *inputs* — dataset fingerprint, preprocessing
+settings, split, seed, candidate models, selection rule — and nothing the run
+concluded. So an unchanged setup re-run tomorrow produces the same
+configuration hash with a distinct id, which is what makes "have I run this
+before?" answerable.
+
+### Reading history back
+
+Runs can be filtered by fingerprint, target, task, model, strategy, metric or
+tag, and sorted by time, model or score. Sorting by score reads the metric's own
+declared direction, so the largest F1 wins but the smallest RMSE does.
+Comparison refuses to rank runs judged by different metrics or solving
+different tasks rather than putting **RMSE and F1 in the same column**.
+
+### Safety and integrity
+
+- **Atomic writes.** A record is serialised before the filesystem is touched, then written to a temporary file, `fsync`ed and moved into place with an atomic rename. An interrupted write leaves the previous record intact, never a fragment.
+- **Corruption is contained.** `get` raises on a broken record; `list` skips it with a warning so one bad file cannot hide a history; `verify()` reports exactly what is unreadable.
+- **Path traversal is refused.** Experiment ids are restricted to letters, digits, underscores and hyphens, and the resolved path is confirmed to be inside the store directory — so `../../etc/passwd`, an absolute path or a backslash never becomes a write target.
+- **No secrets are captured.** The environment section records interpreter, platform, library versions and the seed. No hostname, username, file path or environment variable is read, so no API key or token can reach a record.
+- **Versioned records.** Every record carries `"schema_version": "1.0"`; an unknown or missing version is refused rather than half-read.
+
+Experiment tracking is a library API and is **not exposed over HTTP yet**.
+
+---
+
 ## Current implementation status
 
 **Implemented**
@@ -823,16 +900,20 @@ out of any future response.
 - SHAP explainability: ranked global feature importance and signed
   per-prediction contributions over the transformed features, with a
   permutation-importance fallback for models SHAP cannot handle.
+- Experiment tracking: content-based dataset fingerprints, configuration
+  hashes, versioned JSON-safe run records, an `ExperimentStore` interface with
+  a local atomic-write implementation, and filtering, sorting and
+  direction-aware comparison over stored history.
 - Test suites covering the backend service, the API contract and the ML layer.
 
 **Not implemented yet**
 
 - Hyperparameter optimisation (Optuna) and nested cross-validation
-- Model persistence and experiment tracking (MLflow)
+- Model persistence — no fitted pipeline or explainer is written to disk
+- **MLflow** — experiment tracking runs on local JSON files only
 - Ingestion formats other than CSV (Excel, JSON, Parquet, SQL, APIs)
 - RAG ingestion and retrieval
 - LLM integration and agentic workflows
-- Experiment tracking
 - PostgreSQL, Qdrant and any database access
 - Authentication
 - Frontend application
@@ -923,8 +1004,8 @@ an external dataset or touches the network.
 3. ~~**Preprocessing and feature engineering** — configuration, pipeline, leakage-safe split~~
 4. ~~**Model training and evaluation** — registry, metrics, baselines, comparison~~
 5. ~~**Cross-validation and model selection** — k-fold selection, one unbiased test evaluation~~
-6. **Explainability with SHAP** — global importance, local contributions, fallback *(current)*
-7. Experiment tracking
+6. ~~**Explainability with SHAP** — global importance, local contributions, fallback~~
+7. **Experiment tracking** — dataset fingerprints, versioned run records, local persistence, comparison *(current; MLflow deferred)*
 8. RAG layer over documentation and run history
 9. LLM integration
 10. Agentic workflows

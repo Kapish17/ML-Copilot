@@ -3,7 +3,8 @@
 Everything between a profiled dataset and an explained model: feature
 configuration, leakage-safe preprocessing, model training, evaluation, baseline
 comparison, cross-validated model selection, a single final measurement on
-untouched data, and SHAP explanations of what the chosen model is doing.
+untouched data, SHAP explanations of what the chosen model is doing, and a
+persistent record of every run.
 
 > **Cross-validation selects the model; the held-out test set is reserved for
 > the final evaluation.**
@@ -11,10 +12,12 @@ untouched data, and SHAP explanations of what the chosen model is doing.
 > **Explanations describe model behaviour and associations; they do not
 > establish causal relationships.**
 
-**Not implemented:** hyperparameter optimisation (no Optuna), experiment
-tracking (no MLflow), model persistence, XGBoost or LightGBM, and any LLM, RAG
-or agent integration. Trained models live in memory for the lifetime of the
-process.
+**Not implemented:** hyperparameter optimisation (no Optuna), **MLflow**, any
+database (no PostgreSQL), model persistence, XGBoost or LightGBM, and any LLM,
+RAG or agent integration. Experiment tracking is implemented, but against a
+local JSON store written by this package — trained models and SHAP explainers
+themselves live in memory for the lifetime of the process and are never
+written to disk.
 
 ## Format-agnostic by design
 
@@ -83,6 +86,16 @@ ml/
 │   ├── shap_backend.py  Running SHAP and normalising what it returns
 │   ├── permutation.py   The global-only fallback
 │   └── service.py       explain_global, explain_prediction
+├── experiments/
+│   ├── fingerprint.py   Content hash identifying a dataset, not a file
+│   ├── identity.py      Configuration hashes, experiment ids, id validation
+│   ├── serialization.py JSON safety, and what is refused outright
+│   ├── run.py           ExperimentRun and its sections; the record schema
+│   ├── store.py         ExperimentStore protocol, queries, sorting
+│   ├── local_store.py   LocalExperimentStore — one JSON file per run
+│   ├── builder.py       create_experiment_run: composing existing results
+│   ├── comparison.py    Comparing runs on a metric they share
+│   └── runs/            Stored history (git-ignored, created on first save)
 ├── tests/               Synthetic-data tests, including leakage proofs
 └── requirements.txt
 ```
@@ -810,6 +823,257 @@ representative.
 
 ---
 
+## Experiment tracking
+
+### Why it exists
+
+Everything above this section is ephemeral. A pipeline run prepares data,
+cross-validates half a dozen models, measures a winner once on untouched data
+and explains it — and then the process exits and all of it is gone. The next
+run cannot say whether it is better than the last one, whether it even used the
+same data, or whether a change to the configuration helped.
+
+A record fixes that. Each complete pass leaves behind a small, readable
+document: which dataset, prepared how, which models were considered, which won
+and by what rule, how it scored on data it had never seen, and what the
+explanations said. That makes three things possible that were not before —
+comparing runs, reproducing one, and later, letting an assistant read the
+history and answer questions about it.
+
+> **MLflow is NOT implemented yet.** Neither is PostgreSQL, nor any other
+> database. Records are JSON files written by this package into a local
+> directory. That is a deliberate intermediate step, described below.
+
+### What a record contains
+
+`ExperimentRun` is the whole record. It is a frozen dataclass of sections, each
+of which is a summary of something the pipeline already produced:
+
+| Section | Holds |
+| --- | --- |
+| identity | `schema_version`, `experiment_id`, `configuration_hash`, `created_at`, `name`, `description`, `tags` |
+| `dataset` | fingerprint and its algorithm, row and column counts, column names and dtypes, target column, task type, source format, data-quality findings |
+| `preprocessing` | the configuration, feature groups, selected and excluded columns, per-column decisions, transformed feature names, split sizes, seed, stratification |
+| `selection` | strategy, folds, candidate models, every candidate's score, the winner, the selection score and its spread, what it was scored on, and whether test data was involved |
+| `evaluation` | the final metrics on the untouched test set, the baseline and the improvement over it, classification detail, and whether the measurement is unbiased |
+| `explainability` | method, explainer, ranked feature importances, sample and feature counts, and any warnings — `None` when nothing was explained |
+| `environment` | Python version, platform, library versions, random seed |
+
+`headline()` returns a one-line dict for listings; `to_dict()` returns the full
+record; `from_dict()` reads one back with validation.
+
+**What a record never contains.** Not the dataset — only its shape and
+fingerprint. Not the fitted `Pipeline`, and not the SHAP explainer. Those are
+model artefacts, not history: they are large, they are pickles, and they would
+turn a readable document into an opaque blob. The serialiser refuses them
+outright rather than trusting callers to remember (see below).
+
+### Identifying a dataset by content
+
+```python
+from ml.experiments import fingerprint_dataset
+
+fingerprint_dataset(frame).value   # '86494cff7a45cb7f'
+```
+
+A filename is not an identity. The same table gets exported twice under
+different names, moved between folders, re-saved from Excel — and a run
+recorded against `customers_final_v2.csv` tells you nothing about whether it
+used the same rows as the one before it.
+
+So the fingerprint is a SHA-256 digest over the *content*: the column names and
+dtypes, then `pd.util.hash_pandas_object` over each column's values in order.
+It is truncated to 16 hex characters, which is plenty to distinguish the
+datasets one project accumulates.
+
+What changes it and what does not is a design decision, not an accident:
+
+- an edited cell, an added row, a renamed column — **different** dataset
+- the row *order* — **different**, because it changes the train/test split, so
+  it really is a different experiment
+- the DataFrame index — **the same**, since an index is an artefact of loading
+- the file path, name, or format it was read from — **the same**
+
+No timestamp and no random value goes into it, which is what lets two runs of
+the same data be recognised as such.
+
+### Experiment identifiers
+
+```
+exp_84a8d53a1f5f_20260828T134042Z_b8c1
+    └ configuration  └ UTC time     └ random suffix
+```
+
+The middle segment sorts readably and the last one keeps two runs of one
+configuration in the same second from colliding — but the identifier is not
+*only* a timestamp, and it is not a bare UUID. The first segment is a hash of
+the configuration: dataset fingerprint, target, task, preprocessing settings,
+selected and excluded columns, split size, seed, selection strategy, folds,
+primary metric and the candidate models offered.
+
+Only inputs are hashed. Nothing the run *concluded* — which model won, what it
+scored — goes in, so re-running an unchanged setup produces the same
+configuration hash. That is what makes "have I run this before?" a question the
+store can answer, and what makes a reproducibility claim checkable rather than
+merely asserted.
+
+### JSON safety
+
+`json.dumps(obj.__dict__)` fails on the first `numpy.float64`, and where it
+does not fail it quietly writes something wrong. `serialization.py` converts
+explicitly instead: numpy scalars and arrays, pandas Series, Index, Timestamp
+and `NaT`, datetimes and dates to ISO 8601, enums to their values, dataclasses
+and any object with `as_dict()`/`summary()` through it, and non-finite floats
+(`NaN`, `inf`) to `null` — because JSON has no way to write them and
+`allow_nan=False` on the writer catches any that escape.
+
+It also refuses, loudly, four things:
+
+- **sklearn or SHAP objects** — a model artefact is not experiment history
+- **DataFrames** — records hold metadata, not data
+- **sequences over 10 000 items** — a transformed feature matrix is not a field
+- **cyclic or 32-deep structures** — recursion errors are not error messages
+
+Each raises `SerializationError` naming what was refused.
+
+### Storage behind an interface
+
+`ExperimentStore` is a `Protocol` — `save`, `get`, `exists`, `list`, `delete` —
+and every caller depends on it rather than on files. `LocalExperimentStore` is
+the only implementation today:
+
+```
+ml/experiments/runs/
+└── exp_84a8d53a1f5f_20260828T134042Z_b8c1/
+    └── experiment.json
+```
+
+One directory per run, one readable JSON file inside it. Two failure modes get
+explicit attention.
+
+**A half-written file.** The record is serialised *before* the filesystem is
+touched, so a record that cannot be written leaves nothing behind — not even an
+empty directory. The write then goes to a temporary file in the same directory,
+is flushed and `fsync`ed, and is moved into place with `os.replace`, which is
+atomic. A reader sees the previous record or the complete new one, never a
+fragment.
+
+**A corrupted record.** `get` raises: a caller who names a run deserves to know
+it is broken. `list` skips it with a logged warning, so one bad file cannot
+hide an entire history, and `verify()` returns `(experiment_id, problem)` pairs
+for everything unreadable.
+
+**Path traversal.** An experiment id becomes a directory name, so it is the one
+place an outside string touches the filesystem, and it is checked twice.
+`validate_experiment_id` accepts only `[A-Za-z0-9][A-Za-z0-9_-]{0,127}` —
+which excludes `/`, `\`, `..`, `.`, absolute paths, spaces and the empty string
+— and the resolved path is then confirmed to lie inside the store root. Either
+check would do; both are cheap.
+
+### Querying history
+
+```python
+from ml.experiments import ExperimentQuery, ExperimentSortKey, LocalExperimentStore
+
+store = LocalExperimentStore("ml/experiments/runs")
+store.save(run)
+
+store.list(ExperimentQuery(
+    dataset_fingerprint="86494cff7a45cb7f",
+    task_type="classification",
+    tags=("baseline",),
+    sort_by=ExperimentSortKey.PRIMARY_METRIC,
+    descending=True,
+    limit=5,
+))
+```
+
+Filters — fingerprint, target column, task type, model, strategy, primary
+metric, tags — are all optional and combine with "and". Sorting is by creation
+time, primary metric or model name. `descending=True` means *best or newest
+first*, and for the metric key "best" reads the metric's own declared
+direction: the largest F1, but the smallest RMSE.
+
+### Comparing runs
+
+```python
+from ml.experiments import compare_experiments
+
+comparison = compare_experiments(store.list(ExperimentQuery(task_type="classification")))
+print(comparison.as_text())
+comparison.best().selected_model
+```
+
+Ranking only means something between runs judged the same way, so
+`compare_experiments` refuses a set that mixes metrics or tasks with
+`IncomparableExperimentsError`. **RMSE is never ranked against F1** — the
+comparison establishes one shared metric first, reads its direction from the
+same `MetricDefinition` the selection code uses, and orders accordingly.
+Runs with no score sort last rather than winning by accident. The result
+renders as a table of plain values, a JSON-safe `summary()`, or text.
+
+### Building a record
+
+`create_experiment_run` composes what earlier commits already produce — it
+computes nothing on its own:
+
+```python
+from ml.experiments import LocalExperimentStore, create_experiment_run
+
+run = create_experiment_run(
+    frame,                       # the dataset, for its fingerprint only
+    prepared,                    # PreparedDataset (Commit 3)
+    outcome,                     # ModelSelectionResult (Commit 5)
+    name="renewal baseline",
+    explanation=explanation,     # GlobalExplanation (Commit 6), optional
+    profile=profile,             # dataset profile (Commit 2), optional
+    tags=("baseline",),
+    source_format="csv",
+)
+LocalExperimentStore().save(run)
+```
+
+Feature importances are capped (50 by default) so a wide dataset cannot inflate
+a record; a typical run serialises to roughly 6 KiB.
+
+### Schema versioning
+
+Every record carries `"schema_version": "1.0"`. Reading one written under an
+unknown version raises `UnsupportedSchemaVersionError` rather than
+half-interpreting it, and a record with no version is refused outright. Missing
+required fields, wrong types and unparseable timestamps each raise
+`InvalidExperimentRecordError` naming the field. When the schema changes, the
+version goes up and the reader gains a migration path — that is the whole point
+of writing it down now, while there is only one version.
+
+### Reproducibility metadata
+
+`environment` records the Python version, the platform string, the versions of
+pandas, numpy, scikit-learn and shap, and the random seed. That plus the
+configuration hash is what a reproduction attempt needs.
+
+It records nothing identifying: no hostname, no username, no file paths, no
+environment variables. **No API key, token or password can reach a record**,
+because nothing reads the environment in the first place.
+
+### Why local JSON, and what replaces it
+
+This is not the final architecture and is not pretending to be. Local JSON was
+chosen because it has no server to run, no schema migration to manage, no
+dependency to install, and a record can be opened in an editor when something
+looks wrong — which is the right trade while the pipeline itself is still
+changing shape.
+
+It will not stay. It has no concurrent-writer story, `list` reads every record
+from disk, and there is no shared history between machines. The replacement —
+MLflow, a PostgreSQL table, or both — implements `ExperimentStore` and nothing
+above it changes. **Neither is implemented today.**
+
+Stored runs are also the raw material for the RAG layer in a later commit: each
+record is already a small, self-describing document with a stable identifier
+and readable field names, which is what makes it retrievable. **No RAG, vector
+database or embedding is implemented here.**
+
 ## Errors
 
 Plain Python exceptions with no HTTP meaning — the API layer translates them
@@ -836,6 +1100,13 @@ when the ML layer is eventually exposed over HTTP.
 | `EmptyExplanationDataError` | There are no rows to explain |
 | `InvalidExplanationRowError` | A local explanation was given other than one row |
 | `ExplainabilityError` | A linear model was given no background rows, or an unknown target class |
+| `SerializationError` | A record holds something that cannot or must not be written as JSON |
+| `InvalidExperimentIdError` | An experiment id is malformed, or would escape the store directory |
+| `ExperimentNotFoundError` | Nothing is stored under that experiment id |
+| `MalformedExperimentError` | A stored record is not valid JSON |
+| `UnsupportedSchemaVersionError` | A record's schema version is missing or unreadable by this code |
+| `InvalidExperimentRecordError` | A record is missing a field, or a field has the wrong type |
+| `IncomparableExperimentsError` | Runs judged by different metrics or tasks were compared |
 
 An estimator no explainer supports is **not** an error: it produces a
 structured result with a reason.
@@ -858,7 +1129,9 @@ external dataset or touches the network.
 - **No hyperparameter optimisation.** Models run on registry defaults plus any
   hyperparameters a caller supplies. There is no search, no tuning, no Optuna.
 - **No model persistence.** Trained models live in memory for the lifetime of
-  the process; nothing is written to disk or to a registry.
+  the process. Experiment *records* are written to disk; the fitted pipeline
+  and the SHAP explainer are not, so a stored run describes a model it cannot
+  reconstitute.
 - **Six models only.** No XGBoost or LightGBM yet; the registry is designed so
   adding them is one definition.
 - Cross-validation is plain k-fold. There is no repeated k-fold, no
@@ -893,6 +1166,23 @@ external dataset or touches the network.
   per-class global ranking.
 - SHAP interaction values, dependence plots and any visual output are not
   implemented — this layer returns structured numbers only.
+
+**Experiment tracking**
+
+- **MLflow is not implemented.** Neither is PostgreSQL or any other database.
+  The only store writes JSON files locally.
+- The local store has no locking, so two processes writing the *same*
+  experiment id concurrently is undefined — though the atomic rename means
+  neither leaves a truncated file.
+- `list` reads every record from disk on each call. That is fine for the
+  directory sizes a project accumulates by hand and would not be for thousands.
+- History is per machine and per directory; nothing is shared or synchronised.
+- A record cannot rebuild the model it describes, because no artefact is
+  stored. Reproduction means re-running the recorded configuration.
+- Comparison is single-metric by design and refuses mixed metrics rather than
+  inventing a common scale.
+- Deleting a run deletes its directory; there is no soft delete or history of
+  deletions.
 
 **Preprocessing**
 

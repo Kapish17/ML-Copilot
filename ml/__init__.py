@@ -9,7 +9,7 @@ The intended flow is::
 
     ingestion -> DataFrame -> profiling -> configuration -> preprocessing
               -> cross-validation -> model selection -> final training
-              -> untouched test evaluation -> explanation
+              -> untouched test evaluation -> explanation -> experiment record
 
 Typical use::
 
@@ -22,8 +22,13 @@ Typical use::
     outcome.selected_model_name   # chosen by cross-validation alone
     outcome.final_test_score      # the single untouched-test measurement
 
-    explain_global(outcome.final_model, prepared.X_train_raw)
+    explanation = explain_global(outcome.final_model, prepared.X_train_raw)
     explain_prediction(outcome.final_model, prepared.X_test_raw.iloc[[0]])
+
+    run = create_experiment_run(
+        frame, prepared, outcome, name="churn baseline", explanation=explanation
+    )
+    LocalExperimentStore().save(run)
 
 Cross-validation selects the model; the held-out test set is reserved for the
 final evaluation.
@@ -31,7 +36,9 @@ final evaluation.
 Explanations describe model behaviour and associations; they do not establish
 causal relationships.
 
-Hyperparameter optimisation and experiment tracking are not implemented.
+Experiment tracking stores run records as local JSON files behind an
+``ExperimentStore`` interface. Hyperparameter optimisation, MLflow and any
+database are not implemented.
 """
 
 from ml.evaluation.metrics import EvaluationMetrics, MetricDefinition, MetricDirection
@@ -71,18 +78,33 @@ from ml.explainability import (  # noqa: E402
     explain_prediction,
     get_feature_importance,
 )
+from ml.experiments import (  # noqa: E402
+    ExperimentQuery,
+    ExperimentRun,
+    ExperimentSortKey,
+    ExperimentStore,
+    LocalExperimentStore,
+    compare_experiments,
+    create_experiment_run,
+    fingerprint_dataset,
+)
 
 __all__ = [
-    "DEFAULT_FOLDS",
     "BaselineResult",
     "ComparisonEntry",
     "CrossValidationResult",
+    "DEFAULT_FOLDS",
     "EvaluationMetrics",
+    "ExperimentQuery",
+    "ExperimentRun",
+    "ExperimentSortKey",
+    "ExperimentStore",
     "ExplanationConfig",
     "FoldResult",
     "GlobalExplanation",
-    "LocalExplanation",
     "InferredConfiguration",
+    "LocalExperimentStore",
+    "LocalExplanation",
     "MetricDefinition",
     "MetricDirection",
     "ModelComparison",
@@ -94,12 +116,15 @@ __all__ = [
     "SelectionStrategy",
     "TrainedModel",
     "build_preprocessor",
+    "compare_experiments",
     "compare_models",
+    "create_experiment_run",
     "cross_validate_model",
     "default_registry",
     "evaluate_baseline",
     "explain_global",
     "explain_prediction",
+    "fingerprint_dataset",
     "format_comparison_table",
     "get_feature_importance",
     "get_model_spec",
