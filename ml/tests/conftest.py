@@ -10,6 +10,8 @@ from __future__ import annotations
 import pytest
 
 from ml.features.config import PreprocessingConfig
+from ml.models.result import TrainedModel
+from ml.models.training import train_model
 from ml.pipelines.preparation import prepare_dataset
 from ml.pipelines.result import PreparedDataset
 from ml.tests.factories import (
@@ -79,3 +81,49 @@ def multiclass_prepared() -> PreparedDataset:
         task_type="classification",
     )
     return prepare_dataset(multiclass_frame(), config)
+
+
+# ---------------------------------------------------------------------------
+# Trained models
+#
+# Training is deterministic and the results are read-only, so each model is
+# fitted once for the whole session. The explainability tests depend on that:
+# several of them assert a model is unchanged after being explained, which is
+# only meaningful if they share one instance.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def logistic_model(classification_prepared: PreparedDataset) -> TrainedModel:
+    """A fitted linear classifier."""
+    return train_model(classification_prepared, "logistic_regression")
+
+
+@pytest.fixture(scope="session")
+def forest_model(classification_prepared: PreparedDataset) -> TrainedModel:
+    """A fitted tree-ensemble classifier."""
+    return train_model(classification_prepared, "random_forest_classifier")
+
+
+@pytest.fixture(scope="session")
+def boosting_model(classification_prepared: PreparedDataset) -> TrainedModel:
+    """A fitted boosted-tree classifier, which emits a single SHAP output."""
+    return train_model(classification_prepared, "hist_gradient_boosting_classifier")
+
+
+@pytest.fixture(scope="session")
+def linear_regression_model(regression_prepared: PreparedDataset) -> TrainedModel:
+    """A fitted linear regressor."""
+    return train_model(regression_prepared, "linear_regression")
+
+
+@pytest.fixture(scope="session")
+def forest_regression_model(regression_prepared: PreparedDataset) -> TrainedModel:
+    """A fitted tree-ensemble regressor."""
+    return train_model(regression_prepared, "random_forest_regressor")
+
+
+@pytest.fixture(scope="session")
+def multiclass_model(multiclass_prepared: PreparedDataset) -> TrainedModel:
+    """A fitted classifier on a three-class problem."""
+    return train_model(multiclass_prepared, "random_forest_classifier")

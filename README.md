@@ -9,10 +9,11 @@ answer grounded in retrievable context.
 > **Status: early development.** The backend can ingest a CSV file and return a
 > full dataset profile; the ML layer turns a profiled dataset into model-ready
 > data, cross-validates a suite of models on the training rows, picks a winner
-> without ever reading the test set, retrains it on the full training data and
-> measures it once on the untouched test set. **There is no hyperparameter
-> optimisation, no explainability, no experiment tracking, no LLM, no RAG and
-> no agent.** Everything marked *planned* below is not implemented.
+> without ever reading the test set, retrains it on the full training data,
+> measures it once on the untouched test set, and explains what the chosen
+> model is doing with SHAP. **There is no hyperparameter optimisation, no
+> experiment tracking, no LLM, no RAG and no agent.** Everything marked
+> *planned* below is not implemented.
 
 ---
 
@@ -34,7 +35,7 @@ answer grounded in retrievable context.
 | Model training & evaluation | Six-model suite, task-appropriate metrics, baseline comparison | **implemented** |
 | Cross-validated model selection | K-fold selection on training data, one unbiased test measurement | **implemented** |
 | Hyperparameter optimisation | Automated search over model settings | planned |
-| Explainable AI | Global and per-prediction feature attributions (SHAP) | planned |
+| Explainable AI | Global and per-prediction feature attributions (SHAP) | **implemented** |
 | Retrieval-augmented answers | Grounded responses over docs and past experiment results | planned |
 | Agentic workflows | Multi-step, tool-using analysis planned and executed by an agent | planned |
 | Experiment tracking | Reproducible run history, parameters, metrics and artifacts | planned |
@@ -57,7 +58,7 @@ answer grounded in retrievable context.
    │ preprocessing│ │ ingestion,│ │ tools,        │
    │ ✓ training ✓ │ │ retrieval,│ │ workflows,    │
    │ explainability│ │ prompts  │ │ state         │
-   │ (planned)    │ │ (planned) │ │  (planned)    │
+   │      ✓       │ │ (planned) │ │  (planned)    │
    └───────┬──────┘ └─────┬─────┘ └───────┬───────┘
            │              │               │
    ┌───────▼──────┐ ┌─────▼─────┐ ┌───────▼───────┐
@@ -81,7 +82,7 @@ layer.
 | Model training | scikit-learn estimators | **implemented** |
 | Gradient boosting libraries | XGBoost, LightGBM | planned |
 | Hyperparameter search | Optuna | planned |
-| Explainability | SHAP | planned |
+| Explainability | SHAP | **implemented** |
 | Experiment tracking | MLflow | planned |
 | LLM integration | Provider-agnostic LLM client | planned |
 | Retrieval | Qdrant vector database | planned |
@@ -663,12 +664,138 @@ are the numbers being reported.
 
 **No hyperparameter optimisation** — models run on their defaults plus whatever
 a caller supplies. No Optuna, no nested or repeated cross-validation, no model
-persistence, no SHAP, no MLflow, no XGBoost or LightGBM. Trained models live in
-memory only.
+persistence, no MLflow, no XGBoost or LightGBM. Trained models live in memory
+only.
 
-Training and selection are **not exposed over HTTP yet** — they are a library
-API, with `summary()` as the boundary that keeps sklearn objects out of any
-future response.
+---
+
+## Explainability
+
+Two questions, two answers.
+
+### What SHAP does
+
+A trained model turns a row of features into a number. SHAP answers: how much
+did each feature contribute to *that* number, rather than to the model's usual
+answer?
+
+It works against a reference. The model has an average output over background
+rows — the **base value** — and SHAP splits the gap between this row's output
+and that average across the features. The split has a guarantee worth relying
+on:
+
+```
+base value  +  every feature's contribution  =  the model's output
+```
+
+Nothing is left over, and nothing is invented. That property is what the tests
+verify, rather than merely checking numbers came back.
+
+### Global versus local
+
+| | Question | Function |
+| --- | --- | --- |
+| **Global** | What drives this model in general? | `explain_global` |
+| **Local** | Why did *this* row get *this* answer? | `explain_prediction` |
+
+```python
+from ml import explain_global, explain_prediction
+
+overall = explain_global(outcome.final_model, prepared.X_train_raw)
+why = explain_prediction(outcome.final_model, prepared.X_test_raw.iloc[[0]])
+```
+
+Global importance is the mean absolute SHAP value across many rows — how far
+each feature moved the output on average, in either direction:
+
+```
+feature                  importance
+--------------------------------------
+tenure_months            0.2277
+income                   0.1876
+segment_business         0.1249
+segment_public           0.0692
+segment_retail           0.0135
+```
+
+A local explanation keeps the signs, because direction is the point:
+
+```
+prediction: no   probability: 0.6150   base value: 0.4448
+
+feature                  value      contribution  direction
+------------------------------------------------------------------
+tenure_months            112.00     -0.3453       decreases_prediction
+income                   41712.33   +0.2377       increases_prediction
+segment_public           None       +0.1514       increases_prediction
+segment_business         None       +0.0908       increases_prediction
+segment_retail           None       +0.0356       increases_prediction
+```
+
+0.4448 + 0.1702 = 0.6150 — the base value plus the contributions is exactly the
+probability the model produced.
+
+### This is not causality
+
+> **Explainability describes model behaviour and associations; it does not
+> establish causal relationships.**
+
+`increases_prediction` means the model's output was higher with this value than
+at the reference. It does not mean changing that value in the real world would
+change the outcome. A feature can rank highly because it stands in for
+something the model never saw. Every result carries this caveat in its
+`disclaimer` field so it cannot be lost downstream.
+
+### Why transformed features, and why names matter
+
+The trained artefact is `Pipeline(preprocessing, estimator)`, and SHAP needs the
+numbers the *estimator* saw:
+
+```
+raw row -> already-fitted preprocessing -> transformed features -> estimator -> SHAP
+```
+
+Rows go through the preprocessing exactly as it was fitted during training —
+never refitted — so explaining a model cannot change it. Because that step
+carries Commit 3's feature names, explanations talk about
+`contract_Month-to-month` and `missingindicator_age` rather than `x0` and `x7`.
+That is the difference between a result someone can act on and a table of
+numbers, and it is what will make this usable by a future LLM layer.
+
+### Which explainer, and the fallback
+
+| Model family | Explainer |
+| --- | --- |
+| Tree ensembles — random forest, gradient boosting, decision trees | `TreeExplainer` |
+| Linear models — logistic, linear, ridge, lasso | `LinearExplainer` |
+| Anything else | none — permutation importance instead |
+
+No single explainer is forced onto every model. When none suits, **global**
+importance falls back to permutation importance — shuffle a feature and see how
+far the model's score falls. The method is always named in the result and the
+reason SHAP was skipped is recorded, so a permutation number is never mistaken
+for a SHAP one.
+
+The fallback has two honest limits. It needs the labels, so without them the
+result is `status: unavailable` rather than a guess. And it is **global only**:
+a local explanation SHAP cannot produce comes back `unavailable` — with the
+prediction and probabilities still reported, but no contributions invented from
+the global method.
+
+### Classification and sampling
+
+Binary results name the predicted class, the explained class and the positive
+class separately. Multiclass local explanations are per class; multiclass global
+importances are averaged over classes, which the result states rather than
+silently collapsing.
+
+SHAP is not free, so rows are capped (`max_explanation_rows`, default 500) and
+the excess sampled deterministically. Sampling is never silent: `sample_count`
+reports the rows actually used and a warning records the reduction.
+
+Training, selection and explanation are **not exposed over HTTP yet** — they
+are a library API, with `summary()` as the boundary that keeps sklearn objects
+out of any future response.
 
 ---
 
@@ -693,12 +820,15 @@ future response.
 - Stratified/K-fold cross-validation on the training data, with fold-level
   metrics, mean and standard deviation, CV-based model selection, and a single
   unbiased evaluation of the winner on the untouched test set.
+- SHAP explainability: ranked global feature importance and signed
+  per-prediction contributions over the transformed features, with a
+  permutation-importance fallback for models SHAP cannot handle.
 - Test suites covering the backend service, the API contract and the ML layer.
 
 **Not implemented yet**
 
 - Hyperparameter optimisation (Optuna) and nested cross-validation
-- Model persistence and explainability (SHAP)
+- Model persistence and experiment tracking (MLflow)
 - Ingestion formats other than CSV (Excel, JSON, Parquet, SQL, APIs)
 - RAG ingestion and retrieval
 - LLM integration and agentic workflows
@@ -744,8 +874,9 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-The ML layer is a separate component with its own dependencies. From the
-repository root, install both for a full development environment:
+The ML layer is a separate component with its own dependencies (pandas,
+scikit-learn and SHAP). From the repository root, install both for a full
+development environment:
 
 ```bash
 pip install -r backend/requirements.txt -r ml/requirements.txt
@@ -791,8 +922,8 @@ an external dataset or touches the network.
 2. ~~**Dataset upload and profiling** — validation, profile, data quality, target analysis~~
 3. ~~**Preprocessing and feature engineering** — configuration, pipeline, leakage-safe split~~
 4. ~~**Model training and evaluation** — registry, metrics, baselines, comparison~~
-5. **Cross-validation and model selection** — k-fold selection, one unbiased test evaluation *(current)*
-6. Explainability with SHAP
+5. ~~**Cross-validation and model selection** — k-fold selection, one unbiased test evaluation~~
+6. **Explainability with SHAP** — global importance, local contributions, fallback *(current)*
 7. Experiment tracking
 8. RAG layer over documentation and run history
 9. LLM integration

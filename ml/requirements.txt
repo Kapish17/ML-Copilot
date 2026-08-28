@@ -9,3 +9,6 @@
 pandas==3.0.5
 
 scikit-learn==1.9.0
+
+# Explainability. Brings numba, llvmlite, cloudpickle and slicer with it.
+shap==0.51.0

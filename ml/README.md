@@ -1,17 +1,20 @@
 # ML Copilot — ML Layer
 
-Everything between a profiled dataset and a chosen model: feature
+Everything between a profiled dataset and an explained model: feature
 configuration, leakage-safe preprocessing, model training, evaluation, baseline
-comparison, cross-validated model selection and a single final measurement on
-untouched data.
+comparison, cross-validated model selection, a single final measurement on
+untouched data, and SHAP explanations of what the chosen model is doing.
 
 > **Cross-validation selects the model; the held-out test set is reserved for
 > the final evaluation.**
+>
+> **Explanations describe model behaviour and associations; they do not
+> establish causal relationships.**
 
-**Not implemented:** hyperparameter optimisation (no Optuna), explainability
-(no SHAP), experiment tracking (no MLflow), model persistence, XGBoost or
-LightGBM, and any LLM, RAG or agent integration. Trained models live in memory
-for the lifetime of the process.
+**Not implemented:** hyperparameter optimisation (no Optuna), experiment
+tracking (no MLflow), model persistence, XGBoost or LightGBM, and any LLM, RAG
+or agent integration. Trained models live in memory for the lifetime of the
+process.
 
 ## Format-agnostic by design
 
@@ -31,6 +34,9 @@ ingestion adapter -> DataFrame -> profiling -> configuration -> preprocessing
                                                                       |
                                                                       v
                                             ONE untouched test evaluation
+                                                                      |
+                                                                      v
+                                              SHAP explanation (global + local)
 ```
 
 CSV is the only ingestion format implemented today. Adding Excel, JSON,
@@ -69,6 +75,14 @@ ml/
 │   ├── comparison.py    Running several models and ranking them
 │   ├── selection.py     Choosing a winner, then measuring it once
 │   └── result.py        TrainedModel, the outcome of one run
+├── explainability/
+│   ├── types.py         Method, status and direction vocabulary
+│   ├── config.py        Row limits and the seed for deterministic sampling
+│   ├── results.py       GlobalExplanation and LocalExplanation
+│   ├── strategy.py      Which SHAP explainer suits which estimator
+│   ├── shap_backend.py  Running SHAP and normalising what it returns
+│   ├── permutation.py   The global-only fallback
+│   └── service.py       explain_global, explain_prediction
 ├── tests/               Synthetic-data tests, including leakage proofs
 └── requirements.txt
 ```
@@ -125,6 +139,19 @@ best = select_best_model(comparison)
 
 trained = train_model(prepared, "random_forest_classifier")
 trained.predict(raw_rows)     # raw columns in, predictions out
+```
+
+Then ask what the model is doing:
+
+```python
+from ml import explain_global, explain_prediction
+
+overall = explain_global(outcome.final_model, prepared.X_train_raw)
+overall.top(5)                # the features that drive it in general
+
+why = explain_prediction(outcome.final_model, prepared.X_test_raw.iloc[[0]])
+why.prediction, why.probability, why.base_value
+why.top(5)                    # what moved this one row
 ```
 
 A configuration can also be written by hand, without a profile:
@@ -597,6 +624,192 @@ dataset gives identical predictions and identical metrics.
 
 ---
 
+## Explainability
+
+### What SHAP does
+
+A trained model turns a row of features into a number. SHAP answers the
+question "how much did each feature contribute to *that* number, rather than
+to the model's usual answer?"
+
+It works by comparing against a reference. The model has an average output over
+some background set of rows — the **base value**. SHAP splits the difference
+between this row's output and that base value across the features, and the
+split has a useful guarantee: the contributions plus the base value add back up
+to the prediction exactly. Nothing is left over, and nothing is invented.
+
+```
+base value  +  sum of every feature's contribution  =  the model's output
+```
+
+That property is what the tests check, rather than merely checking that numbers
+came back.
+
+### Global versus local
+
+| | Question | Function | Answer |
+| --- | --- | --- | --- |
+| **Global** | What drives this model in general? | `explain_global` | One importance per feature, ranked |
+| **Local** | Why did *this* row get *this* answer? | `explain_prediction` | One signed contribution per feature, ranked by size |
+
+Global importance is the mean absolute SHAP value across many rows: how far
+each feature moved the output on average, in either direction. Signs are
+dropped deliberately — a feature that pushes hard both ways is influential, and
+averaging signed values would hide it.
+
+```
+feature                  importance
+--------------------------------------
+tenure_months            0.2277
+income                   0.1876
+segment_business         0.1249
+segment_public           0.0692
+segment_retail           0.0135
+```
+
+A local explanation keeps the signs, because direction is the point:
+
+```
+prediction: no   probability: 0.6150   base value: 0.4448
+
+feature                  value      contribution  direction
+------------------------------------------------------------------
+tenure_months            112.00     -0.3453       decreases_prediction
+income                   41712.33   +0.2377       increases_prediction
+segment_public           None       +0.1514       increases_prediction
+segment_business         None       +0.0908       increases_prediction
+segment_retail           None       +0.0356       increases_prediction
+```
+
+0.4448 + 0.1702 = 0.6150 — the base value plus the contributions is the
+probability the model actually produced.
+
+### Not causality
+
+`increases_prediction` means the model's output was higher with this value than
+it would have been at the reference. It does **not** mean that changing the
+value in the real world would change the outcome. A feature can rank highly
+because it stands in for something else the model never saw. Every result
+carries this caveat in its `disclaimer` field, so it cannot be lost downstream.
+
+### The pipeline boundary
+
+A trained model is `Pipeline(preprocessing, estimator)`, and SHAP needs the
+numbers the *estimator* saw — not the raw columns:
+
+```
+raw row -> already-fitted preprocessing -> transformed features -> estimator -> SHAP
+```
+
+So raw rows are pushed through the preprocessing step **exactly as it was
+fitted during training**, and the transformed frame is handed to the explainer.
+The original pipeline is left intact and still usable. Nothing is refitted,
+which is why explanations cannot change a model — and why a set of deliberately
+extreme rows can be explained without moving a single imputation value.
+
+### Why feature names matter
+
+Because the preprocessing step carries Commit 3's names, the explanation talks
+about `contract_Month-to-month` and `missingindicator_age` rather than `x0` and
+`x7`. That is the difference between a result a person can act on and a table
+of numbers, and it is what makes the output usable by a future LLM layer.
+
+### Which explainer, and when
+
+There is no single SHAP explainer for every model, so the estimator's family
+decides:
+
+| Model family | Explainer | Needs background rows? |
+| --- | --- | --- |
+| Tree ensembles — random forest, gradient boosting, decision trees | `TreeExplainer` | no, it reads the trees |
+| Linear models — logistic, linear, ridge, lasso | `LinearExplainer` | yes |
+| Anything else | none | — |
+
+Two structural checks catch models this package has not been told about: a
+gradient-boosting library recognised by its module name, and any estimator
+exposing `coef_`. Everything else is reported as unsupported with a reason
+rather than being forced through the general-purpose kernel explainer, which is
+slow enough on real data to be the wrong default.
+
+### The fallback, and its limits
+
+When no SHAP explainer suits a model, **global** importance can still be
+measured by permutation importance: shuffle one feature's values and see how
+far the model's score falls. The method is always named in the result, so a
+permutation number is never mistaken for a SHAP one, and the reason SHAP was
+skipped is recorded in the warnings.
+
+Two honest limits come with it:
+
+- **It needs the labels.** A score drop needs the right answers to measure
+  against. Without `y_reference` the result is `status: unavailable` with that
+  reason — nothing is invented. The model itself is untouched; permutation
+  importance shuffles copies of the data.
+- **It is global only.** It cannot say why one row got its prediction. A local
+  explanation that SHAP cannot produce comes back as `status: unavailable`,
+  with the prediction and probabilities still reported — those are facts about
+  the model — but with no contributions filled in from the global method.
+
+### Classification detail
+
+For a **binary** problem the result names the predicted class, the explained
+class and the positive class separately, so none has to be inferred. The
+positive class follows the convention set in Commit 4 — the last of the
+estimator's sorted classes. Some models produce one SHAP output per class;
+others produce a single margin for the positive class, in which case explaining
+the negative class is the exact negation of those values, and the result says
+so in its warnings.
+
+For a **multiclass** problem, local explanations are per class — the predicted
+one by default, or any other via `target_class`. Global importances are
+averaged over the classes, which the result states explicitly rather than
+silently collapsing three classes into one number. Where a SHAP output shape
+cannot be matched to the model's classes, the result is a structured
+`unavailable` with the reason, never a guess.
+
+### Sampling and limits
+
+SHAP is not free, so the number of rows is capped and the excess sampled
+deterministically:
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `max_explanation_rows` | 500 | Rows SHAP values are computed over for global importance |
+| `max_reference_rows` | 200 | Rows used as the background distribution |
+| `permutation_repeats` | 10 | Shuffles per feature in the fallback |
+| `random_state` | 42 | Seed for every sampling decision |
+
+Sampling is never silent: `sample_count` reports how many rows were actually
+used, and a warning records the reduction. The same seed gives the same rows in
+the same order, so repeated explanations of the same model return identical
+numbers.
+
+### Programmatic API
+
+Structured facts, not prose — the form a future LLM layer would receive and
+write sentences from. **No LLM, RAG or agent exists yet.**
+
+| Function | Returns |
+| --- | --- |
+| `explain_global(trained, X_reference, y_reference=None, ...)` | A `GlobalExplanation` |
+| `explain_prediction(trained, row, background=None, ...)` | A `LocalExplanation` |
+| `get_feature_importance(trained, X_reference, ...)` | Plain `{feature, importance, rank}` records |
+
+`summary()` on either result is JSON-safe by construction: no explainer object,
+no numpy array, no estimator, no DataFrame.
+
+### Which rows to explain
+
+The training features are the natural reference — they are what the model
+learned from, so they describe the behaviour it actually acquired, and using
+them keeps the held-out test set genuinely untouched. Explaining test rows is
+also sound and answers a slightly different question; no target is involved and
+nothing is fitted, so neither choice leaks. What the reference data does is
+define the distribution each row is compared against, which is why it should be
+representative.
+
+---
+
 ## Errors
 
 Plain Python exceptions with no HTTP meaning — the API layer translates them
@@ -618,6 +831,14 @@ when the ML layer is eventually exposed over HTTP.
 | `InvalidMetricError` | The metric does not exist for the task |
 | `ModelTrainingError` | The estimator failed while fitting or predicting |
 | `NoSuccessfulModelError` | No model in a comparison produced a rankable score |
+| `InvalidTrainedModelError` | The object to explain is not a fitted trained model |
+| `MissingFeatureColumnsError` | The data to explain lacks a fitted feature column |
+| `EmptyExplanationDataError` | There are no rows to explain |
+| `InvalidExplanationRowError` | A local explanation was given other than one row |
+| `ExplainabilityError` | A linear model was given no background rows, or an unknown target class |
+
+An estimator no explainer supports is **not** an error: it produces a
+structured result with a reason.
 
 ## Setup and tests
 
@@ -638,8 +859,6 @@ external dataset or touches the network.
   hyperparameters a caller supplies. There is no search, no tuning, no Optuna.
 - **No model persistence.** Trained models live in memory for the lifetime of
   the process; nothing is written to disk or to a registry.
-- **No explainability.** Feature names are preserved for it, but SHAP and
-  feature importance are not implemented.
 - **Six models only.** No XGBoost or LightGBM yet; the registry is designed so
   adding them is one definition.
 - Cross-validation is plain k-fold. There is no repeated k-fold, no
@@ -656,6 +875,24 @@ external dataset or touches the network.
   explicitly, but it is a convention rather than a choice the caller makes.
 - `training_seconds` is wall-clock time on the machine that ran it — useful for
   relative comparison, not a benchmark.
+
+**Explainability**
+
+- Only tree and linear families have a SHAP explainer. Anything else gets
+  permutation importance for global questions and nothing for local ones; the
+  kernel explainer, which would cover everything, is too slow to enable by
+  default.
+- Contributions are on the model's own output scale — probabilities for a
+  random forest, log-odds for a linear or boosted classifier — so the numbers
+  from two model families are not directly comparable.
+- Global importances describe correlation with the model's output, not
+  causality, and a feature can rank highly by standing in for something else.
+- One-hot columns are explained separately (`segment_retail`,
+  `segment_business`), not rolled back up into a single `segment` importance.
+- Multiclass global importances are averaged over classes; there is no
+  per-class global ranking.
+- SHAP interaction values, dependence plots and any visual output are not
+  implemented — this layer returns structured numbers only.
 
 **Preprocessing**
 

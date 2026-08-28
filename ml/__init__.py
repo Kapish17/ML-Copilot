@@ -9,7 +9,7 @@ The intended flow is::
 
     ingestion -> DataFrame -> profiling -> configuration -> preprocessing
               -> cross-validation -> model selection -> final training
-              -> untouched test evaluation
+              -> untouched test evaluation -> explanation
 
 Typical use::
 
@@ -22,11 +22,16 @@ Typical use::
     outcome.selected_model_name   # chosen by cross-validation alone
     outcome.final_test_score      # the single untouched-test measurement
 
+    explain_global(outcome.final_model, prepared.X_train_raw)
+    explain_prediction(outcome.final_model, prepared.X_test_raw.iloc[[0]])
+
 Cross-validation selects the model; the held-out test set is reserved for the
 final evaluation.
 
-Hyperparameter optimisation, explainability and experiment tracking are not
-implemented.
+Explanations describe model behaviour and associations; they do not establish
+causal relationships.
+
+Hyperparameter optimisation and experiment tracking are not implemented.
 """
 
 from ml.evaluation.metrics import EvaluationMetrics, MetricDefinition, MetricDirection
@@ -58,6 +63,14 @@ from ml.evaluation.cross_validation import (  # noqa: E402
     FoldResult,
     cross_validate_model,
 )
+from ml.explainability import (  # noqa: E402
+    ExplanationConfig,
+    GlobalExplanation,
+    LocalExplanation,
+    explain_global,
+    explain_prediction,
+    get_feature_importance,
+)
 
 __all__ = [
     "DEFAULT_FOLDS",
@@ -65,7 +78,10 @@ __all__ = [
     "ComparisonEntry",
     "CrossValidationResult",
     "EvaluationMetrics",
+    "ExplanationConfig",
     "FoldResult",
+    "GlobalExplanation",
+    "LocalExplanation",
     "InferredConfiguration",
     "MetricDefinition",
     "MetricDirection",
@@ -82,7 +98,10 @@ __all__ = [
     "cross_validate_model",
     "default_registry",
     "evaluate_baseline",
+    "explain_global",
+    "explain_prediction",
     "format_comparison_table",
+    "get_feature_importance",
     "get_model_spec",
     "infer_configuration",
     "list_available_models",

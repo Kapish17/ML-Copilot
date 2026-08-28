@@ -88,3 +88,28 @@ class ModelTrainingError(ModelError):
 
 class NoSuccessfulModelError(ModelError):
     """No model in a comparison run finished successfully."""
+
+
+class ExplainabilityError(MLError):
+    """Base class for failures in the explainability layer.
+
+    An estimator that no explainer supports is *not* an error: it produces a
+    structured result with a reason, so a caller can see what happened rather
+    than catching an exception.
+    """
+
+
+class InvalidTrainedModelError(ExplainabilityError):
+    """The object handed in is not a usable, fitted trained model."""
+
+
+class MissingFeatureColumnsError(ExplainabilityError):
+    """The data to explain is missing columns the model was fitted on."""
+
+
+class EmptyExplanationDataError(ExplainabilityError):
+    """There are no rows to explain."""
+
+
+class InvalidExplanationRowError(ExplainabilityError):
+    """A local explanation was asked for something other than a single row."""
