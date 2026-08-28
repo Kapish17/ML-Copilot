@@ -8,10 +8,11 @@ answer grounded in retrievable context.
 
 > **Status: early development.** The backend can ingest a CSV file and return a
 > full dataset profile; the ML layer turns a profiled dataset into model-ready
-> data, trains a suite of models, scores them against a naive baseline and
-> picks the best one. **There is no hyperparameter optimisation, no
-> explainability, no experiment tracking, no LLM, no RAG and no agent.**
-> Everything marked *planned* below is not implemented.
+> data, cross-validates a suite of models on the training rows, picks a winner
+> without ever reading the test set, retrains it on the full training data and
+> measures it once on the untouched test set. **There is no hyperparameter
+> optimisation, no explainability, no experiment tracking, no LLM, no RAG and
+> no agent.** Everything marked *planned* below is not implemented.
 
 ---
 
@@ -30,7 +31,8 @@ answer grounded in retrievable context.
 | --- | --- | --- |
 | Dataset ingestion & profiling | CSV validation, structural profile, data-quality findings, target analysis | **implemented** |
 | Preprocessing & feature engineering | Feature selection, imputation, encoding, scaling, datetime expansion, leakage-safe train/test split | **implemented** |
-| Model training & evaluation | Six-model suite, task-appropriate metrics, baseline comparison, best-model selection | **implemented** |
+| Model training & evaluation | Six-model suite, task-appropriate metrics, baseline comparison | **implemented** |
+| Cross-validated model selection | K-fold selection on training data, one unbiased test measurement | **implemented** |
 | Hyperparameter optimisation | Automated search over model settings | planned |
 | Explainable AI | Global and per-prediction feature attributions (SHAP) | planned |
 | Retrieval-augmented answers | Grounded responses over docs and past experiment results | planned |
@@ -488,13 +490,14 @@ On top of a `PreparedDataset`, the ML layer trains models, scores them against
 a naive baseline and ranks them.
 
 ```python
-from ml import compare_models, select_best_model, train_model
+from ml import select_and_evaluate_best_model, train_model
+
+outcome = select_and_evaluate_best_model(prepared, folds=5)
+outcome.selected_model_name   # chosen by cross-validation alone
+outcome.final_test_score      # the single untouched-test measurement
 
 trained = train_model(prepared, "random_forest_classifier")
 trained.predict(raw_rows)     # raw columns in, predictions out
-
-comparison = compare_models(prepared)
-best = select_best_model(comparison)
 ```
 
 ### Supported models
@@ -558,25 +561,114 @@ random_forest_classifier                0.912  0.900    0.977   +0.202
 hist_gradient_boosting_classifier       0.899  0.883    0.977   +0.189
 ```
 
-### Comparison and selection
+---
 
-`compare_models` trains every registered model for the task against one shared
-baseline, each inside its own error boundary — a model that fails is recorded
-with its error and the others still run. `select_best_model` reads the primary
-metric's declared direction: the **maximum** for a score metric, the
-**minimum** for an error metric. The primary metric defaults to F1 for
-classification and RMSE for regression, and is configurable per run or per
-model.
+## Cross-validated model selection
+
+### Why not just use the test set?
+
+A single train/test split gives one number per model, and that number carries
+the luck of one particular division of the rows. Worse, a test set used to
+*choose* a model has been spent: the winner's score is the best of several
+draws, so reporting it as an estimate of future performance flatters it — the
+more models compared, the more so.
+
+Cross-validation moves the choice onto the training data. The training rows are
+divided into *k* folds; each fold takes a turn as the validation set while the
+others train the model. Every model is scored *k* times, and the comparison
+rests on the average rather than a single draw.
+
+> **Cross-validation selects the model; the held-out test set is reserved for
+> the final evaluation.**
+
+### The workflow
+
+```
+training data
+      ↓
+cross-validation  (k folds, test set never opened)
+      ↓
+compare models by mean fold score
+      ↓
+select the best
+      ↓
+retrain it on the COMPLETE training data
+      ↓
+ONE untouched test set
+      ↓
+final unbiased evaluation
+```
+
+```python
+from ml import select_and_evaluate_best_model
+
+outcome = select_and_evaluate_best_model(prepared, folds=5)
+print(outcome.as_text())
+```
+
+```
+Model                                   CV Mean F1  CV Std
+----------------------------------------------------------
+Logistic Regression                         0.9403  0.0160
+Histogram Gradient Boosting Classifier      0.9167  0.0194
+Random Forest Classifier                    0.9134  0.0187
+
+Winner: Logistic Regression
+Selected on 5-fold cross-validation of the training data; the test set was not used.
+
+Final held-out test F1: 0.9254
+Baseline (Majority class baseline): 0.7097  |  improvement: +0.2157
+```
+
+The cross-validated mean (0.9403) sits above the honest test score (0.9254).
+That gap is exactly what a holdout-selected number hides.
+
+### Splitters, mean and spread
+
+Classification uses **`StratifiedKFold`** so every fold keeps the class
+proportions — without it an imbalanced dataset can produce a fold with almost
+none of the minority class, and a score that means nothing. Regression uses
+plain **`KFold`**, since a continuous target has no classes to balance. Both
+shuffle with the dataset's seed, so folds are random with respect to row order
+and identical on every re-run.
+
+Each fold produces the full metric set, aggregated into a **mean** and a
+**standard deviation**. The spread is the honest half: a mean F1 of 0.84 ± 0.01
+is a stable model, while the same mean ± 0.09 is a model whose score depends
+heavily on which rows it saw.
+
+The fold count is validated first — fewer than two folds, more folds than rows,
+or a class with fewer members than folds all fail with a clear error rather
+than producing misleading folds.
+
+### Two strategies
+
+| Strategy | Ranked by | Reads the test set? |
+| --- | --- | --- |
+| `holdout` (default for `compare_models`, unchanged) | score on the held-out test set | yes |
+| `cross_validation` | mean of the training folds | **no** |
+
+Under cross-validation the comparison object contains **no test-set numbers at
+all** — no test metrics, no test baseline, no fitted model. They are absent
+rather than merely unused, so selection cannot read them by accident. Ranking
+reads the primary metric's declared direction: the maximum for F1 or R², the
+minimum for RMSE. The naive baseline plays no part in choosing the winner; it
+reappears at the end to frame the final test number.
+
+Existing holdout callers are unaffected. Selecting through holdout reports
+`final_evaluation_is_unbiased: false`, because the numbers that chose the model
+are the numbers being reported.
 
 ### Not implemented
 
 **No hyperparameter optimisation** — models run on their defaults plus whatever
-a caller supplies. No cross-validation, no model persistence, no SHAP, no
-MLflow, no XGBoost or LightGBM. Trained models live in memory only.
+a caller supplies. No Optuna, no nested or repeated cross-validation, no model
+persistence, no SHAP, no MLflow, no XGBoost or LightGBM. Trained models live in
+memory only.
 
-Training is **not exposed over HTTP yet** — it is a library API, with
-`summary()` as the boundary that keeps sklearn objects out of any future
-response.
+Training and selection are **not exposed over HTTP yet** — they are a library
+API, with `summary()` as the boundary that keeps sklearn objects out of any
+future response.
 
 ---
 
@@ -598,11 +690,14 @@ response.
 - A six-model training suite whose artefact is a full preprocessing pipeline,
   with task-appropriate metrics, naive baselines, fault-tolerant model
   comparison and direction-aware best-model selection.
+- Stratified/K-fold cross-validation on the training data, with fold-level
+  metrics, mean and standard deviation, CV-based model selection, and a single
+  unbiased evaluation of the winner on the untouched test set.
 - Test suites covering the backend service, the API contract and the ML layer.
 
 **Not implemented yet**
 
-- Hyperparameter optimisation and cross-validation
+- Hyperparameter optimisation (Optuna) and nested cross-validation
 - Model persistence and explainability (SHAP)
 - Ingestion formats other than CSV (Excel, JSON, Parquet, SQL, APIs)
 - RAG ingestion and retrieval
@@ -695,11 +790,12 @@ an external dataset or touches the network.
 1. ~~**Project foundation** — repository structure, FastAPI service, tests~~
 2. ~~**Dataset upload and profiling** — validation, profile, data quality, target analysis~~
 3. ~~**Preprocessing and feature engineering** — configuration, pipeline, leakage-safe split~~
-4. **Model training and evaluation** — registry, metrics, baselines, comparison, selection *(current)*
-5. Explainability with SHAP
-6. Experiment tracking
-7. RAG layer over documentation and run history
-8. LLM integration
-9. Agentic workflows
-10. Next.js frontend
-11. Containerisation and deployment
+4. ~~**Model training and evaluation** — registry, metrics, baselines, comparison~~
+5. **Cross-validation and model selection** — k-fold selection, one unbiased test evaluation *(current)*
+6. Explainability with SHAP
+7. Experiment tracking
+8. RAG layer over documentation and run history
+9. LLM integration
+10. Agentic workflows
+11. Next.js frontend
+12. Containerisation and deployment

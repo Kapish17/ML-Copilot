@@ -73,6 +73,15 @@ class InvalidMetricError(ModelError):
     """The requested metric does not exist for the task type."""
 
 
+class InvalidFoldCountError(ModelError):
+    """The requested number of cross-validation folds cannot be used.
+
+    Raised when the fold count is below two, exceeds the number of rows, or —
+    for classification — exceeds the size of the smallest class, since a class
+    with fewer members than folds cannot appear in every validation fold.
+    """
+
+
 class ModelTrainingError(ModelError):
     """An estimator failed while being fitted or while predicting."""
 

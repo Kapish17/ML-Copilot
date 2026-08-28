@@ -166,6 +166,40 @@ def learnable_classification_frame(rows: int = 300) -> pd.DataFrame:
     )
 
 
+def imbalanced_classification_frame(
+    rows: int = 200, minority_count: int = 30
+) -> pd.DataFrame:
+    """A binary dataset with a small but workable minority class.
+
+    Used to check that stratified folds keep the rare class present in every
+    validation fold, which plain K-fold cannot guarantee.
+    """
+    rng = np.random.default_rng(SEED)
+    labels = np.array(["majority"] * (rows - minority_count) + ["minority"] * minority_count)
+    rng.shuffle(labels)
+    signal = np.where(labels == "minority", 1.5, -0.5) + rng.normal(0, 0.7, rows)
+    return pd.DataFrame(
+        {
+            "measure": signal.round(4),
+            "noise": rng.normal(0, 1, rows).round(4),
+            "outcome": labels,
+        }
+    )
+
+
+def rare_class_frame(rows: int = 40, rare_count: int = 3) -> pd.DataFrame:
+    """A dataset whose rare class has too few rows for a five-fold split."""
+    rng = np.random.default_rng(SEED)
+    labels = np.array(["common"] * (rows - rare_count) + ["rare"] * rare_count)
+    return pd.DataFrame(
+        {
+            "measure": rng.normal(0, 1, rows).round(4),
+            "noise": rng.normal(0, 1, rows).round(4),
+            "outcome": labels,
+        }
+    )
+
+
 def multiclass_frame(rows: int = 300) -> pd.DataFrame:
     """A three-class dataset with a learnable signal."""
     rng = np.random.default_rng(SEED)

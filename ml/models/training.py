@@ -19,6 +19,7 @@ from __future__ import annotations
 from time import perf_counter
 
 import numpy as np
+from sklearn.base import clone
 from sklearn.pipeline import Pipeline
 
 from ml.errors import InsufficientDataError, ModelTrainingError
@@ -53,13 +54,27 @@ def build_pipeline(prepared: PreparedDataset, estimator) -> Pipeline:
     )
 
 
-def _class_scores(
+def clone_pipeline(pipeline: Pipeline) -> Pipeline:
+    """Return an unfitted copy of a full training pipeline.
+
+    ``sklearn.base.clone`` copies constructor parameters but not the output
+    configuration set by ``set_output``, so that is reapplied to the
+    preprocessing step. Cross-validation uses this to give every fold its own
+    pipeline, sharing no fitted state with any other fold.
+    """
+    copy = clone(pipeline)
+    copy.named_steps[PREPROCESSING_STEP].set_output(transform="pandas")
+    return copy
+
+
+def class_scores(
     pipeline: Pipeline, features, task_type: TaskType
 ) -> tuple[np.ndarray | None, list | None]:
     """Return predicted probabilities and their class order, when available.
 
     Models without ``predict_proba`` simply report no scores, and ROC-AUC is
-    then marked unavailable rather than being approximated.
+    then marked unavailable rather than being approximated. Shared with
+    cross-validation so both paths score classifiers identically.
     """
     if task_type is not TaskType.CLASSIFICATION:
         return None, None
@@ -162,7 +177,7 @@ def train_model(
 
     try:
         predictions = pipeline.predict(prepared.X_test_raw)
-        scores, score_labels = _class_scores(
+        scores, score_labels = class_scores(
             pipeline, prepared.X_test_raw, prepared.task_type
         )
     except Exception as exc:  # noqa: BLE001 - as above

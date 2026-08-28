@@ -2,11 +2,16 @@
 
 Everything between a profiled dataset and a chosen model: feature
 configuration, leakage-safe preprocessing, model training, evaluation, baseline
-comparison and model selection.
+comparison, cross-validated model selection and a single final measurement on
+untouched data.
 
-**Not implemented:** hyperparameter optimisation, explainability (SHAP),
-experiment tracking (MLflow), model persistence, LLM/RAG/agent integration.
-Trained models live in memory for the lifetime of the process.
+> **Cross-validation selects the model; the held-out test set is reserved for
+> the final evaluation.**
+
+**Not implemented:** hyperparameter optimisation (no Optuna), explainability
+(no SHAP), experiment tracking (no MLflow), model persistence, XGBoost or
+LightGBM, and any LLM, RAG or agent integration. Trained models live in memory
+for the lifetime of the process.
 
 ## Format-agnostic by design
 
@@ -18,10 +23,14 @@ anything other than a DataFrame raises an error rather than being coerced.
 ingestion adapter -> DataFrame -> profiling -> configuration -> preprocessing
    (CSV today;                                                        |
     Excel, JSON,                                                      v
-    Parquet, SQL,                        model registry -> training -> evaluation
-    API planned)                                                      |
+    Parquet, SQL,                    model registry -> cross-validation
+    API planned)                                       (training folds)
+                                                                      |
                                                                       v
-                                              comparison -> best model
+                                              model selection -> retrain winner
+                                                                      |
+                                                                      v
+                                            ONE untouched test evaluation
 ```
 
 CSV is the only ingestion format implemented today. Adding Excel, JSON,
@@ -49,14 +58,16 @@ ml/
 │   ├── preparation.py   Validate → split → fit on train → transform
 │   └── result.py        PreparedDataset, the structured outcome
 ├── evaluation/
-│   ├── splitting.py     Train/test split and target-distribution reporting
-│   └── metrics.py       Task metrics, their directions, the primary metric
+│   ├── splitting.py         Train/test split and target-distribution reporting
+│   ├── metrics.py           Task metrics, their directions, the primary metric
+│   └── cross_validation.py  K-fold validation over the training rows
 ├── models/
 │   ├── registry.py      Which estimators exist and how to build them
 │   ├── spec.py          The validated request for one training run
 │   ├── baselines.py     Naive reference models and the improvement over them
 │   ├── training.py      Fitting Pipeline(preprocessing, estimator)
 │   ├── comparison.py    Running several models and ranking them
+│   ├── selection.py     Choosing a winner, then measuring it once
 │   └── result.py        TrainedModel, the outcome of one run
 ├── tests/               Synthetic-data tests, including leakage proofs
 └── requirements.txt
@@ -87,17 +98,33 @@ prepared.feature_names  # names after encoding and expansion
 prepared.summary()      # JSON-friendly description of the whole run
 ```
 
-Then train and choose a model:
+Then choose a model and measure it:
 
 ```python
-from ml import compare_models, select_best_model, train_model
+from ml import select_and_evaluate_best_model
+
+outcome = select_and_evaluate_best_model(prepared, folds=5)
+
+outcome.selected_model_name   # chosen by cross-validation alone
+outcome.selection_score       # its mean over the training folds
+outcome.final_test_score      # the single untouched-test measurement
+outcome.summary()             # JSON-friendly, the two kept separate
+print(outcome.as_text())
+```
+
+Or work with the pieces directly:
+
+```python
+from ml import compare_models, cross_validate_model, select_best_model, train_model
+
+cv = cross_validate_model(prepared, "random_forest_classifier", folds=5)
+cv.mean_primary_metric, cv.std_primary_metric
+
+comparison = compare_models(prepared, strategy="cross_validation", folds=5)
+best = select_best_model(comparison)
 
 trained = train_model(prepared, "random_forest_classifier")
-trained.predict(raw_rows)          # raw columns in, predictions out
-trained.summary()                  # JSON-friendly, no sklearn objects
-
-comparison = compare_models(prepared)
-best = select_best_model(comparison)
+trained.predict(raw_rows)     # raw columns in, predictions out
 ```
 
 A configuration can also be written by hand, without a profile:
@@ -382,23 +409,158 @@ hist_gradient_boosting_classifier       0.899  0.883    0.977   +0.189
 
 The baseline's F1 of 0.710 is the point: without it, 0.925 has no scale.
 
-### Comparison and selection
+---
 
-`compare_models(prepared)` trains every registered model for the dataset's
-task, sharing one baseline. Each model runs inside its own error boundary, so a
-model that fails is recorded with its error and the rest still run — one broken
-estimator never sinks the run.
+## Cross-validation and model selection
 
-`select_best_model(comparison)` returns the winner, reading the primary
-metric's declared direction: the **maximum** for a score metric, the
-**minimum** for an error metric. Models that failed, or that could not produce
-the primary metric, are not candidates; if nothing is rankable it raises
-`NoSuccessfulModelError` with the collected errors rather than returning
-`None`.
+### Why cross-validation
+
+A single train/test split gives one number per model. That number carries the
+luck of one particular division of the rows — swap a few rows between the
+halves and the ranking can change. Worse, a test set used to *choose* a model
+has been spent: the winner's score is then the best of several draws, which
+flatters it. Reporting it as an estimate of future performance is optimistic,
+and the more models compared, the more optimistic it gets.
+
+Cross-validation fixes both problems by moving the choice onto the training
+data. The training rows are divided into *k* folds; each fold takes a turn as
+the validation set while the other *k−1* train the model. Every model is
+scored *k* times, so the comparison rests on an average rather than a single
+draw — and the test set is never opened.
+
+> **Cross-validation selects the model; the held-out test set is reserved for
+> the final evaluation.**
+
+### The two splitters
+
+| Task | Splitter | Why |
+| --- | --- | --- |
+| classification | `StratifiedKFold` | Every fold keeps the dataset's class proportions. Without it, an imbalanced dataset can produce a fold with almost none of the minority class, and a score that means nothing. |
+| regression | `KFold` | A continuous target has no classes to balance. |
+
+Both shuffle before splitting, using the dataset's seed, so the folds are
+random with respect to row order but identical on every re-run.
+
+The fold count is validated before anything runs. Fewer than two folds is not
+cross-validation; more folds than rows is impossible; and for classification,
+**a class with fewer members than folds** is refused with a clear error naming
+the class and its size, rather than producing folds that quietly
+misrepresent it.
+
+### Mean and standard deviation
+
+Each fold produces the full metric set for the task, and those are aggregated
+per metric into a mean, a standard deviation, a minimum and a maximum.
+
+The spread is the honest half of the result. A mean F1 of 0.84 with a spread of
+0.01 is a stable model; the same mean with a spread of 0.09 is a model whose
+score depends heavily on which rows it happened to see. The standard deviation
+reported is the population spread over the folds that actually ran.
+
+Classification runs also return a pooled confusion matrix — the fold matrices
+summed. Because every training row is validated exactly once, that matrix
+covers the whole training set.
+
+### Ranking
+
+`compare_models` takes a strategy:
+
+| Strategy | Ranked by | Reads the test set? |
+| --- | --- | --- |
+| `holdout` (default, unchanged) | the model's score on the held-out test set | yes |
+| `cross_validation` | the mean of the training folds | **no** |
+
+Under cross-validation the comparison contains **no test-set numbers at all** —
+no test metrics, no test baseline, no fitted model. They are absent rather than
+merely unused, so selection cannot read them even by accident.
+
+`select_best_model(comparison)` reads the primary metric's declared direction:
+the **maximum** for a score metric such as F1 or R², the **minimum** for an
+error metric such as RMSE. There is one source of truth for that direction —
+the `MetricDefinition` from the metrics module — so no ranking code decides it
+for itself. Models that failed, or that could not produce the primary metric,
+are not candidates; if nothing is rankable it raises `NoSuccessfulModelError`
+with the collected errors rather than returning `None`.
+
+Each model runs inside its own error boundary. A model whose folds all fail is
+recorded with its errors and ranked last; the others still run. A single fold
+that fails does not abandon the run either — it is recorded, and the mean is
+taken over the folds that succeeded.
 
 The primary metric is configurable per run
 (`compare_models(prepared, primary_metric="r2")`) or per model
 (`ModelSpec(..., primary_metric="mae")`).
+
+### Selecting, then measuring
+
+`select_and_evaluate_best_model(prepared, folds=5)` runs the whole sequence:
+
+1. cross-validate every candidate on the training rows,
+2. rank by the mean of the folds and pick the winner,
+3. retrain that winner on the **complete** training portion,
+4. evaluate it **once** on the held-out test set, against the baseline.
+
+Steps 1 and 2 never read the test set, so step 4 is the first and only time the
+model meets that data — which is what makes the number an unbiased estimate.
+
+```
+Model                                   CV Mean F1  CV Std
+----------------------------------------------------------
+Logistic Regression                         0.9403  0.0160
+Histogram Gradient Boosting Classifier      0.9167  0.0194
+Random Forest Classifier                    0.9134  0.0187
+
+Winner: Logistic Regression
+Selected on 5-fold cross-validation of the training data; the test set was not used.
+
+Final held-out test F1: 0.9254
+Baseline (Majority class baseline): 0.7097  |  improvement: +0.2157
+```
+
+The cross-validated mean (0.9403) sits slightly above the honest test score
+(0.9254). That gap is exactly what a holdout-selected number hides.
+
+`ModelSelectionResult.summary()` keeps the two apart by construction: a
+`selection` section (`scored_on: "training_folds"`, `uses_test_data: false`)
+and a `final_evaluation` section (`trained_on: "full_training_data"`,
+`evaluated_on: "held_out_test_set"`, `is_unbiased: true`).
+
+The holdout strategy still works and is still the default for
+`compare_models`, so existing callers are unaffected. Selecting through it sets
+`final_evaluation_is_unbiased` to `False`, because under holdout the numbers
+that chose the model are the numbers being reported.
+
+### Baselines under cross-validation
+
+The naive baseline plays no part in choosing the winner — models are ranked
+against each other on cross-validated scores. It reappears at the end, where
+the selected model is compared against it on the untouched test set, so the
+final figure still has a scale.
+
+### Leakage prevention inside the folds
+
+Every fold builds its own clone of the `Pipeline(preprocessing, estimator)` and
+fits it on that fold's training rows alone:
+
+```
+training fold -> fit preprocessing -> fit model
+validation fold -> transform -> predict -> score
+```
+
+The training data is never preprocessed as a whole before the folds. A
+validation fold cannot contribute to the imputation values, scaler statistics
+or encoder categories that are then applied to it.
+
+`tests/test_cross_validation.py` proves this rather than asserting it: it
+checks each fold's fitted imputer against the median of exactly the rows that
+fold was given, and then corrupts the rows that fold 1 uses for validation —
+fold 1's statistics are unchanged, while folds 2 and 3, which train on those
+rows, both move.
+
+`tests/test_selection.py` proves the other half: scrambling the test labels
+leaves the cross-validated ranking, every fold mean and the winner exactly as
+they were, while the final test score does change. Selection is blind to the
+test set; the final measurement is the only thing that reads it.
 
 ### Result
 
@@ -420,8 +582,10 @@ tools. **No agent exists yet.**
 | `list_available_models(task_type=None)` | Serialisable records of every registered model |
 | `get_model_spec(model_name, ...)` | A validated `ModelSpec` |
 | `train_model(prepared, spec)` | A `TrainedModel` |
-| `compare_models(prepared, ...)` | A ranked `ModelComparison` |
+| `cross_validate_model(prepared, spec, folds=5)` | A `CrossValidationResult` |
+| `compare_models(prepared, strategy=..., folds=...)` | A ranked `ModelComparison` |
 | `select_best_model(comparison)` | The winning `ComparisonEntry` |
+| `select_and_evaluate_best_model(prepared, ...)` | A `ModelSelectionResult` |
 
 ### Reproducibility
 
@@ -447,6 +611,7 @@ when the ML layer is eventually exposed over HTTP.
 | `EmptyFeatureSetError` | No feature columns remain |
 | `ConfigurationError` | An invalid strategy or split parameter |
 | `InsufficientDataError` | Too few labelled rows to split, or an empty split half |
+| `InvalidFoldCountError` | Fewer than two folds, more folds than rows, or a class smaller than the fold count |
 | `UnknownModelError` | The model is not in the registry |
 | `IncompatibleTaskError` | The model does not solve the dataset's task |
 | `InvalidHyperparameterError` | A hyperparameter the estimator does not accept |
@@ -471,18 +636,22 @@ external dataset or touches the network.
 
 - **No hyperparameter optimisation.** Models run on registry defaults plus any
   hyperparameters a caller supplies. There is no search, no tuning, no Optuna.
-- **No cross-validation.** Scores come from a single held-out test set, so they
-  carry the variance of one split. The splitting functions are written so a
-  cross-validation strategy can reuse them.
 - **No model persistence.** Trained models live in memory for the lifetime of
   the process; nothing is written to disk or to a registry.
 - **No explainability.** Feature names are preserved for it, but SHAP and
   feature importance are not implemented.
 - **Six models only.** No XGBoost or LightGBM yet; the registry is designed so
   adding them is one definition.
-- The test set is used for the reported metrics *and* for choosing the best
-  model, which optimistically biases the winner's score. A separate validation
-  split belongs with cross-validation.
+- Cross-validation is plain k-fold. There is no repeated k-fold, no
+  group-aware or time-series splitting, and no nested cross-validation — the
+  last of which would matter if hyperparameters were being tuned, which they
+  are not.
+- The cross-validated mean is itself an estimate with its own uncertainty. A
+  gap between two models much smaller than their standard deviations is not
+  evidence that one is better; the spread is reported so that can be judged.
+- Under the `holdout` strategy, selection and final evaluation are the same
+  measurement, so the reported score is optimistic. The result says so
+  (`final_evaluation_is_unbiased` is `False`); prefer cross-validation.
 - The binary positive class is the last label in sorted order. It is reported
   explicitly, but it is a convention rather than a choice the caller makes.
 - `training_seconds` is wall-clock time on the machine that ran it — useful for

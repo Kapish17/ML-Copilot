@@ -13,6 +13,7 @@ from ml.features.config import PreprocessingConfig
 from ml.pipelines.preparation import prepare_dataset
 from ml.pipelines.result import PreparedDataset
 from ml.tests.factories import (
+    imbalanced_classification_frame,
     learnable_classification_frame,
     multiclass_frame,
     regression_frame,
@@ -56,6 +57,17 @@ def classification_prepared() -> PreparedDataset:
 def regression_prepared() -> PreparedDataset:
     """A prepared regression dataset with a genuine linear relationship."""
     return prepare_dataset(regression_frame(rows=200), regression_config())
+
+
+@pytest.fixture(scope="session")
+def imbalanced_prepared() -> PreparedDataset:
+    """A prepared dataset with a small but workable minority class."""
+    config = PreprocessingConfig(
+        target_column="outcome",
+        numeric_columns=("measure", "noise"),
+        task_type="classification",
+    )
+    return prepare_dataset(imbalanced_classification_frame(), config)
 
 
 @pytest.fixture(scope="session")
