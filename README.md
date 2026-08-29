@@ -12,10 +12,12 @@ answer grounded in retrievable context.
 > without ever reading the test set, retrains it on the full training data,
 > measures it once on the untouched test set, and explains what the chosen
 > model is doing with SHAP, and records the whole run so it can be found and
-> compared later — all of it reachable over HTTP. **There is no hyperparameter
-> optimisation, no MLflow, no database, no model serving, no LLM, no RAG and no
-> agent.** Experiment history is kept in local JSON files. Everything marked
-> *planned* below is not implemented.
+> compared later — all of it reachable over HTTP. The retrieval layer then
+> makes that documentation and history searchable, returning cited evidence.
+> **There is no hyperparameter optimisation, no MLflow, no database, no model
+> serving, no LLM and no agent** — retrieval returns evidence, and nothing
+> generates an answer from it yet. Experiment history and the vector index are
+> local files. Everything marked *planned* below is not implemented.
 
 ---
 
@@ -38,7 +40,8 @@ answer grounded in retrievable context.
 | Cross-validated model selection | K-fold selection on training data, one unbiased test measurement | **implemented** |
 | Hyperparameter optimisation | Automated search over model settings | planned |
 | Explainable AI | Global and per-prediction feature attributions (SHAP) | **implemented** |
-| Retrieval-augmented answers | Grounded responses over docs and past experiment results | planned |
+| Retrieval over docs and experiments | Semantic search with metadata filtering and citations, over project documentation and run history | **implemented** |
+| Retrieval-augmented answers | Grounded natural-language responses built from that evidence | planned (needs the LLM) |
 | Agentic workflows | Multi-step, tool-using analysis planned and executed by an agent | planned |
 | Experiment tracking | Reproducible run history — dataset fingerprint, configuration, metrics and explanations, stored locally as JSON | **implemented** (MLflow not implemented) |
 | HTTP API | Dataset profiling, experiment execution, history and comparison over REST | **implemented** |
@@ -58,18 +61,21 @@ answer grounded in retrievable context.
                │        │          │
    ┌───────────▼──┐ ┌───▼───────┐ ┌▼──────────────┐
    │  ML layer    │ │ RAG layer │ │  Agent layer  │
-   │ preprocessing│ │ ingestion,│ │ tools,        │
-   │ ✓ training ✓ │ │ retrieval,│ │ workflows,    │
-   │ explainability│ │ prompts  │ │ state         │
-   │      ✓       │ │ (planned) │ │  (planned)    │
+   │ preprocessing│ │ ingestion │ │ tools,        │
+   │ ✓ training ✓ │ │ chunking  │ │ workflows,    │
+   │ explainability│ │ retrieval│ │ state         │
+   │      ✓       │ │     ✓     │ │  (planned)    │
    └───────┬──────┘ └─────┬─────┘ └───────┬───────┘
            │              │               │
    ┌───────▼──────┐ ┌─────▼─────┐ ┌───────▼───────┐
-   │ Experiment   │ │  Qdrant   │ │  PostgreSQL   │
-   │  tracking    │ │  vectors  │ │   metadata    │
-   │ local JSON ✓ │ │ (planned) │ │   (planned)   │
-   │ MLflow: no   │ │           │ │               │
-   └──────────────┘ └───────────┘ └───────────────┘
+   │ Experiment   │ │  Vector   │ │  PostgreSQL   │
+   │  tracking    │ │   store   │ │   metadata    │
+   │ local JSON ✓ │ │ local ✓   │ │   (planned)   │
+   │ MLflow: no   │ │ Qdrant: no│ │               │
+   └───────┬──────┘ └─────▲─────┘ └───────────────┘
+           │              │
+           └──────────────┘
+     experiments feed the index; the index never writes back
 ```
 
 The backend is the single entry point. Domain logic lives in dedicated
@@ -91,7 +97,9 @@ layer.
 | Experiment tracking (storage) | Local JSON files behind an `ExperimentStore` interface | **implemented** |
 | Experiment tracking (server) | MLflow | **not implemented** |
 | LLM integration | Provider-agnostic LLM client | planned |
-| Retrieval | Qdrant vector database | planned |
+| Embeddings | Local, offline by default (hashed n-grams); optional `all-MiniLM-L6-v2` | **implemented** |
+| Retrieval (index) | Local persistent vector store behind a `VectorStore` interface | **implemented** |
+| Retrieval (server) | Qdrant vector database | **not implemented** |
 | Agents | Orchestrated multi-step workflows | planned |
 | Database | PostgreSQL | planned |
 | Frontend | Next.js, TypeScript | planned |
@@ -104,7 +112,7 @@ ml-copilot/
 ├── backend/       FastAPI service (api, core, models, schemas, services, tests)
 ├── frontend/      Next.js application (placeholder)
 ├── ml/            Preprocessing, training, selection, explainability, experiment tracking
-├── rag/           Ingestion, retrieval and prompt assets
+├── rag/           Documentation and experiment retrieval (chunking, embeddings, vector store)
 ├── agents/        Agent tools, workflows and state
 ├── data/          Local datasets — raw and processed (git-ignored contents)
 ├── configs/       Configuration files
@@ -1041,6 +1049,160 @@ implemented**.
 
 ---
 
+## Retrieval over documentation and experiments
+
+Everything above produces knowledge: documentation that says how the system
+works, and experiment records that say what was actually run. The retrieval
+layer makes both searchable, so a question can be answered from what this
+project knows about itself rather than from what a model happens to remember.
+
+> **LLM generation is not implemented yet.** This layer returns ranked
+> passages with citations. It never writes an answer, draws a conclusion or
+> interprets a result. What is built is the part that decides *what a future
+> model gets to see*, and makes every sentence of a future answer traceable to
+> a passage that exists.
+
+**Also not implemented:** Qdrant, PostgreSQL, any vector database, LangChain,
+LangGraph, agents, autonomous tool calling, and any hosted embedding API.
+
+```
+question → embed → filter by metadata → rank by cosine similarity
+                                      → ranked passages, each with a citation
+                                      → (later: LLM → grounded answer)
+```
+
+### What is indexed
+
+**Project documentation** — the four READMEs, from an explicit allowlist plus
+one optional `docs/` directory. Source code, datasets, model artefacts,
+virtual environments, `.git` and the experiment store are not merely skipped;
+they are never candidates. `.env` and anything whose name suggests a
+credential is refused even when explicitly configured.
+
+**Experiment records** — every stored `ExperimentRun`, rendered as structured
+Markdown with a heading per section, so a question about feature importance
+finds the importance section rather than the whole run:
+
+```
+## Model selection
+Selection strategy: cross_validation
+Selection score: 0.8623 ± 0.0465
+Candidate results:
+- logistic_regression: 0.8623 ± 0.0465 (succeeded)
+- random_forest_classifier: 0.7998 ± 0.0474 (succeeded)
+
+## Explainability
+Top features by importance:
+1. income: 0.9962
+2. tenure_months: 0.8579
+```
+
+**Only stored facts are written.** The renderer never produces "the model
+performed well" or "the forest was the better choice", because neither is in
+the record — ungrounded prose in the index would be retrieved and cited as
+fact later.
+
+The dependency runs one way: `ml/experiments → rag/ingestion → rag/retrieval`.
+Nothing in `ml/` knows the index exists, so experiments can be recorded with
+no index present and the index can be rebuilt from the store at any time.
+
+### Chunking, embeddings and the store
+
+Chunking follows the document's own structure — sections, then paragraphs,
+then a line boundary as a last resort — never a fixed character count. Fenced
+code blocks are kept whole, tiny fragments are merged, and the heading path
+travels with each chunk, so a passage read alone still says what it is about.
+
+Embeddings are behind an interface. The **default provider runs offline**:
+hashed word and character n-grams from scikit-learn, no download, no API key,
+no network, and deterministic across machines. It matches on term overlap
+rather than meaning — an honest limitation, and the reason retrieval quality
+is measured rather than asserted. An optional
+`sentence-transformers/all-MiniLM-L6-v2` provider is supported for real
+semantic matching, lazily loaded and not installed by default (it costs about
+4 GB of dependencies and a ~90 MB model download).
+
+The store is a persistent local index — a float32 matrix, a JSONL record file
+and a manifest, written atomically — that survives process restarts. Row *i*
+of the matrix is the chunk on line *i* of the records, and a mismatch is
+refused rather than guessed at.
+
+### Searching
+
+```python
+from rag import RagConfig, RagIndexer, RetrievalService
+from ml.experiments import LocalExperimentStore
+
+indexer = RagIndexer(RagConfig())
+indexer.index_documentation()
+indexer.sync_experiments(LocalExperimentStore())
+
+service = RetrievalService(RagConfig())
+for result in service.search("How is data leakage prevented?", top_k=3):
+    print(result.rank, round(result.score, 3), result.citation)
+```
+
+```
+1 0.234 docs:readme#leakage-prevention
+2 0.227 docs:ml-readme#leakage-prevention
+3 0.220 docs:ml-readme#preprocessing
+```
+
+**The similarity metric is cosine.** Metadata filtering happens *before*
+ranking, so asking for five classification experiments searches classification
+experiments rather than ranking everything and discarding the rest:
+
+```python
+service.search_experiments(
+    "which model scored best on the test set",
+    task_type="classification",
+    dataset_fingerprint="86494cff7a45cb7f",
+)
+```
+
+### Citations
+
+Every chunk carries a reference that resolves:
+
+```
+docs:ml-readme#leakage-prevention
+experiment:exp_84a8d53a1f5f_20260828T134457Z_e420#final-evaluation
+```
+
+An experiment citation *is* the id the store and the HTTP API already use, so
+`GET /api/v1/experiments/exp_84a8…` resolves it. When a future answer says
+"according to experiment exp_84a8…", the claim can be checked.
+
+### Measuring retrieval quality
+
+A retriever that returns five confident passages about the wrong subject is
+worse than one that returns nothing, because a model will use them. So quality
+is measured with **Hit@K** (did any relevant document appear?) and **Recall@K**
+(what fraction did?), over a small deterministic set of questions whose
+answers really do live in the indexed documentation:
+
+```
+Retrieval evaluation over 5 queries at k=5
+  Hit@5:    100.00%
+  Recall@5: 90.00%
+```
+
+Answer quality is not evaluated, because there are no answers to evaluate.
+
+### Indexing is incremental and reproducible
+
+Document and chunk ids derive from content and position — no random UUID
+appears anywhere — so re-indexing an unchanged source is a no-op, a changed
+source has its old chunks deleted before the new ones are written, and two
+machines indexing the same repository agree on every identifier. A manifest
+records each source's hash and the embedding provider that built the index; a
+provider change triggers a rebuild rather than a mix of incomparable vectors.
+
+Retrieval is a library API in this commit — there is **no search endpoint**
+yet. See `rag/README.md` for the full design.
+
+---
+
 ## Current implementation status
 
 **Implemented**
@@ -1072,7 +1234,12 @@ implemented**.
 - An HTTP API over the whole engine: run an experiment on an uploaded dataset,
   list and fetch stored experiments, and compare them — with one error
   envelope, JSON-safe responses and generated OpenAPI documentation.
-- Test suites covering the backend service, the API contract and the ML layer.
+- A retrieval layer over project documentation and experiment history:
+  structure-aware chunking, a pluggable embedding interface with an offline
+  default, a persistent local vector store, cosine search with metadata
+  filtering, stable citations, and Recall@K/Hit@K evaluation.
+- Test suites covering the backend service, the API contract, the ML layer and
+  the retrieval layer.
 
 **Not implemented yet**
 
@@ -1081,8 +1248,9 @@ implemented**.
   there is no prediction or model-serving endpoint
 - **MLflow** — experiment tracking runs on local JSON files only
 - Ingestion formats other than CSV (Excel, JSON, Parquet, SQL, APIs)
-- RAG ingestion and retrieval
-- LLM integration and agentic workflows
+- **LLM generation** — retrieval returns evidence; nothing reads it yet
+- Agentic workflows, autonomous tool calling, LangChain and LangGraph
+- A search endpoint — retrieval is a library API in this commit
 - PostgreSQL, Qdrant and any database access
 - Background execution — no Celery, Redis, queue or worker; runs are synchronous
 - Authentication and rate limiting
@@ -1135,7 +1303,7 @@ scikit-learn and SHAP). From the repository root, install both for a full
 development environment:
 
 ```bash
-pip install -r backend/requirements.txt -r ml/requirements.txt
+pip install -r backend/requirements.txt -r ml/requirements.txt -r rag/requirements.txt
 ```
 
 ## Running the backend
@@ -1156,7 +1324,7 @@ curl -X POST http://127.0.0.1:8000/api/v1/datasets/profile -F "file=@customers.c
 
 ## Running the tests
 
-From the repository root, which runs both the backend and the ML suites:
+From the repository root, which runs the backend, ML and retrieval suites:
 
 ```bash
 pytest
@@ -1167,10 +1335,14 @@ Or one suite at a time:
 ```bash
 pytest backend/tests
 pytest ml/tests
+pytest rag/tests
 ```
 
 Add `-v` for per-test output. Every test builds its data in memory — none reads
-an external dataset or touches the network.
+an external dataset, downloads a model or touches the network. The retrieval
+tests use a deterministic fake embedding provider; the one test that exercises
+the real sentence-transformer model skips itself unless the package is
+installed and the model is already cached.
 
 ## Roadmap
 
@@ -1182,8 +1354,8 @@ an external dataset or touches the network.
 6. ~~**Explainability with SHAP** — global importance, local contributions, fallback~~
 7. ~~**Experiment tracking** — dataset fingerprints, versioned run records, local persistence, comparison~~ *(MLflow deferred)*
 8. **Experiment API** — run, list, fetch and compare experiments over HTTP *(current)*
-9. RAG layer over documentation and run history
-10. LLM integration
+9. **Retrieval over documentation and run history** — chunking, embeddings, vector store, cited evidence *(current; LLM deferred)*
+10. LLM integration — grounded answers built from that evidence
 11. Agentic workflows
 12. Next.js frontend
 13. Containerisation and deployment

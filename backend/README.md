@@ -308,7 +308,7 @@ Running experiments additionally needs `ml/requirements.txt`
 (scikit-learn and SHAP), since this service now calls the ML layer:
 
 ```bash
-pip install -r backend/requirements.txt -r ml/requirements.txt
+pip install -r backend/requirements.txt -r ml/requirements.txt -r rag/requirements.txt
 ```
 
 Dependencies are added only when the code that needs them lands. **Commit 8

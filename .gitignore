@@ -100,6 +100,10 @@ mlartifacts/
 # ---------------------------------------------------------------------------
 # Vector store / local service volumes
 # ---------------------------------------------------------------------------
+# The built retrieval index is derived data: it can be rebuilt from the
+# documentation and the experiment store at any time. The code that builds it
+# lives in rag/ and is tracked.
+rag/index/
 qdrant_storage/
 pgdata/
 

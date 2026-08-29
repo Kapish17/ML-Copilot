@@ -13,11 +13,15 @@ persistent record of every run.
 > establish causal relationships.**
 
 **Not implemented:** hyperparameter optimisation (no Optuna), **MLflow**, any
-database (no PostgreSQL), model persistence, XGBoost or LightGBM, and any LLM,
-RAG or agent integration. Experiment tracking is implemented, but against a
-local JSON store written by this package — trained models and SHAP explainers
+database (no PostgreSQL), model persistence, XGBoost or LightGBM, and any LLM
+or agent integration. Experiment tracking is implemented, but against a local
+JSON store written by this package — trained models and SHAP explainers
 themselves live in memory for the lifetime of the process and are never
 written to disk.
+
+The stored records are read by the retrieval layer in `rag/`, which makes them
+searchable. That dependency runs one way only: this package does not import
+`rag/` and does not know an index exists. See `rag/README.md`.
 
 ## Format-agnostic by design
 
@@ -800,7 +804,9 @@ numbers.
 ### Programmatic API
 
 Structured facts, not prose — the form a future LLM layer would receive and
-write sentences from. **No LLM, RAG or agent exists yet.**
+write sentences from. The retrieval layer in `rag/` already indexes these
+findings so they can be found and cited; **no LLM or agent exists yet**, so
+nothing turns them into sentences.
 
 | Function | Returns |
 | --- | --- |
@@ -1069,10 +1075,18 @@ from disk, and there is no shared history between machines. The replacement —
 MLflow, a PostgreSQL table, or both — implements `ExperimentStore` and nothing
 above it changes. **Neither is implemented today.**
 
-Stored runs are also the raw material for the RAG layer in a later commit: each
-record is already a small, self-describing document with a stable identifier
-and readable field names, which is what makes it retrievable. **No RAG, vector
-database or embedding is implemented here.**
+Stored runs are the raw material for the retrieval layer in `rag/`: each record
+is a small, self-describing document with a stable identifier and readable
+field names, which is what makes it retrievable. `rag/ingestion/experiments.py`
+renders one into structured text and indexes it, so a question like "which
+model won on this dataset" can be answered from history with a citation back
+to the run.
+
+The dependency runs one way — `ml/experiments → rag/ingestion → rag/retrieval`.
+Nothing in this package imports `rag/`, so experiments can be recorded with no
+index present, and the index can be rebuilt from the store at any time.
+**No vector database or embedding is implemented here**, and none is needed:
+the retrieval layer owns all of that.
 
 ## Errors
 
@@ -1114,8 +1128,8 @@ structured result with a reason.
 ## Setup and tests
 
 ```bash
-pip install -r backend/requirements.txt -r ml/requirements.txt
-pytest              # from the repository root: runs the backend and ML suites
+pip install -r backend/requirements.txt -r ml/requirements.txt -r rag/requirements.txt
+pytest              # from the repository root: backend, ML and retrieval suites
 pytest ml/tests     # ML layer only
 ```
 

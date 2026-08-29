@@ -1,0 +1,35 @@
+# Dependencies of the retrieval layer.
+#
+# Install alongside the other components for a full development environment:
+#
+#   pip install -r backend/requirements.txt -r ml/requirements.txt \
+#               -r rag/requirements.txt
+
+# Vector arithmetic and the stored index. Shared with the ML layer — keep this
+# pin in sync with ml/requirements.txt.
+numpy==2.4.6
+
+# The default embedding provider is built on HashingVectorizer, which is
+# stateless: no vocabulary to fit, no model to download, no API key, and the
+# same text embeds identically on every machine. Shared with the ML layer —
+# keep this pin in sync with ml/requirements.txt.
+scikit-learn==1.9.0
+
+# ---------------------------------------------------------------------------
+# Optional: neural embeddings.
+#
+# Uncomment to enable the `sentence_transformer` provider, then set
+# RAG_EMBEDDING_PROVIDER=sentence_transformer and rebuild the index — vectors
+# from two providers are not comparable, so the provider change requires a
+# rebuild rather than an incremental update.
+#
+# It is not enabled by default because of what it costs:
+#   * sentence-transformers pulls in PyTorch and transformers, roughly 4 GB
+#     installed against about 1 GB for the whole project without it;
+#   * all-MiniLM-L6-v2 (384 dimensions, ~90 MB) is downloaded from the
+#     Hugging Face hub on first use and cached afterwards.
+#
+# Inference runs locally either way: no document or experiment content is sent
+# anywhere, and no API key is involved.
+# ---------------------------------------------------------------------------
+# sentence-transformers==6.0.0
