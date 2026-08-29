@@ -1,13 +1,27 @@
-"""Orchestration of the dataset profiling workflow.
+"""Orchestration of the dataset ingestion and profiling workflow.
 
 The service is the only entry point route handlers use. It sequences
 validation, loading, profiling, quality analysis and target analysis, and
 returns a fully built response model. It holds no mutable state: everything it
 needs comes from the settings passed at construction.
+
+It is also the single ingestion adapter. The experiment runner needs the same
+validated bytes turned into the same standardised DataFrame, so the two steps
+are exposed separately — :meth:`load_upload` produces the DataFrame,
+:meth:`profile_frame` profiles one — and no caller anywhere re-implements file
+validation or CSV parsing::
+
+    upload -> validate -> DataFrame -> profile
+                             |
+                             +-> experiment runner
+
+CSV is the only implemented format. Another format means another loader behind
+:meth:`load_content`; nothing downstream of the DataFrame changes.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -25,6 +39,18 @@ from app.services.datasets.validation import (
     validate_extension,
     validate_size,
 )
+
+
+@dataclass(frozen=True)
+class LoadedDataset:
+    """A validated dataset in its standardised in-memory form.
+
+    ``filename`` is kept only for display and is already path-free; nothing
+    downstream may use it to reach the filesystem.
+    """
+
+    frame: pd.DataFrame
+    filename: str
 
 
 def _normalise_target(target_column: str | None) -> str | None:
@@ -47,13 +73,57 @@ class DatasetProfilingService:
         """
         self._settings = settings
 
+    # -- Ingestion ---------------------------------------------------------
+
+    async def load_upload(
+        self, upload: AsyncReadable, filename: str | None
+    ) -> LoadedDataset:
+        """Validate an in-flight upload and parse it into a DataFrame.
+
+        The extension is checked before any bytes are read, so an unsupported
+        file is rejected without being buffered, and the bytes are never
+        written anywhere: the upload lives in memory for the length of the
+        request only.
+
+        Args:
+            upload: The incoming file object.
+            filename: Client-supplied filename, used only for its extension.
+
+        Returns:
+            LoadedDataset: The parsed frame and the path-free filename.
+
+        Raises:
+            DatasetError: If the upload or its content fails validation.
+        """
+        name = safe_filename(filename)
+        validate_extension(name, self._settings)
+        content = await read_upload(upload, self._settings)
+        return LoadedDataset(frame=load_csv(content, self._settings), filename=name)
+
+    def load_content(self, filename: str | None, content: bytes) -> LoadedDataset:
+        """Validate dataset bytes already in memory and parse them.
+
+        Args:
+            filename: Name the content was uploaded under.
+            content: Raw file bytes.
+
+        Returns:
+            LoadedDataset: The parsed frame and the path-free filename.
+
+        Raises:
+            DatasetError: If the content fails validation.
+        """
+        name = safe_filename(filename)
+        validate_extension(name, self._settings)
+        validate_size(len(content), self._settings)
+        return LoadedDataset(frame=load_csv(content, self._settings), filename=name)
+
+    # -- Profiling ---------------------------------------------------------
+
     async def profile_upload(
         self, upload: AsyncReadable, filename: str | None, target_column: str | None = None
     ) -> DatasetProfileResponse:
         """Profile an in-flight upload.
-
-        The extension is checked before any bytes are read, so an unsupported
-        file is rejected without being buffered.
 
         Args:
             upload: The incoming file object.
@@ -66,10 +136,12 @@ class DatasetProfilingService:
         Raises:
             DatasetError: If the upload or its content fails validation.
         """
-        name = safe_filename(filename)
-        validate_extension(name, self._settings)
-        content = await read_upload(upload, self._settings)
-        return self._build_profile(name, content, _normalise_target(target_column))
+        loaded = await self.load_upload(upload, filename)
+        return self.profile_frame(
+            loaded.frame,
+            filename=loaded.filename,
+            target_column=_normalise_target(target_column),
+        )
 
     def profile_content(
         self, filename: str | None, content: bytes, target_column: str | None = None
@@ -87,22 +159,34 @@ class DatasetProfilingService:
         Raises:
             DatasetError: If the content fails validation.
         """
-        name = safe_filename(filename)
-        validate_extension(name, self._settings)
-        validate_size(len(content), self._settings)
-        return self._build_profile(name, content, _normalise_target(target_column))
+        loaded = self.load_content(filename, content)
+        return self.profile_frame(
+            loaded.frame,
+            filename=loaded.filename,
+            target_column=_normalise_target(target_column),
+        )
 
-    def _build_profile(
-        self, filename: str, content: bytes, target_column: str | None
+    def profile_frame(
+        self,
+        frame: pd.DataFrame,
+        *,
+        filename: str = "dataset",
+        target_column: str | None = None,
     ) -> DatasetProfileResponse:
-        """Run the profiling pipeline over validated bytes."""
-        frame = load_csv(content, self._settings)
-        return self._profile_frame(frame, filename=filename, target_column=target_column)
+        """Profile an already-standardised DataFrame.
 
-    def _profile_frame(
-        self, frame: pd.DataFrame, *, filename: str, target_column: str | None
-    ) -> DatasetProfileResponse:
-        """Assemble the response from a validated DataFrame."""
+        This is the format-agnostic entry point: it knows nothing about files.
+        The experiment runner uses it so that one profiling implementation
+        serves both the profiling endpoint and experiment execution.
+
+        Args:
+            frame: A standardised dataset.
+            filename: Label for the response; never used as a path.
+            target_column: Optional target column to analyse.
+
+        Returns:
+            DatasetProfileResponse: The complete dataset profile.
+        """
         columns = profile_columns(frame, self._settings)
         summary = summarise_dataset(frame, columns)
 

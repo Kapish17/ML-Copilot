@@ -4,6 +4,11 @@ Every failure leaves the API in the same shape::
 
     {"error": {"code": "...", "message": "...", "details": {...}}}
 
+That holds for every layer: dataset validation, preprocessing, model selection,
+explainability and experiment storage all answer in the same shape, even though
+only the backend's own errors know anything about HTTP. Errors from ``ml`` are
+translated by :mod:`app.core.ml_errors`.
+
 Unexpected exceptions are logged server-side and answered with a generic
 message, so stack traces and internal details never reach an API consumer.
 """
@@ -20,6 +25,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.errors import MLCopilotError
+from app.core.ml_errors import MLError, is_client_error, translate_ml_error
 from app.schemas.errors import ErrorDetail, ErrorResponse
 
 logger = logging.getLogger(__name__)
@@ -70,6 +76,27 @@ async def handle_application_error(_: Request, exc: MLCopilotError) -> JSONRespo
     )
 
 
+async def handle_ml_error(request: Request, exc: MLError) -> JSONResponse:
+    """Return the envelope for an error raised by the ML or experiment layer.
+
+    The ML packages know nothing about HTTP, so the mapping to a status lives
+    in :mod:`app.core.ml_errors`. A failure that maps to 5xx is logged with its
+    real cause and answered with a generic message; a 4xx is the caller's to
+    fix, so its message is passed through with any filesystem path removed.
+    """
+    code, status_code, message, details = translate_ml_error(exc)
+    if not is_client_error(exc):
+        logger.exception(
+            "ML layer %s while processing %s %s",
+            type(exc).__name__,
+            request.method,
+            request.url.path,
+        )
+    return build_error_response(
+        status_code=status_code, code=code, message=message, details=details
+    )
+
+
 async def handle_validation_error(
     _: Request, exc: RequestValidationError
 ) -> JSONResponse:
@@ -111,6 +138,7 @@ async def handle_unexpected_error(request: Request, exc: Exception) -> JSONRespo
 def register_exception_handlers(application: FastAPI) -> None:
     """Attach every exception handler to the application."""
     application.add_exception_handler(MLCopilotError, handle_application_error)
+    application.add_exception_handler(MLError, handle_ml_error)
     application.add_exception_handler(RequestValidationError, handle_validation_error)
     application.add_exception_handler(StarletteHTTPException, handle_http_exception)
     application.add_exception_handler(Exception, handle_unexpected_error)

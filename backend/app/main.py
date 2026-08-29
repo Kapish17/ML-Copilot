@@ -35,6 +35,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         title=config.app_name,
         version=config.app_version,
         summary="Backend service for ML Copilot, an AI data scientist assistant.",
+        description=(
+            "Profile a tabular dataset, run a complete machine-learning "
+            "experiment on it, and read back the history of what has been "
+            "run.\n\n"
+            "**CSV is currently supported; the ML pipeline is intentionally "
+            "format-agnostic** — everything downstream of ingestion works on "
+            "a standardised DataFrame.\n\n"
+            "An experiment profiles the data, prepares it with a leakage-safe "
+            "train/test split, cross-validates every candidate model on the "
+            "training rows only, retrains the winner and measures it **once** "
+            "on the untouched test set, explains it with SHAP, and stores the "
+            "whole run as a record identified by the dataset's content "
+            "fingerprint.\n\n"
+            "Runs are synchronous. Records are local JSON files: MLflow, any "
+            "database, model serving, background workers, authentication, LLM, "
+            "RAG and agent features are not implemented.\n\n"
+            "Every failure returns the same envelope: "
+            "`{\"error\": {\"code\", \"message\", \"details\"}}`."
+        ),
         docs_url=DOCS_URL,
     )
 
@@ -44,7 +63,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_exception_handlers(application)
     application.include_router(api_router)
 
-    @application.get("/", response_model=ServiceInfo, tags=["system"])
+    @application.get(
+        "/",
+        response_model=ServiceInfo,
+        tags=["system"],
+        summary="Describe the running service",
+    )
     def read_root(active_settings: SettingsDep) -> ServiceInfo:
         """Return basic information about the running service."""
         return ServiceInfo(
@@ -54,7 +78,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             docs_url=DOCS_URL,
         )
 
-    @application.get("/health", response_model=HealthStatus, tags=["system"])
+    @application.get(
+        "/health",
+        response_model=HealthStatus,
+        tags=["system"],
+        summary="Report service liveness",
+    )
     def health_check(active_settings: SettingsDep) -> HealthStatus:
         """Report whether the service is up and able to serve requests."""
         return HealthStatus(

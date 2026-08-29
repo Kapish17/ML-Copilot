@@ -12,9 +12,10 @@ answer grounded in retrievable context.
 > without ever reading the test set, retrains it on the full training data,
 > measures it once on the untouched test set, and explains what the chosen
 > model is doing with SHAP, and records the whole run so it can be found and
-> compared later. **There is no hyperparameter optimisation, no MLflow, no
-> database, no LLM, no RAG and no agent.** Experiment history is kept in local
-> JSON files. Everything marked *planned* below is not implemented.
+> compared later — all of it reachable over HTTP. **There is no hyperparameter
+> optimisation, no MLflow, no database, no model serving, no LLM, no RAG and no
+> agent.** Experiment history is kept in local JSON files. Everything marked
+> *planned* below is not implemented.
 
 ---
 
@@ -40,6 +41,7 @@ answer grounded in retrievable context.
 | Retrieval-augmented answers | Grounded responses over docs and past experiment results | planned |
 | Agentic workflows | Multi-step, tool-using analysis planned and executed by an agent | planned |
 | Experiment tracking | Reproducible run history — dataset fingerprint, configuration, metrics and explanations, stored locally as JSON | **implemented** (MLflow not implemented) |
+| HTTP API | Dataset profiling, experiment execution, history and comparison over REST | **implemented** |
 | Web interface | Dataset upload, run monitoring, results and chat | planned |
 
 ## High-level architecture
@@ -50,7 +52,7 @@ answer grounded in retrievable context.
              └───────────┬───────────┘
                          │ HTTP
              ┌───────────▼───────────┐
-             │    FastAPI backend    │   ← implemented: system + dataset routes
+             │    FastAPI backend    │   ← system, dataset, experiment routes
              │  api · services · db  │
              └─┬────────┬──────────┬─┘
                │        │          │
@@ -128,15 +130,16 @@ path or a CSV-specific object.
 
 ```
 ingestion adapter  ->  DataFrame  ->  profiling  ->  configuration  ->  preprocessing  ->  training
-   (CSV today;                                                                            (planned)
+   (CSV today;
     Excel, JSON,
     Parquet, SQL,
     API planned)
 ```
 
 Adding a format therefore means writing one adapter that returns a DataFrame.
-Profiling, preprocessing and the future training code need no changes and have
-no knowledge of where the data came from.
+Profiling, preprocessing, training and the experiment runner need no changes
+and have no knowledge of where the data came from — the runner's entry point
+takes a DataFrame, and the HTTP upload path exists only to produce one.
 
 ---
 
@@ -797,9 +800,9 @@ SHAP is not free, so rows are capped (`max_explanation_rows`, default 500) and
 the excess sampled deterministically. Sampling is never silent: `sample_count`
 reports the rows actually used and a warning records the reduction.
 
-Training, selection and explanation are **not exposed over HTTP yet** — they
-are a library API, with `summary()` as the boundary that keeps sklearn objects
-out of any future response.
+Training, selection and explanation are reached over HTTP through
+`POST /api/v1/experiments/run` — see **The HTTP API** below. The `summary()`
+boundary is what keeps sklearn objects out of those responses.
 
 ---
 
@@ -872,7 +875,169 @@ different tasks rather than putting **RMSE and F1 in the same column**.
 - **No secrets are captured.** The environment section records interpreter, platform, library versions and the seed. No hostname, username, file path or environment variable is read, so no API key or token can reach a record.
 - **Versioned records.** Every record carries `"schema_version": "1.0"`; an unknown or missing version is refused rather than half-read.
 
-Experiment tracking is a library API and is **not exposed over HTTP yet**.
+---
+
+## The HTTP API
+
+Everything above is reachable over HTTP. The API is an **adapter around the ML
+engine**: it validates requests, orders the existing steps and turns results
+into JSON. No statistic, split, score or explanation is computed in a route —
+a test fails the build if a route module so much as imports sklearn, SHAP,
+numpy or pandas.
+
+```
+                       FastAPI
+                          │
+        ┌─────────────────┼─────────────────┐
+        ▼                 ▼                 ▼
+    Dataset          Experiment        Experiment
+    profiling          runner            history
+        │                 │                 │
+        └─────────────────┼─────────────────┘
+                          ▼
+                      ML engine
+                          │
+        ┌─────────────────┼─────────────────┐
+        ▼                 ▼                 ▼
+   Cross-validated      SHAP           Experiment
+     selection        explanation        storage
+```
+
+### Endpoints
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/` | Service name, version, environment and docs URL |
+| `GET` | `/health` | Liveness check |
+| `POST` | `/api/v1/datasets/profile` | Profile an uploaded CSV |
+| `POST` | `/api/v1/experiments/run` | Run a complete experiment and store it |
+| `GET` | `/api/v1/experiments` | List stored experiments, filtered and sorted |
+| `GET` | `/api/v1/experiments/capabilities` | Models, metrics and limits a request may use |
+| `GET` | `/api/v1/experiments/{experiment_id}` | Fetch one stored experiment |
+| `POST` | `/api/v1/experiments/compare` | Rank several stored experiments |
+
+Interactive documentation is at `/docs`; the schema is at `/openapi.json`.
+
+### Running an experiment
+
+A dataset is a file and cannot travel inside a JSON body, so the request is
+`multipart/form-data`: the file as an upload, the configuration as form fields.
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/experiments/run \
+  -F "file=@customers.csv" \
+  -F "target_column=renewed" \
+  -F "models=logistic_regression" \
+  -F "models=random_forest_classifier" \
+  -F "folds=5" \
+  -F "name=renewal baseline"
+```
+
+One request runs the whole pipeline:
+
+```
+upload → validate → DataFrame → profile → infer configuration
+      → apply explicit overrides → leakage-safe train/test split
+      → cross-validate every candidate on the training rows
+      → select the winner → retrain on the full training data
+      → ONE evaluation on the untouched test set
+      → SHAP global explanation → ExperimentRun → stored
+```
+
+Every field is optional. With none of them the service profiles the data,
+cross-validates every model that suits the detected task and keeps the winner
+— and warns that it chose the target column by convention.
+
+Execution is **synchronous**: the response arrives when the run has finished.
+No queue, worker or background execution is implemented.
+
+There is **no prediction or model-serving endpoint**. That is deliberate:
+experiment records do not contain the fitted model, so nothing exists to serve.
+Adding one would mean implementing model persistence, which is a separate
+decision rather than a side effect of building an API.
+
+### What comes back
+
+The response is the stored experiment record plus how the run went: identity
+and configuration hash, the dataset's content fingerprint and shape, the
+preprocessing decisions, every candidate and its score, the winner, the single
+untouched-test evaluation with its baseline and improvement, the ranked SHAP
+importances, the reproducibility metadata, and any warnings.
+
+It contains **only JSON-safe values**. A `Pipeline`, `ColumnTransformer`,
+estimator, `numpy.ndarray`, `DataFrame` or SHAP explainer cannot appear: the
+record is built by a serialiser that refuses them, and the response is then
+validated against a Pydantic model that has no field able to hold one. Tests
+assert both — that every leaf of a real response is a string, number, boolean
+or null, and that no artefact's text appears anywhere in it.
+
+### One error contract
+
+Every failure — dataset, preprocessing, model, explainability, experiment
+storage or request validation — answers in the same envelope:
+
+```json
+{"error": {"code": "incompatible_model_task", "message": "...", "details": {}}}
+```
+
+| Status | When |
+| --- | --- |
+| `400` | Invalid configuration: unknown model, metric, strategy, fold count, sort key or experiment id |
+| `404` | No experiment stored under that id |
+| `409` | The request conflicts with the data: a classifier for a regression target, or a comparison of runs judged by different metrics |
+| `413` | The upload or the dataset exceeds a configured limit |
+| `415` | Unsupported file type — only `.csv` is implemented |
+| `422` | The request or the data cannot be processed: missing target, no usable features, malformed CSV, too few rows |
+| `500` | An unexpected internal failure — logged with its cause, answered generically |
+
+The ML layer raises plain Python exceptions with no HTTP meaning;
+`backend/app/core/ml_errors.py` is the single place that maps them to a code
+and a status, and it strips anything path-like from the details on the way out.
+No stack trace, internal class name or filesystem path reaches a client on any
+path — including a 404, which never reveals where records are kept.
+
+### Experiment history over HTTP
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/experiments?task_type=classification\
+&sort_by=primary_metric&order=desc&limit=5"
+```
+
+Filters — dataset fingerprint, target, task, model, strategy, metric, tags —
+are optional and combine with "and". Sorting by score reads the metric's own
+declared direction. Comparison refuses runs that do not share a task and a
+metric rather than ranking an RMSE against an F1. All of it is Commit 7's
+`ExperimentQuery` and comparison logic; the API adds bounds, not a second query
+language, and **no database is involved**.
+
+Because a dataset is identified by its content, `?dataset_fingerprint=…` finds
+every run on the same data however the file was named when it was uploaded.
+
+### Uploads are not kept
+
+The file is validated and parsed in memory and never written anywhere. The
+client-supplied filename is reduced to a bare name before use, so no
+request-supplied path reaches the filesystem, and experiment ids are restricted
+to characters that cannot climb out of the store directory. What is stored is
+the record — fingerprint, shape, decisions, scores, explanation — never the
+dataset, the fitted pipeline or the explainer.
+
+### Still CSV only
+
+**CSV is currently supported; the ML pipeline is intentionally
+format-agnostic.** The runner's real entry point takes a standardised
+DataFrame — `run_experiment(frame, ...)` — and the file path exists only to
+produce one:
+
+```
+Input adapter → DataFrame → Profiler → Preprocessor → ML
+ (CSV today)
+```
+
+Adding Excel, JSON, Parquet, SQL or an HTTP source means writing one loader in
+the dataset service. Nothing in the runner, the ML layer or the experiment
+store changes, because none of them ever sees a file. Those formats are **not
+implemented**.
 
 ---
 
@@ -904,18 +1069,23 @@ Experiment tracking is a library API and is **not exposed over HTTP yet**.
   hashes, versioned JSON-safe run records, an `ExperimentStore` interface with
   a local atomic-write implementation, and filtering, sorting and
   direction-aware comparison over stored history.
+- An HTTP API over the whole engine: run an experiment on an uploaded dataset,
+  list and fetch stored experiments, and compare them — with one error
+  envelope, JSON-safe responses and generated OpenAPI documentation.
 - Test suites covering the backend service, the API contract and the ML layer.
 
 **Not implemented yet**
 
 - Hyperparameter optimisation (Optuna) and nested cross-validation
-- Model persistence — no fitted pipeline or explainer is written to disk
+- Model persistence — no fitted pipeline or explainer is written to disk, so
+  there is no prediction or model-serving endpoint
 - **MLflow** — experiment tracking runs on local JSON files only
 - Ingestion formats other than CSV (Excel, JSON, Parquet, SQL, APIs)
 - RAG ingestion and retrieval
 - LLM integration and agentic workflows
 - PostgreSQL, Qdrant and any database access
-- Authentication
+- Background execution — no Celery, Redis, queue or worker; runs are synchronous
+- Authentication and rate limiting
 - Frontend application
 - Containerisation and deployment
 
@@ -926,6 +1096,11 @@ Experiment tracking is a library API and is **not exposed over HTTP yet**.
 | `GET` | `/` | Service name, version, environment and docs URL |
 | `GET` | `/health` | Liveness check — returns `{"status": "ok", ...}` |
 | `POST` | `/api/v1/datasets/profile` | Profile an uploaded CSV file |
+| `POST` | `/api/v1/experiments/run` | Run a complete experiment and store it |
+| `GET` | `/api/v1/experiments` | List stored experiments, filtered and sorted |
+| `GET` | `/api/v1/experiments/capabilities` | Models, metrics and limits a request may use |
+| `GET` | `/api/v1/experiments/{experiment_id}` | Fetch one stored experiment |
+| `POST` | `/api/v1/experiments/compare` | Rank several stored experiments |
 
 Interactive API documentation is served at `/docs`.
 
@@ -1005,9 +1180,10 @@ an external dataset or touches the network.
 4. ~~**Model training and evaluation** — registry, metrics, baselines, comparison~~
 5. ~~**Cross-validation and model selection** — k-fold selection, one unbiased test evaluation~~
 6. ~~**Explainability with SHAP** — global importance, local contributions, fallback~~
-7. **Experiment tracking** — dataset fingerprints, versioned run records, local persistence, comparison *(current; MLflow deferred)*
-8. RAG layer over documentation and run history
-9. LLM integration
-10. Agentic workflows
-11. Next.js frontend
-12. Containerisation and deployment
+7. ~~**Experiment tracking** — dataset fingerprints, versioned run records, local persistence, comparison~~ *(MLflow deferred)*
+8. **Experiment API** — run, list, fetch and compare experiments over HTTP *(current)*
+9. RAG layer over documentation and run history
+10. LLM integration
+11. Agentic workflows
+12. Next.js frontend
+13. Containerisation and deployment

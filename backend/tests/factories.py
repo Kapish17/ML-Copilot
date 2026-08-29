@@ -48,6 +48,69 @@ def high_cardinality_csv(row_count: int = 60) -> bytes:
     return build_csv(["code", "bucket"], rows)
 
 
+def learnable_classification_csv(rows: int = 240) -> bytes:
+    """A binary target a model can genuinely learn, built deterministically.
+
+    ``income`` and ``tenure_months`` carry the signal and ``segment`` is a
+    categorical feature with a mild association, so cross-validation has
+    something real to separate. Roughly one label in eleven is flipped, which
+    keeps the problem learnable without being perfectly separable — a model
+    that scores 1.00 on synthetic data tells you nothing about whether the
+    pipeline works.
+
+    No randomness and no external file: the same bytes come out on every
+    machine, which is what makes the dataset's content fingerprint stable.
+    """
+    header = ["income", "tenure_months", "segment", "renewed"]
+    body: list[list[Any]] = []
+    for index in range(rows):
+        high = index % 2 == 0
+        income = 30_000 + (index % 40) * 400 + (12_000 if high else 0)
+        tenure = 4 + (index % 24) + (18 if high else 0)
+        segment = "business" if index % 3 == 0 else "retail"
+        label = high if index % 11 else not high
+        body.append([income, tenure, segment, "yes" if label else "no"])
+    return build_csv(header, body)
+
+
+def regression_csv(rows: int = 200) -> bytes:
+    """A continuous target with a real linear relationship to its features.
+
+    The price is a float with a distinct value in every row, so the target is
+    unambiguously continuous rather than a discrete code that happens to be
+    stored as a number.
+    """
+    header = ["size_sqm", "rooms", "district", "price"]
+    body: list[list[Any]] = []
+    for index in range(rows):
+        size = 45.0 + (index % 60) * 2.5 + index * 0.01
+        room_count = 1 + (index % 4)
+        district = ["north", "south", "centre"][index % 3]
+        price = round(1_500 * size + 9_000 * room_count + 37.5 * index, 2)
+        body.append([size, room_count, district, price])
+    return build_csv(header, body)
+
+
+def experiment_form(**fields: Any) -> dict[str, Any]:
+    """Render experiment options as multipart form fields.
+
+    Sequences stay lists, which the HTTP client sends as a repeated key, and
+    booleans become ``"true"``/``"false"`` — exactly how a browser or ``curl``
+    would submit them.
+    """
+    encoded: dict[str, Any] = {}
+    for key, value in fields.items():
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            encoded[key] = "true" if value else "false"
+        elif isinstance(value, (list, tuple)):
+            encoded[key] = [str(item) for item in value]
+        else:
+            encoded[key] = str(value)
+    return encoded
+
+
 def upload_payload(content: bytes, filename: str = "dataset.csv") -> dict[str, Any]:
     """Build the ``files=`` argument for a multipart upload."""
     return {"file": (filename, io.BytesIO(content), CSV_CONTENT_TYPE)}

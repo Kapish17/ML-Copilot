@@ -10,6 +10,6 @@ The workflow is split so each step can be tested on its own:
 ``service``     orchestration used by the API layer
 """
 
-from app.services.datasets.service import DatasetProfilingService
+from app.services.datasets.service import DatasetProfilingService, LoadedDataset
 
-__all__ = ["DatasetProfilingService"]
+__all__ = ["DatasetProfilingService", "LoadedDataset"]

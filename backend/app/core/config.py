@@ -5,8 +5,9 @@ repository root). The implementation deliberately relies on the standard
 library only; a richer configuration layer will be introduced when the
 application actually needs external services.
 
-Every limit and heuristic threshold used by the dataset service lives here so
-that behaviour can be tuned without touching the code that depends on it.
+Every limit and heuristic threshold used by the dataset and experiment services
+lives here so that behaviour can be tuned without touching the code that
+depends on it. No route file hard-codes a limit of its own.
 """
 
 from __future__ import annotations
@@ -14,10 +15,13 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 
 from app import __version__
 
 BYTES_PER_MB = 1024 * 1024
+#: Repository root, derived from this file rather than the working directory.
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 # Upload limits -------------------------------------------------------------
 DEFAULT_MAX_UPLOAD_MB = 25
@@ -34,6 +38,28 @@ DEFAULT_CATEGORICAL_MAX_UNIQUE_RATIO = 0.50
 DEFAULT_MAX_CATEGORICAL_DISTINCT = 50
 DEFAULT_MAX_CLASSIFICATION_CLASSES = 20
 DEFAULT_IMBALANCE_RATIO = 0.80
+
+# Experiment execution ------------------------------------------------------
+#: Where experiment records are stored. Local JSON files; MLflow and any
+#: database are not implemented.
+DEFAULT_EXPERIMENT_STORE_DIR = PROJECT_ROOT / "ml" / "experiments" / "runs"
+#: Experiment execution is synchronous in this commit, so every limit below
+#: exists to keep one HTTP request from running unboundedly long.
+DEFAULT_MIN_CV_FOLDS = 2
+DEFAULT_MAX_CV_FOLDS = 10
+DEFAULT_CV_FOLDS = 5
+DEFAULT_MAX_CANDIDATE_MODELS = 6
+DEFAULT_MAX_EXPERIMENT_ROWS = 200_000
+DEFAULT_MAX_EXPERIMENT_FEATURE_COLUMNS = 200
+DEFAULT_MAX_EXPERIMENT_TAGS = 10
+#: SHAP limits, mirroring ``ml.explainability.config`` defaults.
+DEFAULT_EXPLANATION_REFERENCE_ROWS = 200
+DEFAULT_EXPLANATION_ROWS = 500
+DEFAULT_EXPLANATION_TOP_FEATURES = 50
+#: History listing.
+DEFAULT_EXPERIMENT_PAGE_LIMIT = 50
+DEFAULT_MAX_EXPERIMENT_PAGE_LIMIT = 200
+DEFAULT_MAX_COMPARISON_EXPERIMENTS = 25
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
@@ -93,6 +119,26 @@ class Settings:
     max_classification_classes: int = DEFAULT_MAX_CLASSIFICATION_CLASSES
     imbalance_ratio: float = DEFAULT_IMBALANCE_RATIO
 
+    # Experiment execution
+    experiment_store_dir: Path = DEFAULT_EXPERIMENT_STORE_DIR
+    min_cv_folds: int = DEFAULT_MIN_CV_FOLDS
+    max_cv_folds: int = DEFAULT_MAX_CV_FOLDS
+    default_cv_folds: int = DEFAULT_CV_FOLDS
+    max_candidate_models: int = DEFAULT_MAX_CANDIDATE_MODELS
+    max_experiment_rows: int = DEFAULT_MAX_EXPERIMENT_ROWS
+    max_experiment_feature_columns: int = DEFAULT_MAX_EXPERIMENT_FEATURE_COLUMNS
+    max_experiment_tags: int = DEFAULT_MAX_EXPERIMENT_TAGS
+
+    # Explanation limits
+    explanation_reference_rows: int = DEFAULT_EXPLANATION_REFERENCE_ROWS
+    explanation_rows: int = DEFAULT_EXPLANATION_ROWS
+    explanation_top_features: int = DEFAULT_EXPLANATION_TOP_FEATURES
+
+    # Experiment history
+    experiment_page_limit: int = DEFAULT_EXPERIMENT_PAGE_LIMIT
+    max_experiment_page_limit: int = DEFAULT_MAX_EXPERIMENT_PAGE_LIMIT
+    max_comparison_experiments: int = DEFAULT_MAX_COMPARISON_EXPERIMENTS
+
     @property
     def max_upload_mb(self) -> float:
         """Upload limit expressed in megabytes, for user-facing messages."""
@@ -107,10 +153,22 @@ def get_settings() -> Settings:
         Settings: Configuration resolved from the process environment,
         falling back to development-friendly defaults.
     """
+    store_dir = os.getenv("EXPERIMENT_STORE_DIR", "").strip()
     return Settings(
         app_env=os.getenv("APP_ENV", "development"),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         max_upload_bytes=_env_int("MAX_UPLOAD_MB", DEFAULT_MAX_UPLOAD_MB) * BYTES_PER_MB,
         max_dataset_rows=_env_int("MAX_DATASET_ROWS", DEFAULT_MAX_DATASET_ROWS),
         max_dataset_columns=_env_int("MAX_DATASET_COLUMNS", DEFAULT_MAX_DATASET_COLUMNS),
+        experiment_store_dir=(
+            Path(store_dir) if store_dir else DEFAULT_EXPERIMENT_STORE_DIR
+        ),
+        max_cv_folds=_env_int("MAX_CV_FOLDS", DEFAULT_MAX_CV_FOLDS, minimum=2),
+        max_candidate_models=_env_int(
+            "MAX_CANDIDATE_MODELS", DEFAULT_MAX_CANDIDATE_MODELS
+        ),
+        max_experiment_rows=_env_int(
+            "MAX_EXPERIMENT_ROWS", DEFAULT_MAX_EXPERIMENT_ROWS
+        ),
+        explanation_rows=_env_int("EXPLANATION_ROWS", DEFAULT_EXPLANATION_ROWS),
     )
