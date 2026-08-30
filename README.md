@@ -15,9 +15,10 @@ answer grounded in retrievable context.
 > compared later — all of it reachable over HTTP. The retrieval layer then
 > makes that documentation and history searchable, returning cited evidence.
 > **There is no hyperparameter optimisation, no MLflow, no database, no model
-> serving, no LLM and no agent** — retrieval returns evidence, and nothing
-> generates an answer from it yet. Experiment history and the vector index are
-> local files. Everything marked *planned* below is not implemented.
+> serving and no agent** — and the language-model layer answers only from
+> retrieved evidence, rejecting any answer that cites a source it was not
+> given. Experiment history and the vector index are local files. Everything
+> marked *planned* below is not implemented.
 
 ---
 
@@ -41,7 +42,7 @@ answer grounded in retrievable context.
 | Hyperparameter optimisation | Automated search over model settings | planned |
 | Explainable AI | Global and per-prediction feature attributions (SHAP) | **implemented** |
 | Retrieval over docs and experiments | Semantic search with metadata filtering and citations, over project documentation and run history | **implemented** |
-| Retrieval-augmented answers | Grounded natural-language responses built from that evidence | planned (needs the LLM) |
+| Retrieval-augmented answers | Grounded natural-language answers with validated citations, built from that evidence | **implemented** |
 | Agentic workflows | Multi-step, tool-using analysis planned and executed by an agent | planned |
 | Experiment tracking | Reproducible run history — dataset fingerprint, configuration, metrics and explanations, stored locally as JSON | **implemented** (MLflow not implemented) |
 | HTTP API | Dataset profiling, experiment execution, history and comparison over REST | **implemented** |
@@ -65,9 +66,15 @@ answer grounded in retrievable context.
    │ ✓ training ✓ │ │ chunking  │ │ workflows,    │
    │ explainability│ │ retrieval│ │ state         │
    │      ✓       │ │     ✓     │ │  (planned)    │
-   └───────┬──────┘ └─────┬─────┘ └───────┬───────┘
-           │              │               │
-   ┌───────▼──────┐ ┌─────▼─────┐ ┌───────▼───────┐
+   └───────┬──────┘ └─────┬─────┘ └───────────────┘
+           │              │
+           │              ▼
+           │        ┌───────────┐
+           │        │ LLM layer │  grounded answers, validated citations
+           │        │     ✓     │  provider-agnostic; OpenAI-compatible
+           │        └───────────┘
+           │              │
+   ┌───────▼──────┐ ┌─────▼─────┐ ┌───────────────┐
    │ Experiment   │ │  Vector   │ │  PostgreSQL   │
    │  tracking    │ │   store   │ │   metadata    │
    │ local JSON ✓ │ │ local ✓   │ │   (planned)   │
@@ -96,7 +103,7 @@ layer.
 | Explainability | SHAP | **implemented** |
 | Experiment tracking (storage) | Local JSON files behind an `ExperimentStore` interface | **implemented** |
 | Experiment tracking (server) | MLflow | **not implemented** |
-| LLM integration | Provider-agnostic LLM client | planned |
+| LLM integration | Provider-agnostic client; OpenAI-compatible chat API | **implemented** |
 | Embeddings | Local, offline by default (hashed n-grams); optional `all-MiniLM-L6-v2` | **implemented** |
 | Retrieval (index) | Local persistent vector store behind a `VectorStore` interface | **implemented** |
 | Retrieval (server) | Qdrant vector database | **not implemented** |
@@ -113,6 +120,7 @@ ml-copilot/
 ├── frontend/      Next.js application (placeholder)
 ├── ml/            Preprocessing, training, selection, explainability, experiment tracking
 ├── rag/           Documentation and experiment retrieval (chunking, embeddings, vector store)
+├── llm/           Provider abstraction, prompts, grounding, citation validation
 ├── agents/        Agent tools, workflows and state
 ├── data/          Local datasets — raw and processed (git-ignored contents)
 ├── configs/       Configuration files
@@ -122,8 +130,8 @@ ml-copilot/
 └── docker-compose.yml   Skeleton for the future local stack
 ```
 
-`backend/` and `ml/` hold implemented code. The remaining directories are
-placeholders holding the structure the project will grow into.
+`backend/`, `ml/`, `rag/` and `llm/` hold implemented code. The remaining
+directories are placeholders holding the structure the project will grow into.
 
 ---
 
@@ -1203,6 +1211,176 @@ yet. See `rag/README.md` for the full design.
 
 ---
 
+## Grounded answers
+
+The retrieval layer finds the evidence. This layer turns it into an answer —
+and refuses to pretend when it cannot.
+
+> **The LLM is not the source of truth; retrieved evidence is.**
+>
+> The model's knowledge is used to explain what an F1 score *means*. It is
+> never used to supply what this project *scored*. Every project-specific
+> claim must come from a retrieved passage, every citation is checked against
+> the passages actually supplied, and an answer citing a source that was not
+> retrieved is rejected rather than quietly cleaned up.
+
+**Not implemented:** agents, LangGraph, autonomous tool calling, multi-agent
+systems, model fine-tuning, and any HTTP endpoint for asking questions — this
+is the library layer.
+
+```
+question
+   ↓  retrieve                        rag/RetrievalService
+evidence
+   ↓  is any of it good enough?  ─ no ──→  insufficient_evidence
+   ↓  build prompt (evidence framed as data)
+   ↓  generate                        LLMProvider
+text
+   ↓  validate citations        ─ fabricated ──→  grounding_failed
+   ↓                            ─ none        ──→  grounding_failed
+grounded answer + citations
+```
+
+Two of those arrows never reach the model. When retrieval finds nothing above
+the evidence threshold there is nothing to ground an answer in, so asking a
+model could only invite one to be invented — the service declines without
+spending a call.
+
+```python
+from llm import LLMConfig, RAGAnswerService, build_llm_provider
+from rag import RagConfig, RetrievalService
+
+config = LLMConfig()
+service = RAGAnswerService(
+    config,
+    retriever=RetrievalService(RagConfig()),
+    provider=build_llm_provider(config),
+)
+
+answer = service.answer("Which model was selected in experiment exp_84a8…?")
+print(answer.status.value)          # grounded
+print(answer.answer)
+for citation in answer.citations:
+    print(citation.citation_id, citation.source_title)
+```
+
+### The provider abstraction
+
+Everything above the interface depends on it and nothing else — the service
+holds a retriever and a provider, both behind protocols, and contains no vendor
+name and no SDK code. Swapping models, or moving to a different vendor, is a
+configuration change.
+
+The provider implemented is the **OpenAI SDK's chat-completions API**. That API
+rather than a vendor-specific one is deliberate: the same implementation, with
+`LLM_BASE_URL` pointed elsewhere, talks to Azure OpenAI, vLLM, Ollama, LM
+Studio and OpenRouter — so one provider covers hosted models *and* a model
+running on your own machine. A second provider, `fake`, is deterministic and
+in-process, and is what makes the grounding rules testable.
+
+Everything is lazy: importing the package builds no client, reads no credential
+and contacts nothing.
+
+### Running without a key
+
+| | Without a key |
+| --- | --- |
+| `import llm` | works |
+| The full test suite | works — 1,014 tests, all offline |
+| Retrieval | works |
+| `service.answer(...)` | returns `configuration_error` naming the variable to set |
+
+`LLM_API_KEY` is the only credential this project reads. The configuration
+object holds the *name* of that variable, never the value — a configuration
+gets logged, repr'd into a traceback and serialised into debug views, and a key
+inside one leaks by accident sooner or later.
+
+### Citations, and rejecting fabricated ones
+
+Every passage carries the identifier the retrieval layer already produces
+(`docs:ml-readme#leakage-prevention`, `experiment:exp_84a8…#final-evaluation`),
+and the prompt lists exactly which ones may be cited. After generation:
+
+1. Extract every citation-shaped identifier from the text.
+2. Split them into ones that were retrieved and ones that were not.
+3. Any that were not → the answer **fails**, and the invented identifiers are
+   reported in `rejected_citations`.
+4. None at all, while evidence was available → the answer **fails** too. Text
+   with nothing behind it is not a grounded answer.
+
+**A fabrication is never repaired.** A citation of `experiment:exp_999` when
+`exp_123` was retrieved might be a typo or an invented run; guessing would mean
+attaching a real source to a claim it may not support, and a wrong citation
+that looks right is worse than an obvious failure.
+
+Only the identifier comes from the model — a returned citation's title,
+reference, score and excerpt are looked up from the evidence, so they stay
+trustworthy even when the prose is not.
+
+### Answer statuses
+
+| Status | Meaning |
+| --- | --- |
+| `grounded` | Backed by evidence, valid citations, no fabrications. The only status a caller may present as an answer. |
+| `insufficient_evidence` | Nothing worth grounding in, or the model said so. No claim is being made. |
+| `grounding_failed` | Text that cannot be trusted. Returned so a human can see it; not an answer. |
+| `provider_error` | Timeout, rate limit, outage, unusable response. |
+| `configuration_error` | No key, no SDK, unknown provider. Nothing attempted. |
+
+Failures are **returned, not raised** — a caller always gets the same object
+and reads a field rather than catching something.
+
+### Prompt injection
+
+Anyone who can write into the index can put text that looks like an instruction
+into a document. Three layers, none relied on alone:
+
+- **Structural** — evidence travels inside `<retrieved_evidence>` tags, and
+  anything in a passage that could pass for a delimiter is neutralised first,
+  so a passage cannot close the block and continue as prompt.
+- **Instructional** — the system prompt says the block is untrusted data, gives
+  examples of the commands it might contain, and states that the model has no
+  access to credentials and no request can give it any.
+- **The backstop** — grounding is checked regardless, so a model that *does*
+  follow a hidden instruction produces an answer with no valid citation, which
+  fails. This layer does not depend on the model behaving.
+
+Suspicious passages are **flagged, not filtered** — a passage containing
+"ignore previous instructions" may also contain the answer.
+
+### Context limits
+
+Selection is explicit, bounded and deterministic: discard evidence below the
+score threshold, take the rest in rank order, stop at the chunk limit, and
+truncate at the character limit only if enough of a passage fits to be useful.
+Rank order is meaning order, so the best evidence is kept and the weakest lost.
+
+**Nothing is dropped silently.** Every answer reports `retrieved_count`,
+`context_count`, `context_truncated`, `context_characters`,
+`approximate_context_tokens` and `below_threshold_count`, with a warning naming
+what was left out.
+
+### Reporting ML results correctly
+
+The prompt teaches this by example rather than by rule, because it is the part
+most likely to mislead:
+
+- ✅ "The recorded F1 score on the held-out test set was 0.91 [experiment:exp_123]."
+- ❌ "The model is 91% accurate in real-world use."
+- ✅ "Monthly charges contributed positively to this prediction [experiment:exp_123]."
+- ❌ "High monthly charges cause churn."
+
+An honest limitation: these are prompt-level safeguards. The validator checks
+*attribution*, not phrasing — it cannot tell that a well-cited sentence
+overstated a causal claim. Ingested experiment records carry the line
+"Importance describes model behaviour and association, not causation", so the
+correction travels with the evidence.
+
+Answering is a library API in this commit — there is **no ask endpoint** yet.
+See `llm/README.md` for the full design.
+
+---
+
 ## Current implementation status
 
 **Implemented**
@@ -1238,8 +1416,12 @@ yet. See `rag/README.md` for the full design.
   structure-aware chunking, a pluggable embedding interface with an offline
   default, a persistent local vector store, cosine search with metadata
   filtering, stable citations, and Recall@K/Hit@K evaluation.
-- Test suites covering the backend service, the API contract, the ML layer and
-  the retrieval layer.
+- A grounded question-answering layer: a provider abstraction with an
+  OpenAI-compatible implementation, an ML-specific system prompt, deterministic
+  context selection under configurable limits, and citation validation that
+  rejects any answer citing a source that was not retrieved.
+- Test suites covering the backend service, the API contract, the ML layer, the
+  retrieval layer and the language-model layer.
 
 **Not implemented yet**
 
@@ -1248,7 +1430,7 @@ yet. See `rag/README.md` for the full design.
   there is no prediction or model-serving endpoint
 - **MLflow** — experiment tracking runs on local JSON files only
 - Ingestion formats other than CSV (Excel, JSON, Parquet, SQL, APIs)
-- **LLM generation** — retrieval returns evidence; nothing reads it yet
+- A search or ask endpoint — retrieval and answering are library APIs in this commit
 - Agentic workflows, autonomous tool calling, LangChain and LangGraph
 - A search endpoint — retrieval is a library API in this commit
 - PostgreSQL, Qdrant and any database access
@@ -1303,7 +1485,8 @@ scikit-learn and SHAP). From the repository root, install both for a full
 development environment:
 
 ```bash
-pip install -r backend/requirements.txt -r ml/requirements.txt -r rag/requirements.txt
+pip install -r backend/requirements.txt -r ml/requirements.txt \
+            -r rag/requirements.txt -r llm/requirements.txt
 ```
 
 ## Running the backend
@@ -1336,13 +1519,16 @@ Or one suite at a time:
 pytest backend/tests
 pytest ml/tests
 pytest rag/tests
+pytest llm/tests
 ```
 
 Add `-v` for per-test output. Every test builds its data in memory — none reads
 an external dataset, downloads a model or touches the network. The retrieval
-tests use a deterministic fake embedding provider; the one test that exercises
-the real sentence-transformer model skips itself unless the package is
-installed and the model is already cached.
+tests use a deterministic fake embedding provider, and the language-model tests
+use a deterministic fake LLM provider — **no API key is needed to run anything**.
+Two optional tests skip themselves unless explicitly enabled: the real
+sentence-transformer model (needs the package installed and the model cached)
+and the real LLM provider (needs a credential *and* `RUN_LLM_INTEGRATION=1`).
 
 ## Roadmap
 
@@ -1354,8 +1540,8 @@ installed and the model is already cached.
 6. ~~**Explainability with SHAP** — global importance, local contributions, fallback~~
 7. ~~**Experiment tracking** — dataset fingerprints, versioned run records, local persistence, comparison~~ *(MLflow deferred)*
 8. **Experiment API** — run, list, fetch and compare experiments over HTTP *(current)*
-9. **Retrieval over documentation and run history** — chunking, embeddings, vector store, cited evidence *(current; LLM deferred)*
-10. LLM integration — grounded answers built from that evidence
+9. ~~**Retrieval over documentation and run history** — chunking, embeddings, vector store, cited evidence~~
+10. **Provider-agnostic LLM + grounded answers** — prompt construction, citation validation, grounding enforcement *(current)*
 11. Agentic workflows
 12. Next.js frontend
 13. Containerisation and deployment

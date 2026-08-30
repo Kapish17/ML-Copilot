@@ -4,14 +4,18 @@ Finds the evidence that bears on a question, from the two kinds of knowledge
 this project already produces: the documentation that says how the system
 works, and the experiment records that say what was actually run.
 
-> **LLM generation is not implemented yet.** This layer returns ranked
-> passages with citations. It never writes an answer, draws a conclusion or
-> interprets a result — those need a model reasoning over the evidence, which
-> is a later commit. What is built here is the part that decides *what the
-> model gets to see*, and makes every sentence of a future answer traceable to
-> a passage that actually exists.
+> **This layer returns evidence, never an answer.** It ranks passages and
+> attributes them; it never writes prose, draws a conclusion or interprets a
+> result. Turning evidence into an answer is `llm/`'s job, and that layer
+> treats what comes from here as authoritative — **the model is not the source
+> of truth; retrieved evidence is.** Everything below decides *what the model
+> gets to see*, and makes every sentence of an answer traceable to a passage
+> that actually exists.
+>
+> `rag/` does not import `llm/`. Retrieval stays usable, and testable, with no
+> model involved, and a test enforces it.
 
-**Also not implemented:** Qdrant, PostgreSQL, any vector database, LangChain,
+**Not implemented:** Qdrant, PostgreSQL, any vector database, LangChain,
 LangGraph, agents, autonomous tool calling, and any hosted embedding API.
 
 ## What RAG means here
@@ -32,15 +36,17 @@ itself, and without it a future assistant could describe the pipeline but
 could not answer "did the forest ever beat the baseline on the renewals
 data?"
 
-The eventual shape is:
+The whole shape, with this layer's part on the left:
 
 ```
 question → retriever → relevant documentation + experiment history
                      → LLM → grounded answer with citations
-                              (later commit)
+           ╰─ rag/ ─╯   ╰──────────── llm/ ────────────╯
 ```
 
-Everything before the arrow into the LLM is built. The LLM is not.
+This layer ends at the evidence. `llm/` takes it from there, checks that every
+citation an answer makes was actually retrieved, and rejects the answer if not
+— see `llm/README.md`.
 
 ## The pipeline
 
@@ -404,7 +410,10 @@ stops retrieving the leakage section, which is otherwise invisible.
 `experiment_queries()` generates the equivalent for experiments, whose ids are
 not known when the set is written.
 
-**Answer quality is not evaluated**, because there are no answers to evaluate.
+**Answer quality is not evaluated here.** These metrics measure whether the
+right passages are found. Whether an answer built from them is well grounded is
+enforced separately, by the citation validator in `llm/grounding.py`; whether
+it is *well written* is not measured anywhere yet.
 
 ## Indexing and reindexing
 
@@ -502,7 +511,9 @@ writers, or history shared across machines. **Qdrant is not implemented.**
 
 ## Current limitations
 
-- **No LLM, no answers.** This layer returns evidence. Nothing reads it yet.
+- **No answers here.** This layer returns evidence; `llm/` turns it into an
+  answer. Retrieval quality bounds answer quality — a question this layer
+  cannot find evidence for is answered `insufficient_evidence`, not guessed at.
 - **The default embeddings are lexical, not semantic.** A question phrased in
   words the documents do not use will retrieve poorly. The neural provider is
   the fix, at the cost of ~4 GB of dependencies and a model download.
