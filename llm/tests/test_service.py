@@ -232,7 +232,7 @@ def test_a_model_abstention_is_reported_as_insufficient_evidence(
 def test_a_retrieval_failure_becomes_insufficient_evidence(
     service_factory, config: LLMConfig
 ) -> None:
-    """A broken index should produce a refusal, not a stack trace."""
+    """By default a broken index produces a refusal, not a stack trace."""
     from rag.errors import CorruptIndexError
 
     retriever = FakeRetriever(error=CorruptIndexError("The index is unreadable."))
@@ -242,6 +242,29 @@ def test_a_retrieval_failure_becomes_insufficient_evidence(
     ).answer("How is leakage prevented?")
 
     assert answer.status is AnswerStatus.INSUFFICIENT_EVIDENCE
+    assert provider.call_count == 0
+
+
+def test_a_retrieval_failure_can_be_propagated_instead(config: LLMConfig) -> None:
+    """A caller that must tell "nothing found" from "broken" can opt in.
+
+    Answering "no evidence" to a corrupt index tells the user their question
+    is unanswerable when the truth is that something needs fixing. An HTTP
+    API wants the second reported as a 503, so it asks for the failure.
+    """
+    from rag.errors import CorruptIndexError
+
+    retriever = FakeRetriever(error=CorruptIndexError("The index is unreadable."))
+    provider = FakeLLMProvider(responses=GROUNDED_ANSWER)
+    service = RAGAnswerService(
+        config,
+        retriever=retriever,
+        provider=provider,
+        propagate_retrieval_errors=True,
+    )
+
+    with pytest.raises(CorruptIndexError):
+        service.answer("How is leakage prevented?")
     assert provider.call_count == 0
 
 

@@ -447,6 +447,19 @@ class LocalVectorStore:
         row = self._row_by_chunk_id.get(chunk_id)
         return None if row is None else self._chunks[row]
 
+    @property
+    def is_built(self) -> bool:
+        """Whether an index has been written to this directory.
+
+        Answers "has anything been indexed here", not "is it readable" — a
+        caller that needs the latter opens the store and lets
+        :class:`~rag.errors.CorruptIndexError` say so. The distinction matters
+        to anything that must tell "nothing was ever indexed" apart from
+        "the index is broken", because the fix for each is different and
+        answering "no relevant evidence" to either would be misleading.
+        """
+        return self.vectors_path.is_file() and self.records_path.is_file()
+
     def stats(self) -> dict[str, Any]:
         """Describe the index: size, shape and what is in it."""
         self._ensure_loaded()

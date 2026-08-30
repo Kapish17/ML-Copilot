@@ -5,9 +5,10 @@ Every failure leaves the API in the same shape::
     {"error": {"code": "...", "message": "...", "details": {...}}}
 
 That holds for every layer: dataset validation, preprocessing, model selection,
-explainability and experiment storage all answer in the same shape, even though
-only the backend's own errors know anything about HTTP. Errors from ``ml`` are
-translated by :mod:`app.core.ml_errors`.
+explainability, experiment storage, retrieval and answer generation all answer
+in the same shape, even though only the backend's own errors know anything
+about HTTP. Errors from ``ml`` are translated by :mod:`app.core.ml_errors`;
+errors from ``rag`` and ``llm`` by :mod:`app.core.knowledge_errors`.
 
 Unexpected exceptions are logged server-side and answered with a generic
 message, so stack traces and internal details never reach an API consumer.
@@ -25,6 +26,12 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.errors import MLCopilotError
+from app.core.knowledge_errors import (
+    LLMError,
+    RagError,
+    is_client_error as is_client_knowledge_error,
+    translate_knowledge_error,
+)
 from app.core.ml_errors import MLError, is_client_error, translate_ml_error
 from app.schemas.errors import ErrorDetail, ErrorResponse
 
@@ -97,6 +104,53 @@ async def handle_ml_error(request: Request, exc: MLError) -> JSONResponse:
     )
 
 
+async def handle_knowledge_error(
+    request: Request, exc: RagError | LLMError
+) -> JSONResponse:
+    """Return the envelope for a retrieval or language-model failure.
+
+    Neither package knows about HTTP, so the mapping lives in
+    :mod:`app.core.knowledge_errors`. A provider failure is logged with its
+    real cause and answered as a 502; a missing credential or an unbuilt index
+    is a 503 whose message says what to set, because that is a problem only a
+    human can fix and guessing wastes their time.
+
+    Note what does *not* arrive here: ``insufficient_evidence`` and
+    ``grounding_failed`` are results, not exceptions. They travel as 200 with
+    a status field.
+    """
+    code, status_code, message, details = translate_knowledge_error(exc)
+    if not is_client_knowledge_error(exc):
+        logger.warning(
+            "%s while processing %s %s: %s",
+            type(exc).__name__,
+            request.method,
+            request.url.path,
+            getattr(exc, "message", ""),
+        )
+    return build_error_response(
+        status_code=status_code, code=code, message=message, details=details
+    )
+
+
+def _sanitise_validation_errors(errors: list[Any]) -> list[Any]:
+    """Strip the echoed value from "this field is not allowed" errors.
+
+    Pydantic reports the offending value alongside the complaint, which helps
+    a developer fix a wrong type. It does not help for ``extra_forbidden``:
+    the field is refused outright, so there is nothing to correct, and the
+    value is exactly the kind of thing someone smuggles in — a credential, an
+    endpoint, a prompt. Naming the field is the whole of the useful message;
+    quoting what was in it only puts it back on the wire and into the logs.
+    """
+    sanitised: list[Any] = []
+    for error in errors:
+        if isinstance(error, dict) and error.get("type") == "extra_forbidden":
+            error = {key: value for key, value in error.items() if key != "input"}
+        sanitised.append(error)
+    return sanitised
+
+
 async def handle_validation_error(
     _: Request, exc: RequestValidationError
 ) -> JSONResponse:
@@ -105,7 +159,7 @@ async def handle_validation_error(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         code="invalid_request",
         message="The request could not be processed. Check the submitted fields.",
-        details={"errors": jsonable_encoder(exc.errors())},
+        details={"errors": _sanitise_validation_errors(jsonable_encoder(exc.errors()))},
     )
 
 
@@ -139,6 +193,8 @@ def register_exception_handlers(application: FastAPI) -> None:
     """Attach every exception handler to the application."""
     application.add_exception_handler(MLCopilotError, handle_application_error)
     application.add_exception_handler(MLError, handle_ml_error)
+    application.add_exception_handler(RagError, handle_knowledge_error)
+    application.add_exception_handler(LLMError, handle_knowledge_error)
     application.add_exception_handler(RequestValidationError, handle_validation_error)
     application.add_exception_handler(StarletteHTTPException, handle_http_exception)
     application.add_exception_handler(Exception, handle_unexpected_error)

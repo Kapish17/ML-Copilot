@@ -1,13 +1,19 @@
 # ML Copilot — Backend
 
 FastAPI service that exposes the ML Copilot platform over HTTP: the
-service-level endpoints, the dataset profiling API, and the experiment API that
-runs the whole ML pipeline on an uploaded dataset and remembers what happened.
+service-level endpoints, the dataset profiling API, the experiment API that
+runs the whole ML pipeline on an uploaded dataset and remembers what happened,
+and the knowledge API that searches that history and answers questions from it.
 
-The service is an **adapter around the ML engine**, not a home for it. Every
+The service is an **adapter around the engines**, not a home for them. Every
 statistic, split, score and explanation is computed in the top-level `ml/`
-package; this service validates requests, orders the steps, and turns results
-into JSON.
+package; every embedding and ranking in `rag/`; every prompt, answer and
+grounding check in `llm/`. This service validates requests, orders the steps,
+and turns results into JSON.
+
+**POST /api/v1/ask returns evidence-grounded answers; the LLM is not the source
+of truth.** Retrieved evidence is. An answer that cannot be supported by
+retrieved passages is reported as unsupported rather than returned as prose.
 
 ## Structure
 
@@ -21,17 +27,20 @@ backend/
 │   │       ├── router.py           Mounts the v1 routers under /api/v1
 │   │       ├── datasets.py         POST /api/v1/datasets/profile
 │   │       ├── experiments.py      The experiment endpoints
-│   │       └── experiment_form.py  The multipart request contract
+│   │       ├── experiment_form.py  The multipart request contract
+│   │       └── knowledge.py        POST /search and POST /ask
 │   ├── core/
 │   │   ├── config.py          Environment-driven Settings object
 │   │   ├── errors.py          Typed domain errors with codes and statuses
-│   │   └── ml_errors.py       ML-layer exceptions → codes and HTTP statuses
+│   │   ├── ml_errors.py       ML-layer exceptions → codes and HTTP statuses
+│   │   └── knowledge_errors.py  RAG and LLM exceptions → codes and statuses
 │   ├── models/                Persistence models (empty — no database yet)
 │   ├── schemas/
 │   │   ├── system.py          Schemas for `/` and `/health`
 │   │   ├── errors.py          The error envelope
 │   │   ├── dataset.py         Dataset profile response models
-│   │   └── experiment.py      Experiment request and response models
+│   │   ├── experiment.py      Experiment request and response models
+│   │   └── knowledge.py       Search and ask request and response models
 │   ├── services/
 │   │   ├── datasets/
 │   │   │   ├── validation.py  Filename, extension and size checks
@@ -41,10 +50,14 @@ backend/
 │   │   │   ├── target.py      Optional target-column analysis
 │   │   │   ├── conversions.py NaN-safe value conversion helpers
 │   │   │   └── service.py     Ingestion and profiling, used by both APIs
-│   │   └── experiments/
-│   │       ├── options.py     The validated description of one request
-│   │       ├── runner.py      ExperimentRunner — the orchestration
-│   │       └── history.py     Reading, filtering and comparing runs
+│   │   ├── experiments/
+│   │   │   ├── options.py     The validated description of one request
+│   │   │   ├── runner.py      ExperimentRunner — the orchestration
+│   │   │   └── history.py     Reading, filtering and comparing runs
+│   │   └── knowledge/
+│   │       ├── filters.py     Request fields → the RAG metadata filter
+│   │       ├── errors.py      The refusals only an HTTP caller cares about
+│   │       └── service.py     KnowledgeService — search and ask
 │   └── main.py                Application factory and system routes
 ├── tests/
 │   ├── factories.py           In-memory CSV builders used by the tests
@@ -58,6 +71,7 @@ backend/
 │   ├── test_dataset_service.py
 │   ├── test_api_datasets.py       Profiling contract and error handling
 │   ├── test_api_experiments.py    Experiment endpoints, end to end
+│   ├── test_api_knowledge.py      Search and ask, security and architecture
 │   └── test_experiment_service.py Service layer and architecture rules
 ├── requirements.txt
 └── README.md
@@ -102,6 +116,22 @@ backend/
   once.
 - **JSON stays valid.** pandas produces `NaN` and numpy scalars; every value
   passes through `conversions.py` so responses contain only JSON-legal values.
+  Retrieval scores are floats and citation indices are ints before they reach a
+  response model, so a search or an answer serialises without a custom encoder.
+- **The knowledge layers keep their independence too.** `rag/` and `llm/` raise
+  their own exceptions and know nothing of HTTP; `core/knowledge_errors.py` is
+  the single place that maps them to a code and a status, reusing the same
+  detail-sanitising as the ML mapping. `services/knowledge/` decides *when* to
+  search and what to refuse; it holds neither an embedding nor a prompt.
+- **A request cannot reconfigure the model.** Every knowledge request model sets
+  `extra="forbid"`, so a body carrying `system_prompt`, `api_key`, `base_url`,
+  `model` or a grounding switch is rejected as a 422 rather than quietly
+  ignored. What a caller may vary is how much evidence to look at and where to
+  look for it.
+- **Nothing expensive happens at import time.** The RAG and LLM configurations
+  are read once and cached; the vector store is opened, and the provider's SDK
+  and credential are loaded, only when a request needs them. The application
+  starts with no API key and no index — a fact a test asserts.
 - The empty package (`models`) is a real package with a docstring describing its
   intended role. It is a placeholder for a later commit, not dead code.
 
@@ -117,6 +147,9 @@ backend/
 | `GET` | `/api/v1/experiments/capabilities` | Models, metrics and limits a request may use |
 | `GET` | `/api/v1/experiments/{experiment_id}` | Fetch one stored experiment |
 | `POST` | `/api/v1/experiments/compare` | Rank several stored experiments |
+| `POST` | `/api/v1/search` | Search documentation and experiment history |
+| `POST` | `/api/v1/ask` | Answer a question from retrieved evidence, with citations |
+| `GET` | `/api/v1/knowledge/status` | Whether search and answering are available, and their limits |
 
 OpenAPI docs: <http://127.0.0.1:8000/docs> · schema: `/openapi.json`
 
@@ -194,11 +227,20 @@ storage or request validation — answers in one shape:
 | `409` | The request conflicts with the data: a classifier for a regression target, or a comparison of runs judged by different metrics |
 | `413` | The upload or the dataset exceeds a configured limit |
 | `415` | Unsupported file type — only `.csv` is implemented |
-| `422` | The request or the data cannot be processed: missing target, no usable features, malformed CSV, too few rows |
+| `422` | The request or the data cannot be processed: missing target, no usable features, malformed CSV, too few rows; or a body that fails schema validation, including one carrying a field the endpoint does not define |
 | `500` | An unexpected internal failure — logged with its cause, answered generically |
+| `502` | The language-model provider failed: timeout, rate limit, rejected credential, unavailable service or an unusable response |
+| `503` | A capability is not available: nothing has been indexed yet, the index cannot be read, the embedding provider is missing, or no language-model credential is configured |
 
 Messages are written for a person reading a client. No stack trace, no internal
-class name and no filesystem path appears in a response, on any path.
+class name and no filesystem path appears in a response, on any path. A provider
+exception is never re-raised or rendered: it is caught, logged, and answered
+with an authored message under a stable code.
+
+**A result is not an error.** A search that matches nothing is a `200` with an
+empty list, and an answer that cannot be grounded is a `200` whose `status` says
+so. 5xx is reserved for the system being unable to do the work — which is why an
+unbuilt index is a `503` and not an empty `200`.
 
 ### Experiment history
 
@@ -222,6 +264,128 @@ Because a dataset is identified by a content fingerprint rather than a
 filename, `?dataset_fingerprint=…` finds every run on the same data however
 the file was named when it was uploaded.
 
+## Searching and asking
+
+Two endpoints over the same index: one returns the evidence, the other returns
+an answer built from it. Both are `application/json`.
+
+### `POST /api/v1/search`
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "How is data leakage prevented?",
+       "top_k": 5,
+       "filters": {"source_types": ["project_documentation"]}}'
+```
+
+Every field but `query` is optional. The response carries the ranked passages
+with their scores, source titles, repository-relative references and citation
+identifiers, plus `candidate_count` — how many passages the filter admitted
+before ranking, which separates "the index knows nothing about this" from "the
+filter excluded everything".
+
+**Filtering is not done in the route.** `filters` becomes a metadata filter that
+the retrieval layer applies *before* ranking, so asking for the five best
+classification experiments searches classification experiments rather than
+ranking everything and throwing most of it away. The filterable fields are
+`source_types`, `task_type`, `dataset_fingerprint`, `target_column`,
+`selected_model`, `primary_metric` and `experiment_id`; an unknown source type
+is a `400`, not a silent empty result.
+
+### `POST /api/v1/ask`
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"question": "Which model was selected for the churn dataset, and why?",
+       "top_k": 6,
+       "filters": {"source_types": ["experiment"]}}'
+```
+
+The flow, and where each step lives:
+
+```
+POST /api/v1/ask                      api/v1/knowledge.py
+        ↓
+validate the body                     schemas/knowledge.py   (extra="forbid")
+        ↓
+length + limit checks                 rag/config.py          (resolve_query)
+        ↓
+is answering configured? is there
+an index?                             services/knowledge/service.py
+        ↓
+filters → metadata filter             rag/retrieval.py       (before ranking)
+        ↓
+retrieve the evidence                 rag/  (embed → search → rank)
+        ↓
+build the prompt, call the provider   llm/prompts.py, llm/providers/
+        ↓
+extract + validate citations          llm/citations.py
+        ↓
+grounding decision → Answer           llm/answers.py
+        ↓
+JSON response                         schemas/knowledge.py
+```
+
+**The answer's `status` is the important field**, not its prose:
+
+| Status | HTTP | Meaning |
+| --- | --- | --- |
+| `grounded` | `200` | Supported by retrieved evidence, and every citation resolves to a passage that was actually retrieved. The only status that may be shown to a user as an answer. |
+| `insufficient_evidence` | `200` | Nothing relevant was retrieved, or the model declined to answer from what there was. A real result: the question has no answer *here*. |
+| `grounding_failed` | `200` | The model produced text that cited a source it was not given, or cited nothing at all. The text is returned so a human can see what happened; `is_grounded` is `false` and the fabricated identifiers are listed in `rejected_citations`. |
+| `provider_error` | `502` | The provider failed. No answer was produced, so the client is not handed a body to read one out of. |
+| `configuration_error` | `503` | No language-model credential is configured. |
+
+Citations are never repaired by guessing. An identifier the model invented is
+reported in `rejected_citations` rather than quietly dropped — a fabricated
+source is the most important thing to know about an answer. `allowed_citations`
+records exactly what the model was permitted to cite, so a disagreement can be
+audited after the fact.
+
+### What a request may not contain
+
+There is **no** request field for a system prompt, a provider endpoint, an API
+key, a model name, a temperature, or a switch that disables grounding or
+citation validation. The request models set `extra="forbid"`, so a body carrying
+one is a `422` rather than a silently ignored field. A caller varies how much
+evidence to look at and where to look for it; the server is authoritative over
+everything else. `top_k` above the configured maximum and a query longer than
+the configured limit are both rejected.
+
+### `GET /api/v1/knowledge/status`
+
+Reports whether search and answering are available, whether an index has been
+built, the similarity metric, the default and maximum `top_k`, the maximum query
+length and the source types a filter may name. It reports *whether* a credential
+is configured, never what it is, and names no filesystem location.
+
+### Availability, and running offline
+
+`/search` needs no credential of any kind — the default embedding provider is a
+deterministic local hashing embedder, so the whole retrieval path runs offline.
+`/ask` additionally needs a language-model credential.
+
+The application starts with **neither** a key nor an index: the configurations
+are read once and cached, the vector store is opened only when a request needs
+it, and the provider's SDK and credential are loaded on first use. A missing key
+is a `503` from `/ask` — not a failed startup, and not a failure of `/search`.
+
+Three unavailability cases are deliberately distinct, because the fix differs:
+
+- **Nothing indexed yet** → `503 retrieval_index_not_built`, with a message
+  saying to index the documentation and synchronise the experiment store.
+- **An index that exists but cannot be read** → `503`
+  `retrieval_index_unavailable`.
+- **No relevant evidence** → `200` with an empty `results` list, or an
+  `insufficient_evidence` answer.
+
+The tests build a real index over this repository's own documentation in a
+temporary directory and drive `/ask` through a fake provider, so the suite
+exercises the full HTTP path — validation, retrieval, prompting, citation
+validation, grounding — without a network call or an API key.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -241,6 +405,19 @@ Profiling thresholds, explanation limits, page sizes and the comparison limit
 are fields on `Settings` in `app/core/config.py`, each with a named default
 constant. Nothing in a route or service hard-codes a limit, and
 `GET /api/v1/experiments/capabilities` reports the active ones.
+
+The knowledge endpoints are configured by the `RAG_*` and `LLM_*` variables
+those packages already own — `RAG_INDEX_DIR`, `RAG_TOP_K`,
+`RAG_SIMILARITY_THRESHOLD`, `RAG_MAX_QUERY_LENGTH`, `LLM_PROVIDER`,
+`LLM_MODEL`, `LLM_API_KEY`, `LLM_BASE_URL` and the rest. They are documented in
+`rag/README.md` and `llm/README.md`, listed in `.env.example`, and read here
+through `rag.config.rag_config_from_env()` and `llm.config.llm_config_from_env()`
+rather than duplicated onto `Settings`. `GET /api/v1/knowledge/status` reports
+the limits actually in force.
+
+**No provider setting is reachable from a request.** The credential is read
+from the environment, never from a body, never logged, never stored in an
+experiment record and never included in a response or an error.
 
 ## Setup
 
@@ -268,13 +445,14 @@ top-level package. Test configuration lives in the repository root
 `pytest.ini`, which puts both `backend/` and the repository root on the import
 path.
 
-## Relationship to the ML layer
+## Relationship to the ML, RAG and LLM layers
 
-The ML layer lives in the top-level `ml/` package and is a separate component
-with its own dependencies. The dependency runs one way only:
+The three engines live in the top-level `ml/`, `rag/` and `llm/` packages, each
+a separate component with its own dependencies. The dependency runs one way
+only:
 
 ```
-API routes  →  application services  →  ml/  →  core abstractions
+API routes  →  application services  →  ml/ · rag/ · llm/  →  core abstractions
 ```
 
 This service imports `ml/`. `ml/` does **not** import this service, does not
@@ -284,14 +462,24 @@ profiling logic is never duplicated. Two tests enforce the rule: one parses
 every module under `ml/` and fails if it imports `fastapi`, `starlette`, `app`
 or `pydantic`, and one imports the whole ML layer in a fresh interpreter.
 
-The same holds one level down: nothing under `app/services/` imports FastAPI,
-which is what lets `ExperimentRunner` be driven by an HTTP route today and by a
-worker or an agent tool later. `run_experiment(frame, ...)` in
-`services/experiments/runner.py` is that programmatic entry point — data in, a
-structured result out, no filesystem, pandas or sklearn detail in the answer.
-**No agent, LLM or RAG integration is implemented.**
+`rag/` and `llm/` are held to the same rule, and by the same kind of test:
+neither imports `app`, `fastapi` or `starlette`, and `rag/` does not import
+`llm/` — retrieval is usable, and testable, without generation.
 
-See `ml/README.md`.
+The same holds one level down: nothing under `app/services/` imports FastAPI,
+which is what lets `ExperimentRunner` and `KnowledgeService` be driven by an
+HTTP route today and by a worker or an agent tool later. `run_experiment(frame,
+...)` in `services/experiments/runner.py` and `search()` / `ask()` on
+`KnowledgeService` are those programmatic entry points — arguments in, a
+structured result out, no filesystem, pandas, sklearn or provider detail in the
+answer. A future agent would call the services directly and get the same
+grounded `Answer` object the endpoint serialises.
+
+**No agent, LangGraph, autonomous tool calling, streaming, conversation memory
+or frontend is implemented**, and neither is Qdrant, MLflow, Optuna, XGBoost,
+LightGBM, a database, authentication or rate limiting.
+
+See `ml/README.md`, `rag/README.md` and `llm/README.md`.
 
 ## Dependencies
 
@@ -304,13 +492,15 @@ See `ml/README.md`.
 | `pytest` | Test runner |
 | `httpx2` | HTTP client required by Starlette's `TestClient` |
 
-Running experiments additionally needs `ml/requirements.txt`
-(scikit-learn and SHAP), since this service now calls the ML layer:
+Running experiments additionally needs `ml/requirements.txt` (scikit-learn and
+SHAP), and the knowledge endpoints need `rag/requirements.txt` and
+`llm/requirements.txt`, since this service now calls all three layers:
 
 ```bash
 pip install -r backend/requirements.txt -r ml/requirements.txt \
             -r rag/requirements.txt -r llm/requirements.txt
 ```
 
-Dependencies are added only when the code that needs them lands. **Commit 8
-added none.**
+Dependencies are added only when the code that needs them lands. **Commit 11
+added none** — exposing the knowledge layers over HTTP needed nothing that was
+not already installed for `rag/` and `llm/`.

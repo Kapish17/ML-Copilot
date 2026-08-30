@@ -56,6 +56,11 @@ DEFAULT_MAX_TOP_K = 50
 #: "return the best matches whatever they score"; raise it to trade recall for
 #: precision.
 DEFAULT_SIMILARITY_THRESHOLD = 0.0
+#: Longest query accepted. A question is a question; anything much longer is a
+#: document being pasted in, which embeds poorly and is a cheap way to make a
+#: server do pointless work. The limit lives here rather than in a caller so
+#: that a library user and an HTTP client are held to the same rule.
+DEFAULT_MAX_QUERY_LENGTH = 2_000
 
 # -- Documentation ingestion ------------------------------------------------
 #: The documentation indexed by default. An explicit allowlist, not a
@@ -66,6 +71,7 @@ DEFAULT_DOCUMENTATION_FILES: tuple[str, ...] = (
     "ml/README.md",
     "backend/README.md",
     "rag/README.md",
+    "llm/README.md",
 )
 #: An additional directory whose Markdown is indexed, when it exists.
 DEFAULT_DOCUMENTATION_DIR = PROJECT_ROOT / "docs"
@@ -163,6 +169,7 @@ class RagConfig:
     top_k: int = DEFAULT_TOP_K
     max_top_k: int = DEFAULT_MAX_TOP_K
     similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD
+    max_query_length: int = DEFAULT_MAX_QUERY_LENGTH
 
     # Documentation ingestion
     project_root: Path = PROJECT_ROOT
@@ -226,6 +233,11 @@ class RagConfig:
                 "similarity_threshold must be a cosine similarity in [-1, 1].",
                 details={"similarity_threshold": self.similarity_threshold},
             )
+        if self.max_query_length < 1:
+            raise ConfigurationError(
+                "max_query_length must be at least 1.",
+                details={"max_query_length": self.max_query_length},
+            )
 
     def with_overrides(self, **overrides: object) -> RagConfig:
         """Return a validated copy with some fields replaced.
@@ -258,6 +270,39 @@ class RagConfig:
                 details={"top_k": top_k, "max_top_k": self.max_top_k},
             )
         return top_k
+
+    def resolve_query(self, query: str | None) -> str:
+        """Return a usable query, or explain why one is not.
+
+        The same rule for every caller: a library user and an HTTP client are
+        held to one definition of "too long" and one of "empty", rather than
+        each entry point inventing its own.
+
+        Args:
+            query: What the caller asked, in their own words.
+
+        Returns:
+            str: The trimmed query.
+
+        Raises:
+            ConfigurationError: If it is blank or longer than
+                ``max_query_length``.
+        """
+        text = (query or "").strip()
+        if not text:
+            raise ConfigurationError(
+                "A query is required.", details={"query_length": 0}
+            )
+        if len(text) > self.max_query_length:
+            raise ConfigurationError(
+                f"A query may be at most {self.max_query_length} characters, "
+                f"got {len(text)}.",
+                details={
+                    "query_length": len(text),
+                    "max_query_length": self.max_query_length,
+                },
+            )
+        return text
 
     def resolve_threshold(self, threshold: float | None) -> float:
         """Return the minimum similarity a result must reach."""
@@ -307,6 +352,16 @@ def config_from_env(**overrides: object) -> RagConfig:
         except ValueError as exc:
             raise ConfigurationError(
                 f"{key} must be an integer, got {raw!r}.", details={key: raw}
+            ) from exc
+
+    max_query = os.getenv("RAG_MAX_QUERY_LENGTH", "").strip()
+    if max_query:
+        try:
+            values["max_query_length"] = int(max_query)
+        except ValueError as exc:
+            raise ConfigurationError(
+                f"RAG_MAX_QUERY_LENGTH must be an integer, got {max_query!r}.",
+                details={"RAG_MAX_QUERY_LENGTH": max_query},
             ) from exc
 
     threshold = os.getenv("RAG_SIMILARITY_THRESHOLD", "").strip()

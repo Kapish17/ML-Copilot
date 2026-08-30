@@ -12,10 +12,14 @@ cannot.
 > retrieved is rejected rather than quietly cleaned up.
 
 **Not implemented:** agents, LangGraph, autonomous tool calling, multi-agent
-systems, model fine-tuning, and any HTTP endpoint — this commit is the library
-layer. Also still absent from the project: MLflow, Optuna, Qdrant, PostgreSQL,
-XGBoost, LightGBM, a frontend, authentication, and dataset ingestion beyond
-CSV.
+systems, model fine-tuning, streaming and conversation memory. Also still
+absent from the project: MLflow, Optuna, Qdrant, PostgreSQL, XGBoost,
+LightGBM, a frontend, authentication, rate limiting, and dataset ingestion
+beyond CSV.
+
+This layer is a library. It is *used* by `POST /api/v1/ask` in the backend —
+see "Over HTTP" below — but it contains no HTTP code, imports no web
+framework, and neither knows nor cares that a request is what called it.
 
 ## The flow
 
@@ -409,12 +413,52 @@ enables it fails in CI rather than on someone's bill.
 - Retrieved documents are treated as untrusted content throughout.
 - No filesystem path appears in any error or answer.
 
+## Over HTTP
+
+The backend exposes this layer as an endpoint. **POST /api/v1/ask returns
+evidence-grounded answers; the LLM is not the source of truth.**
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"question": "Which model was selected, and what did it score?",
+       "top_k": 6,
+       "filters": {"source_types": ["experiment"]}}'
+```
+
+A request may vary **how much** evidence to look at (`top_k`,
+`similarity_threshold`) and **where** to look for it (`filters`). It may not
+vary anything else. There is no request field for a system prompt, a provider
+endpoint, an API key, a model name, a temperature, or a switch that turns off
+grounding or citation validation — the request schema forbids unknown fields,
+so a body carrying one is rejected rather than ignored. Every safety setting in
+this README is the server's, read from the environment.
+
+The statuses cross the boundary unchanged in meaning, but not in kind:
+
+| Status | HTTP | Why |
+| --- | --- | --- |
+| `grounded` | `200` | A result. |
+| `insufficient_evidence` | `200` | A result — an honest refusal is not a server failure. |
+| `grounding_failed` | `200` | A result. `is_grounded` is `false` and `rejected_citations` lists what the model invented. |
+| `provider_error` | `502` | Not a result: no answer was produced, so the caller is not handed a body to read one out of. |
+| `configuration_error` | `503` | Not a result: nothing was attempted. |
+
+That last distinction is the reason failures are *returned* here and *raised*
+there. A library caller reads a field; an HTTP client must not be able to
+mistake "the provider timed out" for an answer, so the backend converts those
+two statuses into errors in one place
+(`backend/app/services/knowledge/errors.py`) and lets the other three through.
+
+A missing key does not stop the application starting, and does not affect
+`POST /api/v1/search` — the SDK and the credential are loaded on first use.
+
 ## Architecture
 
 ```
-FastAPI  →  application service  →  llm/  →  rag/  →  vector store
- (later)                              ↓
-                                 LLMProvider
+POST /api/v1/ask  →  KnowledgeService  →  llm/  →  rag/  →  vector store
+                                           ↓
+                                      LLMProvider
 ```
 
 - `llm/` does not import FastAPI or the backend.
@@ -428,10 +472,9 @@ Four tests enforce these by parsing the imports of every module.
 
 ## Limitations
 
-- **Not exposed over HTTP.** This is the library layer; there is no
-  `/api/v1/ask` endpoint yet.
-- **No conversation.** Every question is independent. Follow-ups that depend on
-  a previous answer will not work.
+- **No conversation.** Every question is independent, over HTTP as much as in
+  the library. Follow-ups that depend on a previous answer will not work: there
+  is no session, no history and no memory.
 - **Grounding checks attribution, not truth.** A citation proves a passage was
   retrieved and cited; it does not prove the sentence around it summarises that
   passage correctly. Claim-level entailment checking is a larger piece of work.

@@ -109,6 +109,7 @@ class RAGAnswerService:
         *,
         retriever: Retriever,
         provider: LLMProvider,
+        propagate_retrieval_errors: bool = False,
     ) -> None:
         """Wire the service to its collaborators.
 
@@ -118,10 +119,20 @@ class RAGAnswerService:
                 :class:`Retriever`.
             provider: How text is generated. Any object satisfying
                 :class:`~llm.providers.base.LLMProvider`.
+            propagate_retrieval_errors: What to do when retrieval itself
+                fails. ``False`` (the default) degrades to
+                ``insufficient_evidence``, which is right for a script or a
+                notebook: the user asked a question and the honest answer is
+                that it cannot be answered. ``True`` lets the failure through,
+                which is right for a caller that must tell *"there is no
+                relevant evidence"* apart from *"the retrieval system is
+                broken"* — an HTTP API, for instance, where the first is a
+                200 and the second is a 503 someone needs to act on.
         """
         self._config = config
         self._retriever = retriever
         self._provider = provider
+        self._propagate_retrieval_errors = propagate_retrieval_errors
 
     @property
     def config(self) -> LLMConfig:
@@ -217,11 +228,21 @@ class RAGAnswerService:
         source_types: Sequence[str],
         equals: dict[str, Any] | None,
     ) -> RetrievalResponse:
-        """Fetch evidence, treating a retrieval failure as no evidence.
+        """Fetch evidence, handling a retrieval failure as configured.
 
-        A broken index should produce "I cannot answer that" rather than a
-        stack trace: the caller asked a question, and the honest response to a
-        question we cannot gather evidence for is that we cannot answer it.
+        By default a broken index produces "I cannot answer that" rather than
+        a stack trace: the caller asked a question, and the honest response to
+        a question we cannot gather evidence for is that we cannot answer it.
+
+        With ``propagate_retrieval_errors`` the failure is raised instead, so
+        a caller that distinguishes "nothing relevant was found" from "the
+        retrieval system is broken" can report them differently. Answering
+        "no evidence" to a corrupt index tells the user their question is
+        unanswerable when the truth is that something needs fixing.
+
+        Raises:
+            Exception: Whatever retrieval raised, when the service was built
+                with ``propagate_retrieval_errors=True``.
         """
         wanted = top_k if top_k is not None else self._config.max_retrieved_chunks
         try:
@@ -233,6 +254,8 @@ class RAGAnswerService:
             )
         except Exception as exc:  # noqa: BLE001 - any retrieval failure
             logger.warning("Retrieval failed: %s", type(exc).__name__)
+            if self._propagate_retrieval_errors:
+                raise
             return RetrievalResponse(question=question)
 
     def _generate(

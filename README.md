@@ -45,7 +45,7 @@ answer grounded in retrievable context.
 | Retrieval-augmented answers | Grounded natural-language answers with validated citations, built from that evidence | **implemented** |
 | Agentic workflows | Multi-step, tool-using analysis planned and executed by an agent | planned |
 | Experiment tracking | Reproducible run history — dataset fingerprint, configuration, metrics and explanations, stored locally as JSON | **implemented** (MLflow not implemented) |
-| HTTP API | Dataset profiling, experiment execution, history and comparison over REST | **implemented** |
+| HTTP API | Dataset profiling, experiment execution, history and comparison, plus knowledge search and grounded answers, over REST | **implemented** |
 | Web interface | Dataset upload, run monitoring, results and chat | planned |
 
 ## High-level architecture
@@ -56,8 +56,8 @@ answer grounded in retrievable context.
              └───────────┬───────────┘
                          │ HTTP
              ┌───────────▼───────────┐
-             │    FastAPI backend    │   ← system, dataset, experiment routes
-             │  api · services · db  │
+             │    FastAPI backend    │   ← system, dataset, experiment,
+             │  api · services · db  │     search and ask routes
              └─┬────────┬──────────┬─┘
                │        │          │
    ┌───────────▼──┐ ┌───▼───────┐ ┌▼──────────────┐
@@ -86,7 +86,7 @@ answer grounded in retrievable context.
 ```
 
 The backend is the single entry point. Domain logic lives in dedicated
-top-level packages (`ml/`, `rag/`, `agents/`) so that each concern can be
+top-level packages (`ml/`, `rag/`, `llm/`, `agents/`) so that each concern can be
 developed and tested on its own and consumed by the API through a thin service
 layer.
 
@@ -931,8 +931,15 @@ numpy or pandas.
 | `GET` | `/api/v1/experiments/capabilities` | Models, metrics and limits a request may use |
 | `GET` | `/api/v1/experiments/{experiment_id}` | Fetch one stored experiment |
 | `POST` | `/api/v1/experiments/compare` | Rank several stored experiments |
+| `POST` | `/api/v1/search` | Search documentation and experiment history |
+| `POST` | `/api/v1/ask` | Answer a question from retrieved evidence, with citations |
+| `GET` | `/api/v1/knowledge/status` | Whether search and answering are available, and their limits |
 
 Interactive documentation is at `/docs`; the schema is at `/openapi.json`.
+
+The last three are documented under
+[Searching and asking over HTTP](#searching-and-asking-over-http), below the
+retrieval and grounded-answer sections they expose.
 
 ### Running an experiment
 
@@ -1064,11 +1071,14 @@ works, and experiment records that say what was actually run. The retrieval
 layer makes both searchable, so a question can be answered from what this
 project knows about itself rather than from what a model happens to remember.
 
-> **LLM generation is not implemented yet.** This layer returns ranked
-> passages with citations. It never writes an answer, draws a conclusion or
-> interprets a result. What is built is the part that decides *what a future
-> model gets to see*, and makes every sentence of a future answer traceable to
-> a passage that exists.
+> **This layer returns evidence, never an answer.** It returns ranked passages
+> with citations; it never writes prose, draws a conclusion or interprets a
+> result. That is the next section's job, and it treats what comes from here as
+> authoritative. This is the part that decides *what the model gets to see*,
+> and makes every sentence of an answer traceable to a passage that exists.
+>
+> It is exposed as `POST /api/v1/search`, which needs no credential of any
+> kind.
 
 **Also not implemented:** Qdrant, PostgreSQL, any vector database, LangChain,
 LangGraph, agents, autonomous tool calling, and any hosted embedding API.
@@ -1206,8 +1216,7 @@ machines indexing the same repository agree on every identifier. A manifest
 records each source's hash and the embedding provider that built the index; a
 provider change triggers a rebuild rather than a mix of incomparable vectors.
 
-Retrieval is a library API in this commit — there is **no search endpoint**
-yet. See `rag/README.md` for the full design.
+See `rag/README.md` for the full design.
 
 ---
 
@@ -1376,8 +1385,77 @@ overstated a causal claim. Ingested experiment records carry the line
 "Importance describes model behaviour and association, not causation", so the
 correction travels with the evidence.
 
-Answering is a library API in this commit — there is **no ask endpoint** yet.
 See `llm/README.md` for the full design.
+
+---
+
+## Searching and asking over HTTP
+
+The retrieval and answering layers are reachable as two endpoints over the same
+index: one returns the evidence, the other returns an answer built from it.
+
+**POST /api/v1/ask returns evidence-grounded answers; the LLM is not the source
+of truth.**
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "How is data leakage prevented?",
+       "top_k": 5,
+       "filters": {"source_types": ["project_documentation"]}}'
+
+curl -X POST http://127.0.0.1:8000/api/v1/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"question": "Which model was selected, and what did it score?",
+       "top_k": 6,
+       "filters": {"source_types": ["experiment"], "task_type": "classification"}}'
+```
+
+Only `query` and `question` are required. `top_k` and `similarity_threshold`
+say how much evidence to consider; `filters` says where to look — by
+`source_types`, `task_type`, `dataset_fingerprint`, `target_column`,
+`selected_model`, `primary_metric` or `experiment_id`. Filtering is done by the
+retrieval layer *before* ranking, not by discarding results in a route.
+
+A search returns the ranked passages with their scores, source titles,
+references and citation identifiers. An answer returns the text, its status,
+the citations that were validated, the identifiers that were rejected, and the
+metadata describing how it was produced.
+
+### Results and errors are different things
+
+| Outcome | Status |
+| --- | --- |
+| Nothing relevant found | `200`, empty `results` — or an `insufficient_evidence` answer |
+| An answer the model could not ground | `200`, `status: grounding_failed`, `is_grounded: false` |
+| An invalid request — unknown source type, `top_k` over the cap, query too long | `400` |
+| A body that fails schema validation, or carries a field the endpoint does not define | `422` |
+| The provider failed — timeout, rate limit, rejected credential, outage | `502` |
+| Nothing indexed yet, an unreadable index, or no language-model credential | `503` |
+
+"No relevant evidence" and "the retrieval system is unavailable" are never
+conflated: the first is an honest empty result, the second says what to run.
+
+### What a request may not do
+
+There is no request field for a system prompt, a provider endpoint, an API key,
+a model name, a temperature, or a switch that disables grounding or citation
+validation — the schemas forbid unknown fields, so a body carrying one is
+rejected outright. No credential appears in any response, error or log; no
+filesystem path is ever disclosed; and a provider exception is caught, logged
+and replaced with an authored message rather than passed through.
+
+### Offline and unconfigured
+
+`/search` needs no credential: the default embedding provider is a
+deterministic local hashing embedder. `/ask` needs a language-model key, and
+without one answers `503` — the application still starts, and search still
+works. The test suite builds a real index over this repository's own
+documentation and drives `/ask` through a fake provider, so the full HTTP path
+is exercised with no network call and no key.
+
+**Not implemented:** agents, LangGraph, autonomous tool calling, streaming,
+conversation memory, a frontend, authentication and rate limiting.
 
 ---
 
@@ -1420,6 +1498,11 @@ See `llm/README.md` for the full design.
   OpenAI-compatible implementation, an ML-specific system prompt, deterministic
   context selection under configurable limits, and citation validation that
   rejects any answer citing a source that was not retrieved.
+- Both of those over HTTP: `POST /api/v1/search`, `POST /api/v1/ask` and
+  `GET /api/v1/knowledge/status`, with pre-ranking metadata filters, statuses
+  that distinguish a result from a failure, lazy provider and index loading, and
+  no way for a request to supply a prompt, an endpoint, a key or a grounding
+  bypass.
 - Test suites covering the backend service, the API contract, the ML layer, the
   retrieval layer and the language-model layer.
 
@@ -1430,9 +1513,8 @@ See `llm/README.md` for the full design.
   there is no prediction or model-serving endpoint
 - **MLflow** — experiment tracking runs on local JSON files only
 - Ingestion formats other than CSV (Excel, JSON, Parquet, SQL, APIs)
-- A search or ask endpoint — retrieval and answering are library APIs in this commit
 - Agentic workflows, autonomous tool calling, LangChain and LangGraph
-- A search endpoint — retrieval is a library API in this commit
+- Streaming answers and conversation memory — every question is independent
 - PostgreSQL, Qdrant and any database access
 - Background execution — no Celery, Redis, queue or worker; runs are synchronous
 - Authentication and rate limiting
@@ -1451,6 +1533,9 @@ See `llm/README.md` for the full design.
 | `GET` | `/api/v1/experiments/capabilities` | Models, metrics and limits a request may use |
 | `GET` | `/api/v1/experiments/{experiment_id}` | Fetch one stored experiment |
 | `POST` | `/api/v1/experiments/compare` | Rank several stored experiments |
+| `POST` | `/api/v1/search` | Search documentation and experiment history |
+| `POST` | `/api/v1/ask` | Answer a question from retrieved evidence, with citations |
+| `GET` | `/api/v1/knowledge/status` | Whether search and answering are available, and their limits |
 
 Interactive API documentation is served at `/docs`.
 
@@ -1503,11 +1588,18 @@ The service starts on <http://127.0.0.1:8000>.
 curl http://127.0.0.1:8000/
 curl http://127.0.0.1:8000/health
 curl -X POST http://127.0.0.1:8000/api/v1/datasets/profile -F "file=@customers.csv"
+curl http://127.0.0.1:8000/api/v1/knowledge/status
 ```
+
+The service starts whether or not an index has been built and whether or not a
+language-model key is configured. To make `/search` and `/ask` useful, build the
+index first — see `rag/README.md` — and set `LLM_API_KEY` in your `.env` for
+`/ask`. `GET /api/v1/knowledge/status` reports what is currently available.
 
 ## Running the tests
 
-From the repository root, which runs the backend, ML and retrieval suites:
+From the repository root, which runs the backend, ML, retrieval and
+language-model suites:
 
 ```bash
 pytest
@@ -1539,9 +1631,10 @@ and the real LLM provider (needs a credential *and* `RUN_LLM_INTEGRATION=1`).
 5. ~~**Cross-validation and model selection** — k-fold selection, one unbiased test evaluation~~
 6. ~~**Explainability with SHAP** — global importance, local contributions, fallback~~
 7. ~~**Experiment tracking** — dataset fingerprints, versioned run records, local persistence, comparison~~ *(MLflow deferred)*
-8. **Experiment API** — run, list, fetch and compare experiments over HTTP *(current)*
+8. ~~**Experiment API** — run, list, fetch and compare experiments over HTTP~~
 9. ~~**Retrieval over documentation and run history** — chunking, embeddings, vector store, cited evidence~~
-10. **Provider-agnostic LLM + grounded answers** — prompt construction, citation validation, grounding enforcement *(current)*
-11. Agentic workflows
-12. Next.js frontend
-13. Containerisation and deployment
+10. ~~**Provider-agnostic LLM + grounded answers** — prompt construction, citation validation, grounding enforcement~~
+11. **Knowledge API** — `/search` and `/ask` over HTTP, with grounded statuses and no client-supplied provider configuration *(current)*
+12. Agentic workflows
+13. Next.js frontend
+14. Containerisation and deployment

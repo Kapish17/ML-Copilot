@@ -105,7 +105,7 @@ rag/
 ## Documentation ingestion
 
 An **allowlist, not a crawl**. `RagConfig.documentation_files` names the files
-to index — the four READMEs by default — plus one optional `docs/` directory.
+to index — the five READMEs by default — plus one optional `docs/` directory.
 Source code, datasets, model artefacts, virtual environments, `.git` and the
 experiment store are not merely skipped; they are never candidates.
 
@@ -483,10 +483,46 @@ indexing.
 | `RAG_CHUNK_OVERLAP` | `150` | Characters repeated across a boundary |
 | `RAG_TOP_K` | `5` | Results returned when the caller does not say |
 | `RAG_SIMILARITY_THRESHOLD` | `0.0` | Minimum cosine similarity |
+| `RAG_MAX_QUERY_LENGTH` | `2000` | Longest query accepted, in characters |
 
 Everything else — the minimum chunk size, the `top_k` cap, the batch size, the
 documentation allowlist, the forbidden names — is a field on `RagConfig` with
 a named default constant. No module hard-codes a number of its own.
+
+`RagConfig.resolve_query()` applies the empty-query and length rules, so a
+library caller and an HTTP client are held to exactly the same limits by the
+same code.
+
+## Over HTTP
+
+Retrieval is exposed by the backend as `POST /api/v1/search`, and used by the
+answering endpoint to gather the evidence an answer is built from. **POST
+/api/v1/ask returns evidence-grounded answers; the LLM is not the source of
+truth** — this layer is where that truth comes from.
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "How is data leakage prevented?",
+       "top_k": 5,
+       "filters": {"source_types": ["project_documentation"]}}'
+```
+
+The endpoint is an adapter, not a second implementation. Its `filters` field
+becomes a `build_metadata_filter(...)` call — the same pre-ranking filter a
+library caller would build — so filtering exists in one place and never as
+list comprehensions in a route. Ranking, scoring and citation identifiers are
+this layer's, unchanged.
+
+Three states this layer does not distinguish are distinguished at the edge,
+because only an HTTP client is misled by conflating them: **no relevant
+evidence** is a `200` with an empty list; **no index built yet** is a `503`
+saying to run the indexer; **an index that cannot be read** is a `503` from
+this layer's own `CorruptIndexError`. See `backend/README.md`.
+
+Nothing in `rag/` knows any of this. It raises its own errors, and
+`backend/app/core/knowledge_errors.py` is the single place that gives them a
+code and a status.
 
 ## Setup and tests
 
@@ -528,5 +564,5 @@ writers, or history shared across machines. **Qdrant is not implemented.**
 - **English only in practice.** Nothing is language-specific by design, but
   the chunker's heuristics and the default embeddings were tuned against
   English documentation.
-- **Not exposed over HTTP.** Retrieval is a library API in this commit; there
-  is no `/api/v1/search` endpoint.
+- **No relevance feedback or reranking loop.** A search is a single pass: one
+  embedding, one ranked list. Nothing learns from what a caller found useful.
