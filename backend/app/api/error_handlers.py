@@ -8,7 +8,8 @@ That holds for every layer: dataset validation, preprocessing, model selection,
 explainability, experiment storage, retrieval and answer generation all answer
 in the same shape, even though only the backend's own errors know anything
 about HTTP. Errors from ``ml`` are translated by :mod:`app.core.ml_errors`;
-errors from ``rag`` and ``llm`` by :mod:`app.core.knowledge_errors`.
+errors from ``rag`` and ``llm`` by :mod:`app.core.knowledge_errors`; errors
+from ``agent`` by :mod:`app.core.agent_errors`.
 
 Unexpected exceptions are logged server-side and answered with a generic
 message, so stack traces and internal details never reach an API consumer.
@@ -25,6 +26,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.core.agent_errors import (
+    AgentError,
+    is_client_error as is_client_agent_error,
+    translate_agent_error,
+)
 from app.core.errors import MLCopilotError
 from app.core.knowledge_errors import (
     LLMError,
@@ -133,6 +139,35 @@ async def handle_knowledge_error(
     )
 
 
+async def handle_agent_error(request: Request, exc: AgentError) -> JSONResponse:
+    """Return the envelope for a failure of the agent layer.
+
+    ``agent/`` knows nothing about HTTP, so the mapping lives in
+    :mod:`app.core.agent_errors`. A planner whose provider failed, or which
+    produced something that was not a decision, is a 502; a planner with no
+    credential is a 503 whose message says what to set.
+
+    Note what does *not* arrive here. ``partial``, ``insufficient_evidence``
+    and ``grounding_failed`` are results, not exceptions — they travel as 200
+    with a status field. And an unknown tool or an invalid argument set does
+    not usually reach here either: inside a run those become *rejected
+    observations*, so the planner can correct itself and the client can see
+    that it tried.
+    """
+    code, status_code, message, details = translate_agent_error(exc)
+    if not is_client_agent_error(exc):
+        logger.warning(
+            "%s while processing %s %s: %s",
+            type(exc).__name__,
+            request.method,
+            request.url.path,
+            getattr(exc, "message", ""),
+        )
+    return build_error_response(
+        status_code=status_code, code=code, message=message, details=details
+    )
+
+
 def _sanitise_validation_errors(errors: list[Any]) -> list[Any]:
     """Strip the echoed value from "this field is not allowed" errors.
 
@@ -195,6 +230,7 @@ def register_exception_handlers(application: FastAPI) -> None:
     application.add_exception_handler(MLError, handle_ml_error)
     application.add_exception_handler(RagError, handle_knowledge_error)
     application.add_exception_handler(LLMError, handle_knowledge_error)
+    application.add_exception_handler(AgentError, handle_agent_error)
     application.add_exception_handler(RequestValidationError, handle_validation_error)
     application.add_exception_handler(StarletteHTTPException, handle_http_exception)
     application.add_exception_handler(Exception, handle_unexpected_error)

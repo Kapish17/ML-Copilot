@@ -9,8 +9,12 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
+from agent.config import AgentConfig
+from agent.tools.datasets import InMemoryDatasetSource
 from app.api.dependencies import (
     SettingsDep,
+    get_agent_config,
+    get_dataset_source,
     get_llm_config,
     get_llm_provider,
     get_rag_config,
@@ -32,6 +36,8 @@ def create_app(
     rag_config: RagConfig | None = None,
     llm_config: LLMConfig | None = None,
     llm_provider: LLMProvider | None = None,
+    agent_config: AgentConfig | None = None,
+    dataset_source: InMemoryDatasetSource | None = None,
 ) -> FastAPI:
     """Build and configure the FastAPI application.
 
@@ -51,6 +57,13 @@ def create_app(
         llm_provider: Optional provider override. A test passes the
             deterministic fake here so the whole HTTP → retrieval → model →
             grounding path runs offline.
+        agent_config: Optional agent budget override, for running an endpoint
+            against smaller limits than the environment configures.
+        dataset_source: Optional datasets the agent may name. Empty by
+            default — nothing populates it in the default wiring, so the two
+            dataset-dependent tools are simply not registered. A test, and a
+            later commit that gives the endpoint data to work on, supplies
+            one here.
 
     Returns:
         FastAPI: A configured application instance.
@@ -81,10 +94,20 @@ def create_app(
             "every citation is checked against the passages actually "
             "supplied, and an answer citing a source that was not retrieved "
             "is rejected rather than quietly cleaned up.\n\n"
+            "**POST /api/v1/agent/ask** goes one step further: it lets the "
+            "system choose which of its own capabilities a question needs — "
+            "profiling a dataset, running an experiment, explaining the "
+            "winner, searching the history — and then answers from what those "
+            "steps actually returned. **The agent can only execute explicitly "
+            "registered tools.** **The agent never executes arbitrary Python, "
+            "shell commands, HTTP requests, or filesystem operations.** "
+            "Execution is bounded by hard limits a request may lower and "
+            "never raise, and no chain-of-thought is returned.\n\n"
             "Runs are synchronous. Records and the retrieval index are local "
             "files: MLflow, any database, Qdrant, model serving, background "
-            "workers, authentication, streaming, conversation memory and "
-            "agent features are not implemented.\n\n"
+            "workers, authentication, streaming, conversation memory, a "
+            "frontend and any agent framework (LangChain, LangGraph, AutoGen, "
+            "CrewAI) are not implemented.\n\n"
             "Every failure returns the same envelope: "
             "`{\"error\": {\"code\", \"message\", \"details\"}}`. An answer "
             "that could not be grounded is **not** a failure — it returns 200 "
@@ -101,6 +124,10 @@ def create_app(
         application.dependency_overrides[get_llm_config] = lambda: llm_config
     if llm_provider is not None:
         application.dependency_overrides[get_llm_provider] = lambda: llm_provider
+    if agent_config is not None:
+        application.dependency_overrides[get_agent_config] = lambda: agent_config
+    if dataset_source is not None:
+        application.dependency_overrides[get_dataset_source] = lambda: dataset_source
 
     register_exception_handlers(application)
     application.include_router(api_router)

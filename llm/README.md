@@ -17,8 +17,9 @@ memory. Also still absent from the project: MLflow, Optuna, Qdrant,
 PostgreSQL, XGBoost, LightGBM, a frontend, authentication, rate limiting, and
 dataset ingestion beyond CSV.
 
-This layer's provider abstraction is also what the agent plans through — see
-"The agent" below, and `agent/README.md`.
+This layer's provider abstraction is also what the agent plans through, and
+what `POST /api/v1/agent/ask` reaches a model by — see "The agent" below, and
+`agent/README.md`.
 
 This layer is a library. It is *used* by `POST /api/v1/ask` in the backend —
 see "Over HTTP" below — but it contains no HTTP code, imports no web
@@ -478,8 +479,11 @@ observation. An invented run id looks like a record someone can go and read.
 
 `RAGAnswerService` and the agent are separate paths to an answer, not layers of
 one: the service answers a question from documents in a single retrieval, and
-the agent chooses and runs tools first. Both end in the same grounding rule.
-See `agent/README.md`.
+the agent chooses and runs tools first. Both end in the same grounding rule,
+and both are exposed — as `POST /api/v1/ask` and `POST /api/v1/agent/ask`.
+**The agent can only execute explicitly registered tools**, and **never
+executes arbitrary Python, shell commands, HTTP requests, or filesystem
+operations.** See `agent/README.md`.
 
 ## Architecture
 

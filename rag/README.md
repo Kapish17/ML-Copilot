@@ -15,10 +15,12 @@ works, and the experiment records that say what was actually run.
 > `rag/` does not import `llm/`. Retrieval stays usable, and testable, with no
 > model involved, and a test enforces it.
 
-This layer is also what the agent's `search_knowledge` tool wraps. That tool
-is search only: there is deliberately no agent tool that indexes, edits or
-deletes anything here, so nothing an agent does can change what the knowledge
-base contains. See `agent/README.md`.
+This layer is also what the agent's `search_knowledge` tool wraps, and through
+it what `POST /api/v1/agent/ask` searches. That tool is search only: there is
+deliberately no agent tool that indexes, edits or deletes anything here, so
+nothing an agent does — however it is asked — can change what the knowledge
+base contains. **The agent can only execute explicitly registered tools.** See
+`agent/README.md`.
 
 **Not implemented:** Qdrant, PostgreSQL, any vector database, LangChain,
 LangGraph, autonomous tool calling, and any hosted embedding API.

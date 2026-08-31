@@ -3,7 +3,8 @@
 FastAPI service that exposes the ML Copilot platform over HTTP: the
 service-level endpoints, the dataset profiling API, the experiment API that
 runs the whole ML pipeline on an uploaded dataset and remembers what happened,
-and the knowledge API that searches that history and answers questions from it.
+the knowledge API that searches that history and answers questions from it,
+and the agent API that lets the system choose which of those a question needs.
 
 The service is an **adapter around the engines**, not a home for them. Every
 statistic, split, score and explanation is computed in the top-level `ml/`
@@ -14,6 +15,11 @@ and turns results into JSON.
 **POST /api/v1/ask returns evidence-grounded answers; the LLM is not the source
 of truth.** Retrieved evidence is. An answer that cannot be supported by
 retrieved passages is reported as unsupported rather than returned as prose.
+
+**The agent can only execute explicitly registered tools.** **The agent never
+executes arbitrary Python, shell commands, HTTP requests, or filesystem
+operations.** `POST /api/v1/agent/ask` is bounded, returns no
+chain-of-thought, and is held to the same grounding rule as `/ask`.
 
 ## Structure
 
@@ -28,19 +34,22 @@ backend/
 │   │       ├── datasets.py         POST /api/v1/datasets/profile
 │   │       ├── experiments.py      The experiment endpoints
 │   │       ├── experiment_form.py  The multipart request contract
-│   │       └── knowledge.py        POST /search and POST /ask
+│   │       ├── knowledge.py        POST /search and POST /ask
+│   │       └── agent.py            POST /agent/ask
 │   ├── core/
 │   │   ├── config.py          Environment-driven Settings object
 │   │   ├── errors.py          Typed domain errors with codes and statuses
 │   │   ├── ml_errors.py       ML-layer exceptions → codes and HTTP statuses
-│   │   └── knowledge_errors.py  RAG and LLM exceptions → codes and statuses
+│   │   ├── knowledge_errors.py  RAG and LLM exceptions → codes and statuses
+│   │   └── agent_errors.py    Agent exceptions and failed runs → codes and statuses
 │   ├── models/                Persistence models (empty — no database yet)
 │   ├── schemas/
 │   │   ├── system.py          Schemas for `/` and `/health`
 │   │   ├── errors.py          The error envelope
 │   │   ├── dataset.py         Dataset profile response models
 │   │   ├── experiment.py      Experiment request and response models
-│   │   └── knowledge.py       Search and ask request and response models
+│   │   ├── knowledge.py       Search and ask request and response models
+│   │   └── agent.py           Agent request and response models
 │   ├── services/
 │   │   ├── datasets/
 │   │   │   ├── validation.py  Filename, extension and size checks
@@ -54,10 +63,14 @@ backend/
 │   │   │   ├── options.py     The validated description of one request
 │   │   │   ├── runner.py      ExperimentRunner — the orchestration
 │   │   │   └── history.py     Reading, filtering and comparing runs
-│   │   └── knowledge/
-│   │       ├── filters.py     Request fields → the RAG metadata filter
+│   │   ├── knowledge/
+│   │   │   ├── filters.py     Request fields → the RAG metadata filter
+│   │   │   ├── errors.py      The refusals only an HTTP caller cares about
+│   │   │   └── service.py     KnowledgeService — search and ask
+│   │   └── agent/
+│   │       ├── budgets.py     What a request may lower, and never raise
 │   │       ├── errors.py      The refusals only an HTTP caller cares about
-│   │       └── service.py     KnowledgeService — search and ask
+│   │       └── service.py     AgentService — one question, one bounded run
 │   └── main.py                Application factory and system routes
 ├── tests/
 │   ├── factories.py           In-memory CSV builders used by the tests
@@ -72,6 +85,7 @@ backend/
 │   ├── test_api_datasets.py       Profiling contract and error handling
 │   ├── test_api_experiments.py    Experiment endpoints, end to end
 │   ├── test_api_knowledge.py      Search and ask, security and architecture
+│   ├── test_api_agent.py          The agent endpoint, security and architecture
 │   └── test_experiment_service.py Service layer and architecture rules
 ├── requirements.txt
 └── README.md
@@ -150,6 +164,8 @@ backend/
 | `POST` | `/api/v1/search` | Search documentation and experiment history |
 | `POST` | `/api/v1/ask` | Answer a question from retrieved evidence, with citations |
 | `GET` | `/api/v1/knowledge/status` | Whether search and answering are available, and their limits |
+| `POST` | `/api/v1/agent/ask` | Answer a question by orchestrating the system's own capabilities |
+| `GET` | `/api/v1/agent/status` | Whether the agent is available, its tools and its limits |
 
 OpenAPI docs: <http://127.0.0.1:8000/docs> · schema: `/openapi.json`
 
@@ -386,6 +402,111 @@ temporary directory and drive `/ask` through a fake provider, so the suite
 exercises the full HTTP path — validation, retrieval, prompting, citation
 validation, grounding — without a network call or an API key.
 
+## The agent endpoint
+
+`POST /api/v1/agent/ask` is where the system decides for itself. Where `/ask`
+answers from retrieved documents in one step, this may profile a dataset, run
+a cross-validated experiment, explain the winning model and search the
+project's history — choosing the sequence, then writing an answer from what
+those steps actually returned.
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/agent/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"question": "Which model performs best on the customers data, and why?",
+       "max_tool_calls": 4}'
+```
+
+The flow, and where each step lives:
+
+```
+POST /api/v1/agent/ask                api/v1/agent.py
+        ↓
+validate the body                     schemas/agent.py    (extra="forbid")
+        ↓
+check the planner, resolve the
+budget                                services/agent/
+        ↓
+plan → tool → observe → repeat        agent/orchestrator.py
+        ├── dataset_profile           services/datasets/
+        ├── run_experiment            services/experiments/runner.py → ml/
+        ├── search_knowledge          rag/
+        └── explain_experiment        ml/explainability/
+        ↓
+grounding + citation validation       llm/grounding.py (the same functions /ask uses)
+        ↓
+JSON response                         schemas/agent.py
+```
+
+The route is three statements. Everything above it belongs to `agent/`, and
+everything the agent runs belongs to the layers that already implemented it —
+`api/dependencies.py` is the one module that knows all five packages exist,
+and a test asserts that the route imports none of them.
+
+### Statuses
+
+**The status is the field that matters**, not the prose beside it.
+
+| Status | HTTP | Meaning |
+| --- | --- | --- |
+| `completed` | `200` | Supported by the observations, every citation real. The only status that may be shown to a user as an answer. |
+| `partial` | `200` | Real work done and reported, but something is missing: a tool was unavailable, or a budget ran out. The gap is stated in `warnings`, never filled. |
+| `insufficient_evidence` | `200` | Nothing observed supports an answer. An honest refusal. |
+| `grounding_failed` | `200` | The answer cited a source that was never retrieved, or cited nothing while evidence existed. The text is returned so a person can see it; `rejected_citations` names what was invented. |
+| — | `422` | The body does not match the schema, or a budget exceeds the server's. |
+| — | `502` | The planner's provider failed, or produced something that was not a decision. |
+| — | `503` | No language-model credential is configured. |
+
+The 5xx cases are the only ones where **no answer was produced**. Everything
+else the agent can do is a result, reported at 200.
+
+### Budgets
+
+A request may name `max_tool_calls`, `max_iterations` or `max_context_chars`,
+and each may only **lower** the server's `AGENT_*` limit. A larger value is a
+`422` naming the limit — rejected rather than silently capped, because a
+client that believes it was granted a hundred tool calls and receives a
+partial result after six has no way to tell what happened.
+
+### What a request may not contain
+
+There is no field for a system prompt, a provider endpoint, an API key, a
+model, a temperature, a tool, a registry, an estimator, a filesystem path, or
+a switch that disables grounding or citation validation. The request model
+sets `extra="forbid"`, so a body carrying one is a `422` rather than an
+ignored field — and the error names the field without echoing its value, so a
+smuggled credential is not handed back.
+
+### Tools, and what is actually available
+
+`tools_available` on every response is the complete set the planner could
+choose from. A tool is registered only when the service it wraps is present,
+so this is honest about the deployment rather than aspirational.
+
+**In the default wiring there is no dataset**, because uploads are never kept
+and this endpoint takes a JSON body rather than a file — so `dataset_profile`
+and `run_experiment` are not registered, and the agent answers from the
+knowledge base and stored experiments. Supplying data to the agent is a
+`get_dataset_source` dependency override today; giving the endpoint its own
+way to receive a dataset is a later commit.
+
+### No chain-of-thought
+
+The response carries which tool was chosen, the validated arguments, what the
+tool returned, and the answer. How the planner decided is not returned, stored
+or logged, and there is no field for it — a test asserts on the field names as
+well as the values.
+
+### Testing it offline
+
+The suite drives the **real** `LLMPlanner` with Commit 10's `FakeLLMProvider`
+returning decision objects, so the production path is what runs: FastAPI → the
+agent service → the orchestrator → the registry → the real retrieval index,
+the real experiment runner and the real SHAP layer → grounding → JSON. A
+fabricated citation, an exhausted budget and a provider timeout are each one
+line of script rather than something to wait for. No test needs a credential
+or a network.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -453,8 +574,8 @@ only:
 
 ```
 API routes  →  application services  →  ml/ · rag/ · llm/  →  core abstractions
-                                            ▲
-                                         agent/   (library only — no route yet)
+                                    ↘        ▲
+                                     agent/ ─┘   (chooses which to run)
 ```
 
 This service imports `ml/`. `ml/` does **not** import this service, does not
@@ -512,6 +633,6 @@ pip install -r backend/requirements.txt -r ml/requirements.txt \
             -r rag/requirements.txt -r llm/requirements.txt
 ```
 
-Dependencies are added only when the code that needs them lands. **Commit 11
-added none** — exposing the knowledge layers over HTTP needed nothing that was
-not already installed for `rag/` and `llm/`.
+Dependencies are added only when the code that needs them lands. **Commits 11,
+12 and 13 added none** — exposing the knowledge and agent layers over HTTP
+needed nothing that was not already installed, and the agent uses no framework.

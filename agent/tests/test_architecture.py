@@ -97,10 +97,35 @@ def test_the_engines_do_not_import_the_agent(package: str) -> None:
         assert "agent" not in module_imports(path), path.relative_to(REPOSITORY_ROOT)
 
 
-def test_the_backend_does_not_import_the_agent_yet() -> None:
-    """There is no HTTP endpoint in this commit, and this is how it is known."""
-    for path in package_modules("backend/app"):
-        assert "agent" not in module_imports(path), path.relative_to(REPOSITORY_ROOT)
+def test_only_the_backend_edge_imports_the_agent() -> None:
+    """The backend may use the agent — in a small, named set of places.
+
+    The dependency is one-directional and this test says how far it reaches.
+    Wiring belongs in ``api/dependencies.py``, which is the one module that
+    knows all five packages exist; the factory takes the two overrides a test
+    needs; error translation belongs in ``core/agent_errors.py``, the sibling
+    of the ML and knowledge mappings; and the application service holds the
+    orchestrator and the budget policy.
+
+    Everything else — the route and the schemas above all — talks to the agent
+    through those. The route in particular must not import ``agent``: it
+    depends on the application service and on nothing deeper, which is what
+    keeps it thin and what would make a change of orchestrator a change to
+    these four files.
+    """
+    importers = {
+        path.relative_to(REPOSITORY_ROOT).as_posix()
+        for path in package_modules("backend/app")
+        if "agent" in module_imports(path)
+    }
+
+    assert importers == {
+        "backend/app/api/dependencies.py",
+        "backend/app/core/agent_errors.py",
+        "backend/app/main.py",
+        "backend/app/services/agent/budgets.py",
+        "backend/app/services/agent/service.py",
+    }, importers
 
 
 def test_rag_still_does_not_import_the_llm_layer() -> None:

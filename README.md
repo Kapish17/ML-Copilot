@@ -44,9 +44,9 @@ answer grounded in retrievable context.
 | Explainable AI | Global and per-prediction feature attributions (SHAP) | **implemented** |
 | Retrieval over docs and experiments | Semantic search with metadata filtering and citations, over project documentation and run history | **implemented** |
 | Retrieval-augmented answers | Grounded natural-language answers with validated citations, built from that evidence | **implemented** |
-| Agentic workflows | Multi-step, tool-using analysis planned and executed by a bounded agent over an explicit tool allowlist | **implemented** (library; no HTTP endpoint yet) |
+| Agentic workflows | Multi-step, tool-using analysis planned and executed by a bounded agent over an explicit tool allowlist | **implemented** |
 | Experiment tracking | Reproducible run history — dataset fingerprint, configuration, metrics and explanations, stored locally as JSON | **implemented** (MLflow not implemented) |
-| HTTP API | Dataset profiling, experiment execution, history and comparison, plus knowledge search and grounded answers, over REST | **implemented** |
+| HTTP API | Dataset profiling, experiment execution, history and comparison, knowledge search and grounded answers, and the bounded agent, over REST | **implemented** |
 | Web interface | Dataset upload, run monitoring, results and chat | planned |
 
 ## High-level architecture
@@ -111,7 +111,7 @@ layer.
 | Embeddings | Local, offline by default (hashed n-grams); optional `all-MiniLM-L6-v2` | **implemented** |
 | Retrieval (index) | Local persistent vector store behind a `VectorStore` interface | **implemented** |
 | Retrieval (server) | Qdrant vector database | **not implemented** |
-| Agents | Bounded tool-calling orchestration over the existing services | **implemented** (library) |
+| Agents | Bounded tool-calling orchestration over the existing services, exposed as `POST /api/v1/agent/ask` | **implemented** |
 | Agent frameworks | LangChain, LangGraph, AutoGen, CrewAI | **not implemented** |
 | Database | PostgreSQL | planned |
 | Frontend | Next.js, TypeScript | planned |
@@ -127,7 +127,6 @@ ml-copilot/
 ├── rag/           Documentation and experiment retrieval (chunking, embeddings, vector store)
 ├── llm/           Provider abstraction, prompts, grounding, citation validation
 ├── agent/         Bounded tool-calling agent: registry, planner, orchestrator
-├── agents/        Superseded Commit 1 placeholder (see agent/)
 ├── data/          Local datasets — raw and processed (git-ignored contents)
 ├── configs/       Configuration files
 ├── docs/          Project documentation
@@ -138,8 +137,7 @@ ml-copilot/
 
 `backend/`, `ml/`, `rag/`, `llm/` and `agent/` hold implemented code. The
 remaining directories are placeholders holding the structure the project will
-grow into — including `agents/`, the empty Commit 1 placeholder that `agent/`
-supersedes and which can be removed.
+grow into.
 
 ---
 
@@ -942,6 +940,10 @@ numpy or pandas.
 | `POST` | `/api/v1/search` | Search documentation and experiment history |
 | `POST` | `/api/v1/ask` | Answer a question from retrieved evidence, with citations |
 | `GET` | `/api/v1/knowledge/status` | Whether search and answering are available, and their limits |
+| `POST` | `/api/v1/agent/ask` | Answer a question by orchestrating the system's own capabilities |
+| `GET` | `/api/v1/agent/status` | Whether the agent is available, its tools and its limits |
+| `POST` | `/api/v1/agent/ask` | Answer a question by orchestrating the system's own capabilities |
+| `GET` | `/api/v1/agent/status` | Whether the agent is available, its tools and its limits |
 
 Interactive documentation is at `/docs`; the schema is at `/openapi.json`.
 
@@ -1625,11 +1627,31 @@ change that. So `explain_experiment` answers in three ways:
 No SHAP value is ever invented or carried over from another run. See
 `agent/README.md`.
 
-### No endpoint yet
+### Over HTTP
 
-**`POST /api/v1/agent/ask` is not implemented.** The agent is a library in this
-commit, and a test asserts that nothing under `backend/app/` imports it. The
-endpoint belongs to the next commit, once this layer is verified.
+`POST /api/v1/agent/ask` exposes it. The route is three statements over an
+application service; the agent package still imports no web framework, and a
+test names the five backend modules that may import it at all — the route is
+not one of them.
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/agent/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"question": "Which model performs best on the customers data, and why?",
+       "max_tool_calls": 4}'
+```
+
+A request may make a run **smaller** — `max_tool_calls`, `max_iterations`,
+`max_context_chars` — and nothing else. A larger value is a `422` naming the
+limit, rejected rather than silently capped. There is no field for a prompt, a
+provider, a credential, a model, a tool, an estimator or a path, and the schema
+forbids unknown fields.
+
+All four agent outcomes are **200**: the request was valid and the work was
+done. Only a run that produced nothing at all is an error — `503` when no
+credential is configured, `502` when the planner's provider failed or returned
+something that was not a decision. `tools_available` on every response says
+what the planner could actually choose from.
 
 ```bash
 pytest agent/tests                 # offline, deterministic
@@ -1693,6 +1715,10 @@ is faked, and no test needs a credential or a network.
   experiment, retrieval and explainability services, hard execution budgets,
   untrusted-observation handling, and a final answer held to the same grounding
   and citation rules as the ask endpoint.
+- That agent over HTTP: `POST /api/v1/agent/ask`, a thin adapter with typed
+  request validation, budgets a request may lower and never raise, the four
+  agent outcomes as 200 and provider failures as 502/503, and no
+  chain-of-thought in the response.
 - Test suites covering the backend service, the API contract, the ML layer, the
   retrieval layer, the language-model layer and the agent layer.
 
@@ -1703,7 +1729,6 @@ is faked, and no test needs a credential or a network.
   there is no prediction or model-serving endpoint
 - **MLflow** — experiment tracking runs on local JSON files only
 - Ingestion formats other than CSV (Excel, JSON, Parquet, SQL, APIs)
-- An agent HTTP endpoint — the agent is a library in this commit
 - LangChain, LangGraph, AutoGen, CrewAI or any agent framework
 - Multi-agent systems and autonomous tool calling outside the registered tools
 - Streaming answers and conversation memory — every question is independent
@@ -1828,7 +1853,7 @@ and the real LLM provider (needs a credential *and* `RUN_LLM_INTEGRATION=1`).
 9. ~~**Retrieval over documentation and run history** — chunking, embeddings, vector store, cited evidence~~
 10. ~~**Provider-agnostic LLM + grounded answers** — prompt construction, citation validation, grounding enforcement~~
 11. ~~**Knowledge API** — `/search` and `/ask` over HTTP, with grounded statuses and no client-supplied provider configuration~~
-12. **Bounded agent** — tool registry, typed schemas, bounded execution, grounded final answers *(current)*
-13. Agent HTTP endpoint
+12. ~~**Bounded agent** — tool registry, typed schemas, bounded execution, grounded final answers~~
+13. **Agent HTTP endpoint** — `POST /api/v1/agent/ask`, budgets a request may lower, bounded outcomes *(current)*
 14. Next.js frontend
 15. Containerisation and deployment

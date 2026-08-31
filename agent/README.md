@@ -11,11 +11,14 @@ question needs, and then run them.
 Those two sentences are the design, not a summary of it. Everything below is
 either a consequence of them or a mechanism that makes them true.
 
+The backend exposes this layer as `POST /api/v1/agent/ask` — see
+"Over HTTP" below.
+
 **Not implemented:** LangChain, LangGraph, AutoGen, CrewAI or any agent
-framework; multi-agent systems; streaming; conversation memory; an HTTP
-endpoint; a frontend. Also still absent from the project: MLflow, Optuna,
-Qdrant, PostgreSQL, XGBoost, LightGBM, authentication, background workers, and
-dataset ingestion beyond CSV.
+framework; multi-agent systems; streaming; conversation memory; a frontend.
+Also still absent from the project: MLflow, Optuna, Qdrant, PostgreSQL,
+XGBoost, LightGBM, authentication, background workers, and dataset ingestion
+beyond CSV.
 
 ## What it is, and why it is bounded
 
@@ -443,18 +446,53 @@ agent wired with retrieval but no runner simply has fewer tools — and the
 planner is told about fewer tools, because it is shown this registry and
 nothing else.
 
-## Future HTTP endpoint
+## Over HTTP
 
-**No API endpoint is implemented.** `POST /api/v1/agent/ask` belongs to a later
-commit, after this library layer is verified.
+The backend exposes this layer as `POST /api/v1/agent/ask`. The route is three
+statements over an application service; this package contains no HTTP code,
+imports no web framework, and neither knows nor cares that a request is what
+called it.
 
-When it lands, the shape is already right: `AgentOrchestrator.run(question)`
-takes a string and returns a JSON-safe result, imports no web framework, and
-the wiring above is what a FastAPI dependency would assemble. The status field
-maps onto HTTP the way the ask endpoint's does — `completed`, `partial` and
-`insufficient_evidence` are results at `200`; `grounding_failed` is a result
-too; only `failed` is an error, at `502` or `503` depending on whether the
-provider was unusable or unconfigured.
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/agent/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"question": "Which model performs best on the customers data, and why?",
+       "max_tool_calls": 4}'
+```
+
+A request may vary **how small** the run is — `max_tool_calls`,
+`max_iterations` and `max_context_chars`, each of which may only *lower* the
+server's configured limit. A larger value is rejected with a 422 naming the
+limit, rather than silently capped. It may vary nothing else: there is no
+request field for a prompt, an endpoint, a credential, a model, a tool, a
+registry, an estimator, a path, or a grounding switch, and the schema forbids
+unknown fields so an attempt to supply one is refused rather than ignored.
+
+The statuses cross the boundary unchanged in meaning, but not in kind:
+
+| Status | HTTP | Why |
+| --- | --- | --- |
+| `completed` | `200` | A result. |
+| `partial` | `200` | A result — the work done is reported and the gap is stated. |
+| `insufficient_evidence` | `200` | A result — an honest refusal is not a server failure. |
+| `grounding_failed` | `200` | A result — `rejected_citations` names what was invented. |
+| `failed` | `502` / `503` | Not a result: no answer was produced, so the caller is not handed a body to read one out of. 503 when the planner is unconfigured, 502 when its provider failed or returned something that was not a decision. |
+
+That last distinction is why failures are *returned* here and *raised* there.
+A library caller reads a field; an HTTP client must not be able to mistake "the
+provider timed out" for an answer, so the backend converts that one status into
+an error in one place and lets the other four through.
+
+`tools_available` on every response is the complete set the planner could
+choose from — a tool is registered only when the service it wraps is present,
+so a client sees what this deployment can actually do rather than a fixed list.
+In the default wiring there is no dataset, so the two dataset-dependent tools
+are simply not registered.
+
+A missing key does not stop the application starting and does not affect any
+other endpoint: `POST /api/v1/search` continues to work without one.
+
+See `backend/README.md`.
 
 ## Structure
 

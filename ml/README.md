@@ -20,7 +20,8 @@ lifetime of the process and are never written to disk.
 
 The stored records are read by the retrieval layer in `rag/`, which makes them
 searchable, and the training and explanation functions here are what the
-agent's `run_experiment` and `explain_experiment` tools call. Both dependencies
+agent's `run_experiment` and `explain_experiment` tools call — and therefore
+what `POST /api/v1/agent/ask` may reach. Both dependencies
 run one way only: this package does not import `rag/`, `llm/` or `agent/`, and
 does not know an index, a model or an agent exists. See `rag/README.md` and
 `agent/README.md`.
@@ -1155,8 +1156,12 @@ external dataset or touches the network.
   explained live, because its model has not been collected yet; an older one
   can only report the importances recorded when it ran, and a per-row
   explanation of it is answered `unavailable` with
-  `reason: fitted_model_not_persisted`. Nothing writes a model to disk. See
-  `agent/README.md`.
+  `reason: fitted_model_not_persisted`. Nothing writes a model to disk.
+
+  Over HTTP that surfaces as a `partial` result from
+  `POST /api/v1/agent/ask`: the experiment is reported in full and the missing
+  explanation is stated as a warning, never filled in with an invented SHAP
+  value. See `agent/README.md`.
 - **Six models only.** No XGBoost or LightGBM yet; the registry is designed so
   adding them is one definition.
 - Cross-validation is plain k-fold. There is no repeated k-fold, no
