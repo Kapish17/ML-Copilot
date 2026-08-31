@@ -13,15 +13,17 @@ persistent record of every run.
 > establish causal relationships.**
 
 **Not implemented:** hyperparameter optimisation (no Optuna), **MLflow**, any
-database (no PostgreSQL), model persistence, XGBoost or LightGBM, and any LLM
-or agent integration. Experiment tracking is implemented, but against a local
-JSON store written by this package — trained models and SHAP explainers
-themselves live in memory for the lifetime of the process and are never
-written to disk.
+database (no PostgreSQL), model persistence, XGBoost or LightGBM. Experiment
+tracking is implemented, but against a local JSON store written by this
+package — trained models and SHAP explainers themselves live in memory for the
+lifetime of the process and are never written to disk.
 
 The stored records are read by the retrieval layer in `rag/`, which makes them
-searchable. That dependency runs one way only: this package does not import
-`rag/` and does not know an index exists. See `rag/README.md`.
+searchable, and the training and explanation functions here are what the
+agent's `run_experiment` and `explain_experiment` tools call. Both dependencies
+run one way only: this package does not import `rag/`, `llm/` or `agent/`, and
+does not know an index, a model or an agent exists. See `rag/README.md` and
+`agent/README.md`.
 
 ## Format-agnostic by design
 
@@ -803,10 +805,10 @@ numbers.
 
 ### Programmatic API
 
-Structured facts, not prose — the form a future LLM layer would receive and
-write sentences from. The retrieval layer in `rag/` already indexes these
-findings so they can be found and cited; **no LLM or agent exists yet**, so
-nothing turns them into sentences.
+Structured facts, not prose — the form the LLM layer receives and writes
+sentences from. The retrieval layer in `rag/` indexes these findings so they
+can be found and cited, and the agent's `explain_experiment` tool calls the
+two functions below directly.
 
 | Function | Returns |
 | --- | --- |
@@ -1147,6 +1149,14 @@ external dataset or touches the network.
   the process. Experiment *records* are written to disk; the fitted pipeline
   and the SHAP explainer are not, so a stored run describes a model it cannot
   reconstitute.
+
+  This is what the agent's `explain_experiment` tool reports honestly rather
+  than working around. An experiment run in the current process can still be
+  explained live, because its model has not been collected yet; an older one
+  can only report the importances recorded when it ran, and a per-row
+  explanation of it is answered `unavailable` with
+  `reason: fitted_model_not_persisted`. Nothing writes a model to disk. See
+  `agent/README.md`.
 - **Six models only.** No XGBoost or LightGBM yet; the registry is designed so
   adding them is one definition.
 - Cross-validation is plain k-fold. There is no repeated k-fold, no

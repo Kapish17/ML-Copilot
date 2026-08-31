@@ -15,6 +15,7 @@ from app.services.experiments.history import ExperimentHistoryService
 from app.services.experiments.options import ExperimentOptions
 from app.services.experiments.runner import (
     ExperimentRunner,
+    ExperimentArtifacts,
     ExperimentRunResult,
     run_experiment,
 )
@@ -22,6 +23,7 @@ from app.services.experiments.runner import (
 __all__ = [
     "ExperimentHistoryService",
     "ExperimentOptions",
+    "ExperimentArtifacts",
     "ExperimentRunResult",
     "ExperimentRunner",
     "run_experiment",

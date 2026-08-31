@@ -11,11 +11,14 @@ cannot.
 > the passages actually supplied, and an answer citing a source that was not
 > retrieved is rejected rather than quietly cleaned up.
 
-**Not implemented:** agents, LangGraph, autonomous tool calling, multi-agent
-systems, model fine-tuning, streaming and conversation memory. Also still
-absent from the project: MLflow, Optuna, Qdrant, PostgreSQL, XGBoost,
-LightGBM, a frontend, authentication, rate limiting, and dataset ingestion
-beyond CSV.
+**Not implemented:** LangChain, LangGraph, AutoGen, CrewAI or any agent
+framework; multi-agent systems; model fine-tuning; streaming; conversation
+memory. Also still absent from the project: MLflow, Optuna, Qdrant,
+PostgreSQL, XGBoost, LightGBM, a frontend, authentication, rate limiting, and
+dataset ingestion beyond CSV.
+
+This layer's provider abstraction is also what the agent plans through — see
+"The agent" below, and `agent/README.md`.
 
 This layer is a library. It is *used* by `POST /api/v1/ask` in the backend —
 see "Over HTTP" below — but it contains no HTTP code, imports no web
@@ -453,22 +456,49 @@ two statuses into errors in one place
 A missing key does not stop the application starting, and does not affect
 `POST /api/v1/search` — the SDK and the credential are loaded on first use.
 
+## The agent
+
+The agent layer plans through this package's `LLMProvider` abstraction and
+nothing else: it imports no SDK, names no endpoint and reads no credential, so
+swapping the model is a change to which provider is constructed — the same
+contract this layer has kept since it was written.
+
+It reuses the grounding too. `extract_citations` and `validate_citations` are
+called directly on an agent's final answer, with the allowed set built from
+every passage the run retrieved rather than from one prompt's context. There is
+deliberately **not** a second implementation of "is this citation real": two
+would eventually disagree, and the one that mattered would be whichever ran
+first.
+
+What the agent adds is a check this layer never needed. An answer here is built
+from retrieved text, so a fabrication is always a fabricated citation. An agent
+also produces *results* — experiment ids, scores, feature names — so it
+additionally rejects an experiment id that appears in an answer but in no
+observation. An invented run id looks like a record someone can go and read.
+
+`RAGAnswerService` and the agent are separate paths to an answer, not layers of
+one: the service answers a question from documents in a single retrieval, and
+the agent chooses and runs tools first. Both end in the same grounding rule.
+See `agent/README.md`.
+
 ## Architecture
 
 ```
 POST /api/v1/ask  →  KnowledgeService  →  llm/  →  rag/  →  vector store
                                            ↓
-                                      LLMProvider
+agent/  ───────────────────────────────►  LLMProvider
 ```
 
 - `llm/` does not import FastAPI or the backend.
 - `llm/` does not import pandas, numpy, scikit-learn, SHAP or `ml/`.
+- `llm/` does not import `agent/` — the dependency runs the other way.
 - `rag/` does not import `llm/` or any SDK — retrieval stays usable, and
   testable, with no model involved.
 - `service.py` contains no vendor name and no SDK code; the SDK lives in one
   provider module.
 
-Four tests enforce these by parsing the imports of every module.
+Tests in both this package and `agent/tests` enforce these by parsing the
+imports of every module.
 
 ## Limitations
 

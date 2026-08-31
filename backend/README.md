@@ -453,6 +453,8 @@ only:
 
 ```
 API routes  →  application services  →  ml/ · rag/ · llm/  →  core abstractions
+                                            ▲
+                                         agent/   (library only — no route yet)
 ```
 
 This service imports `ml/`. `ml/` does **not** import this service, does not
@@ -475,11 +477,20 @@ structured result out, no filesystem, pandas, sklearn or provider detail in the
 answer. A future agent would call the services directly and get the same
 grounded `Answer` object the endpoint serialises.
 
-**No agent, LangGraph, autonomous tool calling, streaming, conversation memory
-or frontend is implemented**, and neither is Qdrant, MLflow, Optuna, XGBoost,
-LightGBM, a database, authentication or rate limiting.
+A fifth top-level package, `agent/`, now orchestrates these services: it lets a
+language model choose which of them a question needs, within a bounded loop
+over an explicit tool allowlist. It depends on this service's *functions*
+through structural protocols and imports nothing from `app`, so the dependency
+still runs one way — and this package does not import `agent/` either, because
+**no agent HTTP endpoint is implemented**. `POST /api/v1/agent/ask` belongs to
+a later commit; a test asserts that nothing under `app/` imports the agent yet.
 
-See `ml/README.md`, `rag/README.md` and `llm/README.md`.
+**No LangChain, LangGraph, autonomous tool calling outside the registered
+tools, streaming, conversation memory or frontend is implemented**, and neither
+is Qdrant, MLflow, Optuna, XGBoost, LightGBM, a database, authentication or
+rate limiting.
+
+See `ml/README.md`, `rag/README.md`, `llm/README.md` and `agent/README.md`.
 
 ## Dependencies
 

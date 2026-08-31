@@ -65,6 +65,32 @@ FALLBACK_RUN_NAME = "untitled experiment"
 
 
 @dataclass(frozen=True)
+class ExperimentArtifacts:
+    """The live objects one run produced, for the caller that asked to keep them.
+
+    **This is memory, not persistence.** Commit 7 deliberately does not write
+    a fitted estimator to disk, and nothing here changes that: these objects
+    exist only for as long as the caller holds this result, are never
+    serialised, never stored, and never reachable from
+    :meth:`ExperimentRunResult.as_dict`. Once the process ends they are gone,
+    and the experiment record — which is what is persisted — still contains no
+    model.
+
+    The one caller that wants them is an in-process orchestrator that has just
+    run an experiment and wants to explain it in the same breath. Asking for
+    them is explicit (``retain_artifacts=True``) so that no caller keeps a
+    fitted pipeline alive by accident.
+    """
+
+    #: The fitted model, as :mod:`ml.explainability` expects it.
+    trained_model: Any
+    #: Raw training features, the natural reference rows for an explanation.
+    X_reference: Any
+    #: Training targets, needed only by the permutation fallback.
+    y_reference: Any
+
+
+@dataclass(frozen=True)
 class ExperimentRunResult:
     """One executed experiment, plus what the caller should know about it.
 
@@ -77,6 +103,10 @@ class ExperimentRunResult:
     warnings: tuple[str, ...]
     stored: bool
     duration_seconds: float
+    #: Live fitted objects, present only when the caller asked for them. Left
+    #: out of :meth:`as_dict` deliberately — it renders what is *stored*, and
+    #: a fitted model is not.
+    artifacts: ExperimentArtifacts | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """Render the whole result as plain JSON-safe values."""
@@ -161,6 +191,7 @@ class ExperimentRunner:
         dataset_label: str = "dataset",
         source_format: str = SOURCE_FORMAT,
         created_at: datetime | None = None,
+        retain_artifacts: bool = False,
     ) -> ExperimentRunResult:
         """Run an experiment on a standardised DataFrame.
 
@@ -177,6 +208,11 @@ class ExperimentRunner:
             source_format: Where the data came from, recorded as context. Runs
                 are identified by content fingerprint, never by format.
             created_at: When the run happened; now, in UTC, when omitted.
+            retain_artifacts: Keep the fitted model and its reference rows on
+                the result, in memory only. Off by default. Nothing about
+                what is *stored* changes either way — the record contains no
+                model in both cases; this only decides whether the caller
+                keeps a reference to the live objects after the call returns.
 
         Returns:
             ExperimentRunResult: The stored record and its warnings.
@@ -225,11 +261,22 @@ class ExperimentRunner:
         )
         self._store.save(record)
 
+        artifacts = (
+            ExperimentArtifacts(
+                trained_model=selection.final_model,
+                X_reference=prepared.X_train_raw,
+                y_reference=prepared.y_train,
+            )
+            if retain_artifacts
+            else None
+        )
+
         return ExperimentRunResult(
             record=record,
             warnings=tuple(warnings),
             stored=True,
             duration_seconds=round(time.perf_counter() - started, 3),
+            artifacts=artifacts,
         )
 
     # -- Steps -------------------------------------------------------------
@@ -392,21 +439,29 @@ def run_experiment(
     dataset_service: DatasetProfilingService,
     target_column: str | None = None,
     models: Sequence[str] = (),
+    dataset_label: str = "dataset",
+    retain_artifacts: bool = False,
     **option_fields: Any,
 ) -> ExperimentRunResult:
     """Run one experiment on a DataFrame, as a single function call.
 
     A thin convenience wrapper over :class:`ExperimentRunner` for callers that
     have data and a few choices rather than an assembled request — a script, a
-    notebook, or the tool interface a future agent would be given. It returns
-    the same structured result the HTTP endpoint serialises, so no caller ever
-    needs to know about pandas, sklearn or where records are kept.
+    notebook, or the agent's ``run_experiment`` tool. It returns the same
+    structured result the HTTP endpoint serialises, so no caller ever needs to
+    know about pandas, sklearn or where records are kept.
 
-    **No agent, LLM or RAG integration is implemented.** This is only the shape
-    such an integration would call.
+    This is the callable the agent layer is wired to. It satisfies that
+    layer's executor protocol structurally, which is what lets ``agent/`` run
+    real experiments without importing this package.
     """
     options = ExperimentOptions(
         target_column=target_column, models=tuple(models), **option_fields
     ).validated(settings)
     runner = ExperimentRunner(settings, store, dataset_service)
-    return runner.run_frame(frame, options)
+    return runner.run_frame(
+        frame,
+        options,
+        dataset_label=dataset_label,
+        retain_artifacts=retain_artifacts,
+    )
