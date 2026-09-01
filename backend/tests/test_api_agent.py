@@ -23,6 +23,7 @@ from __future__ import annotations
 import ast
 import json
 import logging
+import re
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,20 @@ STATUS_URL = "/api/v1/agent/status"
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 FAKE_KEY = "sk-test-secret-value-0123456789"
+
+
+#: A credential-shaped token: ``sk-`` at a word boundary, followed by the
+#: characters a key is made of. Written as a pattern rather than a substring
+#: because the plain three characters also occur inside ordinary words — the
+#: path ``/agent/ask-with-dataset`` contains them — and a check that fires on
+#: those is a check nobody trusts.
+CREDENTIAL_PATTERN = re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9]")
+
+
+def carries_a_credential(text: str) -> bool:
+    """Whether the text contains something shaped like an API key."""
+    return CREDENTIAL_PATTERN.search(text) is not None
+
 
 #: A question this project's own documentation genuinely answers.
 CV_QUESTION = "What is cross-validation in this project?"
@@ -836,7 +851,7 @@ def test_no_credential_appears_in_any_response(
 
     for response in responses:
         assert FAKE_KEY not in response.text
-        assert "sk-" not in response.text
+        assert not carries_a_credential(response.text)
 
 
 def test_no_credential_is_logged_while_handling_a_request(
@@ -852,7 +867,7 @@ def test_no_credential_is_logged_while_handling_a_request(
         client.post(ASK_URL, json={"question": CV_QUESTION})
 
     assert FAKE_KEY not in caplog.text
-    assert "sk-" not in caplog.text
+    assert not carries_a_credential(caplog.text)
 
 
 def test_no_filesystem_path_appears_in_any_response(
@@ -1045,8 +1060,8 @@ def test_the_documentation_exposes_no_secret_or_prompt(
     # "a system prompt" appears in the endpoint descriptions — as one of the
     # things a request may *not* supply, which is documentation worth having.
     # What must not appear is the prompt itself, or a credential.
+    assert not carries_a_credential(text)
     for marker in (
-        "sk-",
         "you are the planning step",
         "you are the final step",
         "retrieved evidence is authoritative",

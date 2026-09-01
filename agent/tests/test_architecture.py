@@ -124,6 +124,7 @@ def test_only_the_backend_edge_imports_the_agent() -> None:
         "backend/app/core/agent_errors.py",
         "backend/app/main.py",
         "backend/app/services/agent/budgets.py",
+        "backend/app/services/agent/datasets.py",
         "backend/app/services/agent/service.py",
     }, importers
 

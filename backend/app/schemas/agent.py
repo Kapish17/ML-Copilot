@@ -190,6 +190,52 @@ class AgentCitationModel(BaseModel):
     score: float | None = None
 
 
+class AgentDatasetInfo(BaseModel):
+    """The uploaded dataset, as far as a response describes it.
+
+    Facts about the data, and none of the data. **Uploaded datasets are
+    processed in memory for the request and are never persisted as raw data by
+    the agent** — so there is no identifier to fetch one back with, no path,
+    and no rows. What is here is the shape, the column names, the display
+    filename and the content fingerprint that identifies it in any experiment
+    it produced.
+    """
+
+    name: str = Field(
+        ...,
+        description=(
+            "The name the agent addressed the dataset by. A constant: a "
+            "client's filename never becomes an identifier."
+        ),
+        examples=["uploaded_dataset"],
+    )
+    filename: str = Field(
+        ...,
+        description=(
+            "The submitted filename, reduced to a bare name. Display metadata "
+            "only — nothing resolves it to a location."
+        ),
+        examples=["customers.csv"],
+    )
+    fingerprint: str = Field(
+        ...,
+        description=(
+            "Content fingerprint. The canonical identity, and what any "
+            "experiment from this dataset is filed under."
+        ),
+        examples=["86494cff7a45cb7f"],
+    )
+    row_count: int
+    column_count: int
+    columns: list[str]
+    persisted: bool = Field(
+        False,
+        description=(
+            "Always false. The dataset lived in memory for this request only."
+        ),
+    )
+
+
 class AgentAskResponse(BaseModel):
     """One agent run, as the caller receives it.
 
@@ -255,6 +301,13 @@ class AgentAskResponse(BaseModel):
             "is how a client sees that, for example, no dataset was supplied."
         ),
     )
+    dataset: AgentDatasetInfo | None = Field(
+        None,
+        description=(
+            "The dataset this request supplied, when it supplied one. Facts "
+            "about it only — never rows, and never a location."
+        ),
+    )
     error_code: str | None = Field(
         None, description="Stable code when a budget stopped the run."
     )
@@ -274,6 +327,14 @@ class AgentStatusResponse(BaseModel):
     tools: list[str] = Field(
         default_factory=list, description="The tools currently registered."
     )
+    dataset_upload_supported: bool = Field(
+        True,
+        description=(
+            "Whether POST /api/v1/agent/ask-with-dataset accepts a dataset. "
+            "When it does, a request that uploads one gets the two "
+            "dataset-dependent tools in addition to those listed above."
+        ),
+    )
     max_tool_calls: int
     max_iterations: int
     max_context_chars: int
@@ -285,6 +346,7 @@ __all__ = [
     "AgentAskRequest",
     "AgentAskResponse",
     "AgentCitationModel",
+    "AgentDatasetInfo",
     "AgentObservation",
     "AgentStatusResponse",
     "AgentToolCall",

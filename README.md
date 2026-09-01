@@ -31,6 +31,7 @@ answer grounded in retrievable context.
 - Ground those answers in project documentation and prior run history through retrieval.
 - Track every experiment so results are reproducible and comparable.
 - Decide, from a question, which of those capabilities it needs — within an explicit tool allowlist and hard limits.
+- Do all of that on a dataset uploaded with the question, held in memory for that request alone.
 
 ## Main capabilities
 
@@ -941,8 +942,10 @@ numpy or pandas.
 | `POST` | `/api/v1/ask` | Answer a question from retrieved evidence, with citations |
 | `GET` | `/api/v1/knowledge/status` | Whether search and answering are available, and their limits |
 | `POST` | `/api/v1/agent/ask` | Answer a question by orchestrating the system's own capabilities |
+| `POST` | `/api/v1/agent/ask-with-dataset` | The same, over an uploaded CSV |
 | `GET` | `/api/v1/agent/status` | Whether the agent is available, its tools and its limits |
 | `POST` | `/api/v1/agent/ask` | Answer a question by orchestrating the system's own capabilities |
+| `POST` | `/api/v1/agent/ask-with-dataset` | The same, over an uploaded CSV |
 | `GET` | `/api/v1/agent/status` | Whether the agent is available, its tools and its limits |
 
 Interactive documentation is at `/docs`; the schema is at `/openapi.json`.
@@ -1629,10 +1632,11 @@ No SHAP value is ever invented or carried over from another run. See
 
 ### Over HTTP
 
-`POST /api/v1/agent/ask` exposes it. The route is three statements over an
+`POST /api/v1/agent/ask` exposes it, and `POST /api/v1/agent/ask-with-dataset`
+does the same with a CSV attached. The routes are a few statements over an
 application service; the agent package still imports no web framework, and a
-test names the five backend modules that may import it at all — the route is
-not one of them.
+test names the backend modules that may import it at all — neither route is
+one of them.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/v1/agent/ask \
@@ -1663,6 +1667,59 @@ answer with a fabricated citation is one line rather than something to wait
 for. The integration tests use the real retrieval index, the real profiling
 service, the real experiment runner and the real SHAP layer — only the planner
 is faked, and no test needs a credential or a network.
+
+### Analysing an uploaded dataset
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/agent/ask-with-dataset \
+  -F "file=@customers.csv" \
+  -F "question=Analyse this dataset, find the best model, and explain why."
+```
+
+**Uploaded datasets are processed in memory for the request and are never
+persisted as raw data by the agent.**
+
+```
+upload → validate + parse → a dataset the agent may name, for this request only
+            ↓
+     dataset_profile      what is in it, and what task the target implies
+            ↓
+     run_experiment       the same ExperimentRunner as /api/v1/experiments/run
+            ↓
+     explain_experiment   real SHAP — the fitted model is still in memory
+            ↓
+     search_knowledge     the methodology, from the project's own documentation
+            ↓
+     a grounded answer, built from what those steps returned
+```
+
+The file is validated and parsed by the ingestion path
+`POST /api/v1/datasets/profile` has used since Commit 2 — one set of limits,
+not a second. Then it is a **loan**: not written to disk, not added to the
+retrieval index, not visible to another request, and not returned. What comes
+back about it is the shape, the column names, the display filename and the
+content fingerprint — which is also how any experiment from it is filed, so a
+run can be found again long after the data is gone.
+
+Three properties follow from the design rather than from a filter:
+
+- **The filename cannot become a path.** The agent addresses the dataset by a
+  constant, so `../../secret.csv` or `C:\secret.csv` is not a name the tool
+  schema accepts and not a name anything resolves. It survives as display text
+  and reaches nothing else.
+- **Cell values cannot become instructions.** Dataset contents reach the
+  planner — if at all — inside a profiling observation, where they are already
+  handled as untrusted, and a profile reports structure rather than values. A
+  test asserts on the prompts the provider actually received, so the claim is
+  "the model never saw it", not "the model ignored it".
+- **A citation-shaped cell is still a fabrication.** Nothing a dataset contains
+  can mint evidence.
+
+`.csv` is the only physical format implemented — Excel, JSON, Parquet, SQL and
+API ingestion are **not**. The architecture stays format-agnostic all the same:
+the agent receives a standardised DataFrame and never sees an upload, so
+another adapter is a change to the ingestion path and nothing in the
+orchestration moves.
 
 ---
 
@@ -1719,6 +1776,10 @@ is faked, and no test needs a credential or a network.
   request validation, budgets a request may lower and never raise, the four
   agent outcomes as 200 and provider failures as 502/503, and no
   chain-of-thought in the response.
+- A dataset-aware agent: `POST /api/v1/agent/ask-with-dataset` takes a CSV
+  alongside the question, lends it to one bounded run — profiling, a
+  cross-validated experiment, live SHAP, project knowledge — and never persists
+  it as raw data.
 - Test suites covering the backend service, the API contract, the ML layer, the
   retrieval layer, the language-model layer and the agent layer.
 
@@ -1854,6 +1915,7 @@ and the real LLM provider (needs a credential *and* `RUN_LLM_INTEGRATION=1`).
 10. ~~**Provider-agnostic LLM + grounded answers** — prompt construction, citation validation, grounding enforcement~~
 11. ~~**Knowledge API** — `/search` and `/ask` over HTTP, with grounded statuses and no client-supplied provider configuration~~
 12. ~~**Bounded agent** — tool registry, typed schemas, bounded execution, grounded final answers~~
-13. **Agent HTTP endpoint** — `POST /api/v1/agent/ask`, budgets a request may lower, bounded outcomes *(current)*
-14. Next.js frontend
-15. Containerisation and deployment
+13. ~~**Agent HTTP endpoint** — `POST /api/v1/agent/ask`, budgets a request may lower, bounded outcomes~~
+14. **A dataset-aware agent** — `POST /api/v1/agent/ask-with-dataset`, request-scoped uploads, never persisted *(current)*
+15. Next.js frontend
+16. Containerisation and deployment

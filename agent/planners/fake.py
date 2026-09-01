@@ -107,6 +107,7 @@ class FakePlanner:
         tool_definitions: list[dict[str, Any]],
         observations: list[dict[str, Any]],
         remaining_tool_calls: int,
+        context: dict[str, Any] | None = None,
     ) -> PlanStep:
         """Return the next scripted decision."""
         self.decide_calls.append(
@@ -115,6 +116,7 @@ class FakePlanner:
                 "tool_definitions": tool_definitions,
                 "observations": observations,
                 "remaining_tool_calls": remaining_tool_calls,
+                "context": dict(context or {}),
             }
         )
         if self._error is not None:

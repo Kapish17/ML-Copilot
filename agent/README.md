@@ -11,14 +11,18 @@ question needs, and then run them.
 Those two sentences are the design, not a summary of it. Everything below is
 either a consequence of them or a mechanism that makes them true.
 
-The backend exposes this layer as `POST /api/v1/agent/ask` — see
-"Over HTTP" below.
+The backend exposes this layer as `POST /api/v1/agent/ask`, and — with a
+dataset attached — as `POST /api/v1/agent/ask-with-dataset`. See "Over HTTP"
+below.
+
+**Uploaded datasets are processed in memory for the request and are never
+persisted as raw data by the agent.**
 
 **Not implemented:** LangChain, LangGraph, AutoGen, CrewAI or any agent
 framework; multi-agent systems; streaming; conversation memory; a frontend.
 Also still absent from the project: MLflow, Optuna, Qdrant, PostgreSQL,
 XGBoost, LightGBM, authentication, background workers, and dataset ingestion
-beyond CSV.
+beyond CSV — Excel, JSON, Parquet, SQL and API sources are not implemented.
 
 ## What it is, and why it is bounded
 
@@ -212,6 +216,10 @@ and no `..` to normalise, because a path is never accepted in the first place.
 that were never registered, and all three get the same answer as a typo. A
 test asserts that no registered tool declares an argument called `path`,
 `file`, `url`, `command`, `code` or `script`.
+
+The upload endpoint does not weaken this. It builds a source holding one entry
+under one constant name, so what a planner may say is still a name from a
+declared list — the list simply has something in it.
 
 ## Prompt injection
 
@@ -486,8 +494,49 @@ an error in one place and lets the other four through.
 `tools_available` on every response is the complete set the planner could
 choose from — a tool is registered only when the service it wraps is present,
 so a client sees what this deployment can actually do rather than a fixed list.
-In the default wiring there is no dataset, so the two dataset-dependent tools
-are simply not registered.
+A question asked without a dataset has no `dataset_profile` or
+`run_experiment`; one asked with a CSV attached has both, for that request.
+
+### With a dataset
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/agent/ask-with-dataset \
+  -F "file=@customers.csv" \
+  -F "question=Analyse this dataset, find the best model, and explain why."
+```
+
+The dataset is a **loan**. It is validated and parsed by the ingestion path the
+profiling endpoint already uses, registered under a fixed name for the length
+of one call, and released when the call returns. It is not written to disk, not
+added to the retrieval index, not visible to another request, and not returned:
+what comes back about it is the shape, the column names, the display filename,
+and Commit 7's content fingerprint — which is also how any experiment from it
+is filed, so a run can be found again long after the data is gone.
+
+Three things follow from the design rather than from a filter:
+
+**The filename cannot become a path.** The agent addresses the dataset by a
+constant, so a submitted `../../secret.csv` is not a name the tool schema
+accepts and not a name anything resolves. It survives as display text and
+reaches nothing else.
+
+**Cell values cannot become instructions.** A dataset's contents reach the
+planner — if at all — inside a profiling observation, where they are already
+handled as untrusted, and a profile reports structure rather than values. What
+the planner is *told* is four facts: that a dataset is available, what to call
+it, and its shape. A test asserts on the prompts the provider actually
+received.
+
+**A citation-shaped cell is still a fabrication.** Nothing a dataset contains
+can mint evidence; the grounding check compares against what was retrieved.
+
+The two dataset-dependent tools do the rest through the services that already
+exist: `dataset_profile` over the uploaded frame, `run_experiment` through the
+same `ExperimentRunner` as `/api/v1/experiments/run`, and — because the fitted
+model is still in memory within the request — `explain_experiment` live, with
+real SHAP. Once the request ends that model is gone, and an older experiment
+falls back to the stored summary or reports
+`unavailable: fitted_model_not_persisted`, exactly as before.
 
 A missing key does not stop the application starting and does not affect any
 other endpoint: `POST /api/v1/search` continues to work without one.

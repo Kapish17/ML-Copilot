@@ -76,8 +76,18 @@ class Planner(Protocol):
         tool_definitions: list[dict[str, Any]],
         observations: list[dict[str, Any]],
         remaining_tool_calls: int,
+        context: dict[str, Any] | None = None,
     ) -> PlanStep:
         """Choose the next action.
+
+        Args:
+            question: What is being asked.
+            tool_definitions: Every registered tool, as the planner sees them.
+            observations: What has been observed so far.
+            remaining_tool_calls: How much budget is left.
+            context: Named facts about this run — flags, names and counts
+                supplied by the application. Never content: a dataset's rows
+                reach a planner as a tool observation or not at all.
 
         Raises:
             MalformedPlanError: If the response is not a decision.
@@ -182,6 +192,7 @@ class LLMPlanner:
         tool_definitions: list[dict[str, Any]],
         observations: list[dict[str, Any]],
         remaining_tool_calls: int,
+        context: dict[str, Any] | None = None,
     ) -> PlanStep:
         """Choose the next action."""
         prompt = build_planner_prompt(
@@ -191,6 +202,7 @@ class LLMPlanner:
                 observations, limit=self._config.max_context_chars
             ),
             remaining_tool_calls=remaining_tool_calls,
+            context=context,
         )
         text = self._generate(
             PLANNER_SYSTEM_PROMPT,

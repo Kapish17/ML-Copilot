@@ -26,7 +26,7 @@ invent a tool, or cite a source it never saw.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 #: Wraps everything the agent has observed. Mirrors Commit 10's evidence
@@ -40,6 +40,18 @@ OBSERVATIONS_CLOSE = "</tool_observations>"
 TOOLS_OPEN = "<available_tools>"
 TOOLS_CLOSE = "</available_tools>"
 
+#: Wraps the run's facts: what the caller supplied for this question, as a
+#: handful of named values. Written by the application, not by a model and not
+#: by a document, which is why it sits outside the untrusted block.
+#:
+#: What may go in here is deliberately narrow — flags, names and counts. It is
+#: **not** a channel for content. A dataset's rows reach the planner only as a
+#: profiling tool's structured observation, where they are already handled as
+#: untrusted; putting a cell value in the prompt would be handing whoever wrote
+#: that cell a line in the system's instructions.
+CONTEXT_OPEN = "<run_context>"
+CONTEXT_CLOSE = "</run_context>"
+
 #: Substituted for anything in observed text that could pass for one of the
 #: delimiters above, so a passage cannot close the block and continue as
 #: prompt.
@@ -50,6 +62,8 @@ _DELIMITERS = (
     OBSERVATIONS_CLOSE,
     TOOLS_OPEN,
     TOOLS_CLOSE,
+    CONTEXT_OPEN,
+    CONTEXT_CLOSE,
     "<retrieved_evidence>",
     "</retrieved_evidence>",
 )
@@ -212,17 +226,49 @@ def render_observations(entries: Sequence[dict[str, Any]], *, limit: int) -> str
     )
 
 
+#: The longest a rendered context value may be. Context is facts, and a fact
+#: that runs past this is not one — the cap means a caller cannot turn the
+#: channel into a place to put text.
+MAX_CONTEXT_VALUE_CHARS = 200
+
+
+def render_context(context: Mapping[str, Any] | None) -> str:
+    """Render the run's facts, or nothing at all when there are none.
+
+    Only scalars are rendered. A nested object or a list would be a way to
+    pass along content, and content belongs in an observation.
+    """
+    if not context:
+        return ""
+
+    lines: list[str] = []
+    for key, value in context.items():
+        if not isinstance(value, (str, bool, int, float)) or value is None:
+            continue
+        rendered = str(value)
+        if len(rendered) > MAX_CONTEXT_VALUE_CHARS:
+            rendered = rendered[:MAX_CONTEXT_VALUE_CHARS] + "…"
+        lines.append(f"{key}: {neutralise_delimiters(rendered)}")
+
+    if not lines:
+        return ""
+    return f"{CONTEXT_OPEN}\n" + "\n".join(lines) + f"\n{CONTEXT_CLOSE}"
+
+
 def build_planner_prompt(
     question: str,
     *,
     tool_catalogue: str,
     observations: str,
     remaining_tool_calls: int,
+    context: Mapping[str, Any] | None = None,
 ) -> str:
     """Build the user-side prompt for one planning turn."""
+    facts = render_context(context)
     return (
         f"User question:\n{question}\n\n"
-        f"{tool_catalogue}\n\n"
+        + (f"{facts}\n\n" if facts else "")
+        + f"{tool_catalogue}\n\n"
         f"{observations}\n\n"
         f"You may make at most {remaining_tool_calls} more tool call(s). "
         "Reply with one JSON object: a tool call, or "
@@ -249,7 +295,10 @@ def build_answer_prompt(
 
 __all__ = [
     "ANSWER_SYSTEM_PROMPT",
+    "CONTEXT_CLOSE",
+    "CONTEXT_OPEN",
     "DELIMITER_REPLACEMENT",
+    "MAX_CONTEXT_VALUE_CHARS",
     "OBSERVATIONS_CLOSE",
     "OBSERVATIONS_OPEN",
     "PLANNER_SYSTEM_PROMPT",
@@ -258,6 +307,7 @@ __all__ = [
     "build_answer_prompt",
     "build_planner_prompt",
     "neutralise_delimiters",
+    "render_context",
     "render_observations",
     "render_tool_catalogue",
 ]

@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
 
@@ -108,6 +109,7 @@ class AgentOrchestrator:
         *,
         config: AgentConfig | None = None,
         artifacts: Any = None,
+        context: Mapping[str, Any] | None = None,
     ) -> None:
         """Wire the orchestrator to its planner, its tools and its limits.
 
@@ -118,16 +120,34 @@ class AgentOrchestrator:
             config: Every budget and timeout.
             artifacts: Optional in-memory cache of fitted models, cleared when
                 a run finishes so nothing outlives the question that made it.
+            context: Named facts about this run, shown to the planner each
+                turn — a flag saying a dataset was supplied, the name to
+                address it by, its shape. **Facts, never content.** Only
+                scalars survive rendering, and this package neither knows nor
+                cares what the facts are about; a caller that put a cell value
+                in here would be handing whoever wrote that cell a line in the
+                prompt, which is why the tools' structured observations are
+                the only route content takes.
         """
         self._planner = planner
         self._registry = registry
         self._config = config or AgentConfig()
         self._artifacts = artifacts
+        self._context = {
+            key: value
+            for key, value in (context or {}).items()
+            if isinstance(value, (str, bool, int, float))
+        }
 
     @property
     def config(self) -> AgentConfig:
         """The limits in force."""
         return self._config
+
+    @property
+    def context(self) -> dict[str, Any]:
+        """The run's facts, as the planner is shown them."""
+        return dict(self._context)
 
     # -- One tool call -----------------------------------------------------
 
@@ -256,6 +276,7 @@ class AgentOrchestrator:
                     tool_definitions=definitions,
                     observations=render_observations_for_answer(state.observations),
                     remaining_tool_calls=state.remaining_tool_calls,
+                    context=dict(self._context),
                 )
             except MalformedPlanError as exc:
                 # Not a decision. Nothing was called and nothing was executed —

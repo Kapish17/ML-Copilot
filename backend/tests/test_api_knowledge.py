@@ -39,6 +39,20 @@ STATUS_URL = "/api/v1/knowledge/status"
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 FAKE_KEY = "sk-test-not-a-real-key-0123456789"
 
+
+#: A credential-shaped token: ``sk-`` at a word boundary, followed by the
+#: characters a key is made of. Written as a pattern rather than a substring
+#: because the plain three characters also occur inside ordinary words — the
+#: path ``/agent/ask-with-dataset`` contains them — and a check that fires on
+#: those is a check nobody trusts.
+CREDENTIAL_PATTERN = re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9]")
+
+
+def carries_a_credential(text: str) -> bool:
+    """Whether the text contains something shaped like an API key."""
+    return CREDENTIAL_PATTERN.search(text) is not None
+
+
 #: A question the indexed documentation genuinely answers.
 LEAKAGE_QUESTION = "How does the project prevent data leakage?"
 FABRICATED_CITATION = "experiment:exp_does_not_exist_00000000T000000Z_9999"
@@ -600,7 +614,7 @@ def test_answering_without_a_credential_is_a_503(
         code="llm_not_configured",
     )
     assert "API key" in error["message"]
-    assert "sk-" not in error["message"]
+    assert not carries_a_credential(error["message"])
 
     assert client.post(SEARCH_URL, json={"query": LEAKAGE_QUESTION}).status_code == 200
 
@@ -751,7 +765,7 @@ def test_no_credential_appears_in_a_response(
         client.get(STATUS_URL),
     ):
         assert FAKE_KEY not in response.text
-        assert "sk-" not in response.text
+        assert not carries_a_credential(response.text)
 
 
 def test_no_credential_appears_in_an_error(
@@ -769,7 +783,7 @@ def test_no_credential_appears_in_an_error(
 
     assert response.status_code == 502
     assert FAKE_KEY not in response.text
-    assert "sk-" not in response.text
+    assert not carries_a_credential(response.text)
     # The message says what happened without echoing what was sent.
     assert "rejected the configured credential" in error["message"]
     assert error["code"] == "llm_authentication_failed"
@@ -789,7 +803,7 @@ def test_no_credential_is_logged_while_handling_a_request(
         client.post(ASK_URL, json={"question": LEAKAGE_QUESTION})
 
     assert FAKE_KEY not in caplog.text
-    assert "sk-" not in caplog.text
+    assert not carries_a_credential(caplog.text)
 
 
 def test_no_filesystem_path_appears_in_any_response(
@@ -1040,7 +1054,7 @@ def test_the_openapi_schema_documents_no_secret(search_client: TestClient) -> No
     text = json.dumps(search_client.get("/openapi.json").json()).lower()
 
     assert '"api_key"' not in text
-    assert "sk-" not in text
+    assert not carries_a_credential(text)
 
 
 # --------------------------------------------------------------------------

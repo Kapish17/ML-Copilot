@@ -7,8 +7,9 @@ process environment.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from functools import lru_cache, partial
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends
 
@@ -204,18 +205,19 @@ KnowledgeServiceDep = Annotated[KnowledgeService, Depends(get_knowledge_service)
 
 
 def get_dataset_source() -> InMemoryDatasetSource:
-    """Provide the datasets one agent run may name.
+    """Provide the datasets a JSON agent request may name.
 
-    **Empty by default, deliberately.** Uploads are never kept (see
-    ``backend/README.md``), and this endpoint takes a JSON body rather than a
-    file, so nothing populates this in the default wiring — which means
-    ``dataset_profile`` and ``run_experiment`` are simply not registered, and
-    the planner is told about the two tools that are. A caller sees that in
-    ``tools_available`` rather than having a tool fail on them.
+    **Empty by default, deliberately.** ``POST /api/v1/agent/ask`` takes a JSON
+    body and carries no file, so in the default wiring there is nothing here —
+    which means ``dataset_profile`` and ``run_experiment`` are simply not
+    registered for that endpoint, and a caller sees that in ``tools_available``
+    rather than having a tool fail on them.
 
-    It is a dependency rather than a constant so a test — and a later commit
-    that gives the endpoint a dataset to work on — can supply one without
-    touching anything else.
+    ``POST /api/v1/agent/ask-with-dataset`` is the endpoint that *does* supply
+    one: it parses the upload into a request-scoped source that lives for the
+    length of that call and no longer. This dependency stays the override
+    point for a test, and for anything else that wants to lend the JSON
+    endpoint a dataset.
     """
     return InMemoryDatasetSource()
 
@@ -251,16 +253,24 @@ def get_agent_artifacts() -> ExperimentArtifactCache:
 AgentArtifactsDep = Annotated[ExperimentArtifactCache, Depends(get_agent_artifacts)]
 
 
-def get_agent_registry(
+def get_agent_registry_factory(
     settings: SettingsDep,
     rag_config: RagConfigDep,
-    source: DatasetSourceDep,
+    default_source: DatasetSourceDep,
     datasets: DatasetServiceDep,
     store: ExperimentStoreDep,
     retrieval: RetrievalServiceDep,
     artifacts: AgentArtifactsDep,
-) -> ToolRegistry:
-    """Provide the complete allowlist of tools one agent run may use.
+) -> Callable[[Any], ToolRegistry]:
+    """Provide a way to build the tool allowlist for one run.
+
+    A factory rather than a registry, because the dataset a run may use is not
+    known until the request is parsed: the JSON endpoint has whatever this
+    application was wired with (nothing, by default), and the upload endpoint
+    has the file that just arrived. Everything else — the profiling service,
+    the runner, retrieval, the store, the explainability functions — is the
+    same for both, so it is bound once here and the dataset is the only
+    argument.
 
     Each tool is registered only when the service it wraps is available, so
     the set is honest about what this deployment can actually do. The model
@@ -274,32 +284,40 @@ def get_agent_registry(
     wastes a planner's turns and misleads a client reading
     ``tools_available``.
     """
-    return build_default_registry(
-        source=source if source.names() else None,
-        profiler=datasets,
-        executor=partial(
-            run_experiment,
-            settings=settings,
-            store=store,
-            dataset_service=datasets,
-        ),
-        retrieval=retrieval,
-        lookup=store,
-        artifacts=artifacts,
-        explain_global=explain_global,
-        explain_prediction=explain_prediction,
-        available_models=lambda: list(default_registry().identifiers()),
-        available_metrics=[
-            definition.key
-            for definition in CLASSIFICATION_METRICS + REGRESSION_METRICS
-        ],
-        source_types=tuple(KNOWN_SOURCE_TYPES),
-        max_top_k=rag_config.max_top_k,
-        max_query_length=rag_config.max_query_length,
-    )
+
+    def build(source: Any = None) -> ToolRegistry:
+        """Build the registry for one run, over the dataset it was given."""
+        chosen = source if source is not None else default_source
+        return build_default_registry(
+            source=chosen if chosen is not None and chosen.names() else None,
+            profiler=datasets,
+            executor=partial(
+                run_experiment,
+                settings=settings,
+                store=store,
+                dataset_service=datasets,
+            ),
+            retrieval=retrieval,
+            lookup=store,
+            artifacts=artifacts,
+            explain_global=explain_global,
+            explain_prediction=explain_prediction,
+            available_models=lambda: list(default_registry().identifiers()),
+            available_metrics=[
+                definition.key
+                for definition in CLASSIFICATION_METRICS + REGRESSION_METRICS
+            ],
+            source_types=tuple(KNOWN_SOURCE_TYPES),
+            max_top_k=rag_config.max_top_k,
+            max_query_length=rag_config.max_query_length,
+        )
+
+    return build
 
 
-AgentRegistryDep = Annotated[ToolRegistry, Depends(get_agent_registry)]
+AgentRegistryFactoryDep = Annotated[
+    Callable[[Any], ToolRegistry], Depends(get_agent_registry_factory)
+]
 
 
 def get_agent_planner(
@@ -319,13 +337,16 @@ AgentPlannerDep = Annotated[LLMPlanner, Depends(get_agent_planner)]
 
 def get_agent_service(
     planner: AgentPlannerDep,
-    registry: AgentRegistryDep,
+    registry_factory: AgentRegistryFactoryDep,
     config: AgentConfigDep,
     artifacts: AgentArtifactsDep,
 ) -> AgentService:
-    """Provide the agent service the endpoint delegates to."""
+    """Provide the agent service both agent endpoints delegate to."""
     return AgentService(
-        planner=planner, registry=registry, config=config, artifacts=artifacts
+        planner=planner,
+        registry_factory=registry_factory,
+        config=config,
+        artifacts=artifacts,
     )
 
 
