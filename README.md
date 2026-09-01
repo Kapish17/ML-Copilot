@@ -6,7 +6,7 @@ evaluates candidate models, explains what the models learned, and answers
 follow-up questions in natural language — with every run tracked and every
 answer grounded in retrievable context.
 
-> **Status: early development.** The backend can ingest a CSV file and return a
+> **Status: early development.** The backend can ingest a CSV, Excel or JSON file and return a
 > full dataset profile; the ML layer turns a profiled dataset into model-ready
 > data, cross-validates a suite of models on the training rows, picks a winner
 > without ever reading the test set, retrains it on the full training data,
@@ -37,7 +37,7 @@ answer grounded in retrievable context.
 
 | Capability | Description | Status |
 | --- | --- | --- |
-| Dataset ingestion & profiling | CSV validation, structural profile, data-quality findings, target analysis | **implemented** |
+| Dataset ingestion & profiling | CSV, Excel (`.xlsx`) and JSON adapters, structural profile, data-quality findings, target analysis | **implemented** |
 | Preprocessing & feature engineering | Feature selection, imputation, encoding, scaling, datetime expansion, leakage-safe train/test split | **implemented** |
 | Model training & evaluation | Six-model suite, task-appropriate metrics, baseline comparison | **implemented** |
 | Cross-validated model selection | K-fold selection on training data, one unbiased test measurement | **implemented** |
@@ -144,25 +144,93 @@ grow into.
 
 ## Data ingestion formats
 
-**CSV is the only implemented input format.** Excel, JSON, Parquet, SQL
-databases and HTTP/API sources are planned.
+**Three formats are implemented: CSV, Excel (`.xlsx`) and JSON.** Parquet, SQL
+databases, Google Sheets, S3 and HTTP/API sources are **not implemented**.
 
 The ML pipeline is intentionally **format-agnostic**: everything downstream of
 ingestion operates on a standardised `pandas.DataFrame`, never on a file, a
-path or a CSV-specific object.
+path or a format-specific object.
 
 ```
-ingestion adapter  ->  DataFrame  ->  profiling  ->  configuration  ->  preprocessing  ->  training
-   (CSV today;
-    Excel, JSON,
-    Parquet, SQL,
-    API planned)
+file format
+    |
+    v
+format detection        which adapter should try these bytes
+    |
+    v
+format adapter          CSVAdapter | ExcelAdapter | JSONAdapter
+    |
+    v
+standardised DataFrame  <- formats stop existing here
+    |
+    v
+profiling -> configuration -> preprocessing -> training -> agent -> SHAP
 ```
 
-Adding a format therefore means writing one adapter that returns a DataFrame.
-Profiling, preprocessing, training and the experiment runner need no changes
-and have no knowledge of where the data came from — the runner's entry point
-takes a DataFrame, and the HTTP upload path exists only to produce one.
+`backend/app/services/datasets/ingestion/` is the **only** package in the
+application that knows a file extension exists. Above it, a route hands over
+bytes and a filename; below it, nothing can tell CSV from a spreadsheet from
+JSON. Adding a format is one adapter plus one line in the registry, and
+profiling, preprocessing, training, the experiment runner and the agent need
+no change at all.
+
+### What each adapter accepts
+
+| Format | Extension | What is read |
+|---|---|---|
+| CSV | `.csv` | Comma-delimited text with a header row. UTF-8 (BOM optional); Latin-1 as a fallback. |
+| Excel | `.xlsx` | The **first worksheet**, header in its first row. Formulas are never evaluated — a workbook is read as stored data. `.xls` and `.xlsm` are not accepted. |
+| JSON | `.json` | An array of objects (one per row), or an object holding one such array — for example `{"rows": [...]}`. |
+
+### Format detection, and why it is not the security boundary
+
+Detection uses the filename extension first and the declared media type only
+when the filename has no usable extension. Neither is trusted about *content*:
+the extension only chooses which adapter tries the bytes, and the adapter
+validates them. A file named `report.xlsx` holding CSV text fails as
+`invalid_excel`; a file named `data.csv` holding a spreadsheet fails as
+`malformed_csv`.
+
+### Normalisation
+
+Column names, values and missing values are preserved exactly. Nothing is
+renamed, trimmed, filled, coerced or dropped. Three conversions are unavoidable
+and shared by every reader:
+
+- **dtypes are inferred**, so `1, 2, 3` becomes `int64` whether it was written
+  as CSV text, an Excel cell or a JSON number;
+- **blanks become missing values** — an empty CSV field, an empty Excel cell
+  and a JSON `null` all arrive as `NaN`;
+- **nested JSON objects are flattened** into dotted column names, which is the
+  only way a nested structure becomes a table. A field holding an *array* is
+  refused rather than stringified.
+
+### Identity is the data, not the file
+
+The dataset fingerprint is computed from the **normalised DataFrame** — column
+names, dtypes, shape and a content hash of every column. The filename, the path
+and the source format are deliberately excluded. The same table uploaded as
+CSV, as a workbook and as JSON therefore produces the **same fingerprint** and
+is recognisably one dataset in the experiment history. The tests assert this
+directly rather than describing it.
+
+### Limits and errors
+
+One upload limit, one row limit and one column limit, shared by all three
+formats — no format defines a limit of its own, and an oversized upload is
+refused while it is being read rather than after it is parsed.
+
+| Status | Code | Meaning |
+|---|---|---|
+| 415 | `unsupported_file_type` | The extension is not `.csv`, `.xlsx` or `.json` |
+| 422 | `malformed_csv` | Not readable as CSV |
+| 422 | `invalid_excel` | Not a readable `.xlsx` workbook, or its first sheet cannot be parsed |
+| 422 | `invalid_json` | Not JSON, or JSON that cannot reasonably become a table |
+| 422 | `empty_dataset` | Parsed, but holds no rows or no columns |
+
+`invalid_dataset_content` is the shared parent of the three content errors, for
+a caller that only wants to know the content was unusable. No message names a
+parser, a library or a path.
 
 ---
 
@@ -170,9 +238,12 @@ takes a DataFrame, and the HTTP upload path exists only to produce one.
 
 ### Supported input
 
-CSV only, comma-delimited, with a header row in the first line. UTF-8 (with or
-without a byte order mark) is expected; Latin-1 is accepted as a fallback.
-Uploads are processed **in memory and never stored**.
+CSV, Excel (`.xlsx`, first worksheet) and JSON (an array of objects, or an
+object holding one such array) — see *Data ingestion formats* above. Uploads are
+processed **in memory and never stored**, and the response reports which format
+the file was read as under `source_format`. The profile itself is identical
+across the three: the measurements are computed once, on the standardised
+table, by code that cannot tell the formats apart.
 
 ### What the profile contains
 
@@ -230,11 +301,11 @@ returns the full profile.
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | `/api/v1/datasets/profile` | Profile an uploaded CSV file |
+| `POST` | `/api/v1/datasets/profile` | Profile an uploaded CSV, Excel or JSON file |
 
 Request: `multipart/form-data` with
 
-- `file` — the CSV file (required)
+- `file` — the dataset file: CSV, Excel (`.xlsx`) or JSON (required)
 - `target_column` — name of the target column (optional)
 
 #### Example request
@@ -374,8 +445,10 @@ Every failure returns the same envelope, so a frontend needs one handler:
 | 400 | `empty_file` | The upload contains no bytes |
 | 413 | `file_too_large` | The upload exceeds `MAX_UPLOAD_MB` |
 | 413 | `dataset_too_large` | The dataset exceeds the row or column limit |
-| 415 | `unsupported_file_type` | The file is not a `.csv` |
-| 422 | `malformed_csv` | Rows do not match the header |
+| 415 | `unsupported_file_type` | The file is not a `.csv`, `.xlsx` or `.json` |
+| 422 | `malformed_csv` | Rows do not match the header, or the bytes are not text |
+| 422 | `invalid_excel` | Not a readable `.xlsx` workbook |
+| 422 | `invalid_json` | Not JSON, or JSON that cannot become a table |
 | 422 | `missing_header` | No usable header row |
 | 422 | `duplicate_columns` | The header repeats a column name |
 | 422 | `empty_dataset` | A header with no data rows |
@@ -401,7 +474,8 @@ constants on the `Settings` object.
 
 ### Current limitations
 
-- CSV only, comma-delimited. Excel, JSON, Parquet and other delimiters are not supported.
+- CSV, Excel (`.xlsx`) and JSON only. Parquet, SQL, databases, cloud storage, URLs and non-comma CSV delimiters are not supported.
+- Excel reads the first worksheet only; there is no sheet selector, and `.xls` and `.xlsm` are not accepted.
 - The whole file is read into memory, so the upload limit is the practical size ceiling.
 - Uploaded data is not persisted; each request is independent and nothing is stored between calls.
 - A missing header can only be detected when the first row is blank or produces placeholder column names; a header row of plain numbers is indistinguishable from data.
@@ -932,7 +1006,7 @@ numpy or pandas.
 | --- | --- | --- |
 | `GET` | `/` | Service name, version, environment and docs URL |
 | `GET` | `/health` | Liveness check |
-| `POST` | `/api/v1/datasets/profile` | Profile an uploaded CSV |
+| `POST` | `/api/v1/datasets/profile` | Profile an uploaded CSV, Excel or JSON dataset |
 | `POST` | `/api/v1/experiments/run` | Run a complete experiment and store it |
 | `GET` | `/api/v1/experiments` | List stored experiments, filtered and sorted |
 | `GET` | `/api/v1/experiments/capabilities` | Models, metrics and limits a request may use |
@@ -942,10 +1016,10 @@ numpy or pandas.
 | `POST` | `/api/v1/ask` | Answer a question from retrieved evidence, with citations |
 | `GET` | `/api/v1/knowledge/status` | Whether search and answering are available, and their limits |
 | `POST` | `/api/v1/agent/ask` | Answer a question by orchestrating the system's own capabilities |
-| `POST` | `/api/v1/agent/ask-with-dataset` | The same, over an uploaded CSV |
+| `POST` | `/api/v1/agent/ask-with-dataset` | The same, over an uploaded CSV, Excel or JSON dataset |
 | `GET` | `/api/v1/agent/status` | Whether the agent is available, its tools and its limits |
 | `POST` | `/api/v1/agent/ask` | Answer a question by orchestrating the system's own capabilities |
-| `POST` | `/api/v1/agent/ask-with-dataset` | The same, over an uploaded CSV |
+| `POST` | `/api/v1/agent/ask-with-dataset` | The same, over an uploaded CSV, Excel or JSON dataset |
 | `GET` | `/api/v1/agent/status` | Whether the agent is available, its tools and its limits |
 
 Interactive documentation is at `/docs`; the schema is at `/openapi.json`.
@@ -1022,7 +1096,7 @@ storage or request validation — answers in the same envelope:
 | `404` | No experiment stored under that id |
 | `409` | The request conflicts with the data: a classifier for a regression target, or a comparison of runs judged by different metrics |
 | `413` | The upload or the dataset exceeds a configured limit |
-| `415` | Unsupported file type — only `.csv` is implemented |
+| `415` | Unsupported file type — `.csv`, `.xlsx` and `.json` are implemented |
 | `422` | The request or the data cannot be processed: missing target, no usable features, malformed CSV, too few rows |
 | `500` | An unexpected internal failure — logged with its cause, answered generically |
 
@@ -1058,21 +1132,25 @@ to characters that cannot climb out of the store directory. What is stored is
 the record — fingerprint, shape, decisions, scores, explanation — never the
 dataset, the fitted pipeline or the explainer.
 
-### Still CSV only
+### Three formats, one pipeline
 
-**CSV is currently supported; the ML pipeline is intentionally
+**CSV, Excel (`.xlsx`) and JSON are supported; the ML pipeline is intentionally
 format-agnostic.** The runner's real entry point takes a standardised
-DataFrame — `run_experiment(frame, ...)` — and the file path exists only to
+DataFrame — `run_experiment(frame, ...)` — and the upload path exists only to
 produce one:
 
 ```
 Input adapter → DataFrame → Profiler → Preprocessor → ML
- (CSV today)
+ (CSV, Excel,
+  JSON)
 ```
 
-Adding Excel, JSON, Parquet, SQL or an HTTP source means writing one loader in
-the dataset service. Nothing in the runner, the ML layer or the experiment
-store changes, because none of them ever sees a file. Those formats are **not
+The record notes the format under `dataset.source_format`, but the run's
+identity is the content fingerprint, so the same data uploaded as CSV and as
+JSON produces the same fingerprint and lands in the same slice of the history.
+Adding Parquet, SQL or an HTTP source means writing one more adapter. Nothing
+in the runner, the ML layer or the experiment store changes, because none of
+them ever sees a file. Those formats are **not
 implemented**.
 
 ---
@@ -1633,7 +1711,9 @@ No SHAP value is ever invented or carried over from another run. See
 ### Over HTTP
 
 `POST /api/v1/agent/ask` exposes it, and `POST /api/v1/agent/ask-with-dataset`
-does the same with a CSV attached. The routes are a few statements over an
+does the same with a dataset attached — CSV, Excel or JSON through the one
+endpoint, because the ingestion adapter resolves the format before the agent
+exists. The routes are a few statements over an
 application service; the agent package still imports no web framework, and a
 test names the backend modules that may import it at all — neither route is
 one of them.
@@ -1715,7 +1795,7 @@ Three properties follow from the design rather than from a filter:
 - **A citation-shaped cell is still a fabrication.** Nothing a dataset contains
   can mint evidence.
 
-`.csv` is the only physical format implemented — Excel, JSON, Parquet, SQL and
+`.csv`, `.xlsx` and `.json` are the implemented physical formats — Parquet, SQL and
 API ingestion are **not**. The architecture stays format-agnostic all the same:
 the agent receives a standardised DataFrame and never sees an upload, so
 another adapter is a change to the ingestion path and nothing in the
@@ -1776,10 +1856,14 @@ orchestration moves.
   request validation, budgets a request may lower and never raise, the four
   agent outcomes as 200 and provider failures as 502/503, and no
   chain-of-thought in the response.
-- A dataset-aware agent: `POST /api/v1/agent/ask-with-dataset` takes a CSV
+- A dataset-aware agent: `POST /api/v1/agent/ask-with-dataset` takes a dataset
   alongside the question, lends it to one bounded run — profiling, a
   cross-validated experiment, live SHAP, project knowledge — and never persists
   it as raw data.
+- Multi-format ingestion: a format-detection and adapter layer reading CSV,
+  Excel (`.xlsx`) and JSON into one standardised DataFrame, shared by the
+  profiling, experiment and agent endpoints, with identity taken from the
+  normalised data rather than the file.
 - Test suites covering the backend service, the API contract, the ML layer, the
   retrieval layer, the language-model layer and the agent layer.
 
@@ -1789,7 +1873,8 @@ orchestration moves.
 - Model persistence — no fitted pipeline or explainer is written to disk, so
   there is no prediction or model-serving endpoint
 - **MLflow** — experiment tracking runs on local JSON files only
-- Ingestion formats other than CSV (Excel, JSON, Parquet, SQL, APIs)
+- Ingestion formats beyond CSV, Excel (`.xlsx`) and JSON — Parquet, SQL,
+  databases, Google Sheets, S3 and URL ingestion are not implemented
 - LangChain, LangGraph, AutoGen, CrewAI or any agent framework
 - Multi-agent systems and autonomous tool calling outside the registered tools
 - Streaming answers and conversation memory — every question is independent
@@ -1805,7 +1890,7 @@ orchestration moves.
 | --- | --- | --- |
 | `GET` | `/` | Service name, version, environment and docs URL |
 | `GET` | `/health` | Liveness check — returns `{"status": "ok", ...}` |
-| `POST` | `/api/v1/datasets/profile` | Profile an uploaded CSV file |
+| `POST` | `/api/v1/datasets/profile` | Profile an uploaded CSV, Excel or JSON file |
 | `POST` | `/api/v1/experiments/run` | Run a complete experiment and store it |
 | `GET` | `/api/v1/experiments` | List stored experiments, filtered and sorted |
 | `GET` | `/api/v1/experiments/capabilities` | Models, metrics and limits a request may use |
@@ -1916,6 +2001,7 @@ and the real LLM provider (needs a credential *and* `RUN_LLM_INTEGRATION=1`).
 11. ~~**Knowledge API** — `/search` and `/ask` over HTTP, with grounded statuses and no client-supplied provider configuration~~
 12. ~~**Bounded agent** — tool registry, typed schemas, bounded execution, grounded final answers~~
 13. ~~**Agent HTTP endpoint** — `POST /api/v1/agent/ask`, budgets a request may lower, bounded outcomes~~
-14. **A dataset-aware agent** — `POST /api/v1/agent/ask-with-dataset`, request-scoped uploads, never persisted *(current)*
-15. Next.js frontend
-16. Containerisation and deployment
+14. ~~**A dataset-aware agent** — `POST /api/v1/agent/ask-with-dataset`, request-scoped uploads, never persisted~~
+15. **Multi-format ingestion** — a format-detection and adapter layer for CSV, Excel and JSON behind one standardised DataFrame *(current)*
+16. Next.js frontend
+17. Containerisation and deployment

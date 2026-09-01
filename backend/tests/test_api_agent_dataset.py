@@ -96,9 +96,13 @@ RUN = decide(
 )
 
 
-def upload(content: bytes, filename: str = "customers.csv") -> dict[str, Any]:
+def upload(
+    content: bytes,
+    filename: str = "customers.csv",
+    content_type: str = "text/csv",
+) -> dict[str, Any]:
     """Build the ``files=`` argument for a multipart upload."""
-    return {"file": (filename, io.BytesIO(content), "text/csv")}
+    return {"file": (filename, io.BytesIO(content), content_type)}
 
 
 def classification_csv() -> bytes:
@@ -690,14 +694,28 @@ def test_an_unusable_csv_is_rejected(
     assert set(response.json()) == {"error"}
 
 
-@pytest.mark.parametrize("filename", ["data.xlsx", "data.json", "data.parquet", "data"])
-def test_an_unsupported_file_type_is_rejected(build_client, filename: str) -> None:
-    """CSV is the only physical format implemented."""
+@pytest.mark.parametrize(
+    ("filename", "content_type"),
+    [
+        ("data.parquet", "application/octet-stream"),
+        ("data.txt", "text/plain"),
+        ("data.xls", "application/vnd.ms-excel"),
+        ("data", "application/octet-stream"),
+    ],
+)
+def test_an_unsupported_file_type_is_rejected(
+    build_client, filename: str, content_type: str
+) -> None:
+    """CSV, Excel and JSON are implemented. Everything else is refused.
+
+    The last case has no extension *and* no recognised media type, which is
+    the only way an upload gives detection nothing at all to work with.
+    """
     client = build_client(FINISH, "x")
 
     response = client.post(
         DATASET_URL,
-        files=upload(classification_csv(), filename),
+        files=upload(classification_csv(), filename, content_type),
         data={"question": ANALYSE},
     )
 

@@ -29,6 +29,12 @@ at a file that no longer exists.
 **Nothing is written.** The bytes are parsed in memory and never touch a disk.
 The experiment store keeps a record — fingerprint, shape, decisions, scores —
 and no rows. The retrieval index is not told the upload happened.
+
+**The format does not reach the agent.** CSV, Excel and JSON uploads all arrive
+here as the same standardised frame, because the ingestion adapters have
+already done their work by the time this module is called. The orchestrator
+never sees an ``UploadFile``, a path or an extension; the format survives only
+as a word on the response, so a caller can see how their file was read.
 """
 
 from __future__ import annotations
@@ -69,6 +75,11 @@ class RequestDataset:
     fingerprint: str
     #: Path-free filename, for display only. Never used to reach anything.
     filename: str
+    #: How the bytes were read — ``"csv"``, ``"xlsx"`` or ``"json"``. Reported
+    #: to the caller and deliberately kept out of the planner's context: the
+    #: agent's reasoning must not vary with the file format, and a format it
+    #: cannot see is a format it cannot branch on.
+    source_format: str
     row_count: int
     column_count: int
     columns: tuple[str, ...]
@@ -104,6 +115,7 @@ class RequestDataset:
         return {
             "name": self.name,
             "filename": self.filename,
+            "source_format": self.source_format,
             "fingerprint": self.fingerprint,
             "row_count": self.row_count,
             "column_count": self.column_count,
@@ -113,31 +125,38 @@ class RequestDataset:
 
 
 async def load_request_dataset(
-    service: DatasetProfilingService, upload: AsyncReadable, filename: str | None
+    service: DatasetProfilingService,
+    upload: AsyncReadable,
+    filename: str | None,
+    content_type: str | None = None,
 ) -> RequestDataset:
     """Turn an upload into a dataset the agent may use for one request.
 
-    The whole of the ingestion is the dataset service's: the extension is
-    checked before any bytes are read, the size is bounded by the configured
-    limit, the filename is reduced to a bare name, and the content is parsed
-    into a standardised frame. Nothing here re-implements any of that, and no
-    second set of limits is introduced.
+    The whole of the ingestion is the dataset service's: the format is settled
+    before any bytes are read, the size is bounded by the configured limit, the
+    filename is reduced to a bare name, and the content is parsed by that
+    format's adapter into a standardised frame. Nothing here re-implements any
+    of that, no second set of limits is introduced, and this function contains
+    no branch on format at all — which is exactly why the same three lines
+    serve CSV, Excel and JSON.
 
     Args:
         service: The existing profiling service, which owns ingestion.
         upload: The incoming file.
         filename: What the client called it. Used for its extension, and kept
             as display text — never as a location.
+        content_type: The client's declared media type, if any.
 
     Returns:
         RequestDataset: The frame and the safe facts about it.
 
     Raises:
         DatasetError: If the upload or its content fails validation — an
-            unsupported extension, an oversized file, malformed CSV, or a
-            dataset with no usable rows or columns.
+            unsupported extension, an oversized file, content that is not
+            really the format it was sent as, or a dataset with no usable rows
+            or columns.
     """
-    loaded = await service.load_upload(upload, filename)
+    loaded = await service.load_upload(upload, filename, content_type)
     frame = loaded.frame
     rows, columns = frame.shape
 
@@ -145,6 +164,7 @@ async def load_request_dataset(
         frame=frame,
         fingerprint=fingerprint_dataset(frame).value,
         filename=loaded.filename,
+        source_format=loaded.source_format,
         row_count=int(rows),
         column_count=int(columns),
         columns=tuple(str(name) for name in frame.columns),

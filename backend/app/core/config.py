@@ -27,7 +27,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_MAX_UPLOAD_MB = 25
 DEFAULT_MAX_DATASET_ROWS = 1_000_000
 DEFAULT_MAX_DATASET_COLUMNS = 1_000
-SUPPORTED_DATASET_EXTENSIONS = (".csv",)
+#: The dataset formats the API accepts. Each has an adapter in
+#: ``app.services.datasets.ingestion``; adding an extension here without an
+#: adapter changes nothing, because the registry is the real allowlist.
+#: Parquet, SQL, databases, cloud storage and URL ingestion are not implemented.
+SUPPORTED_DATASET_EXTENSIONS = (".csv", ".xlsx", ".json")
 
 # Profiling / heuristic thresholds ------------------------------------------
 DEFAULT_PROFILE_TOP_VALUES = 10

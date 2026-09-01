@@ -7,9 +7,24 @@ file, a fixture dataset or network access.
 from __future__ import annotations
 
 import io
+import json
 from typing import Any
 
+import pandas as pd
+
 CSV_CONTENT_TYPE = "text/csv"
+XLSX_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+JSON_CONTENT_TYPE = "application/json"
+
+#: Extension to the media type a browser would send for it, so an upload in a
+#: test carries the same headers a real client's would.
+CONTENT_TYPES: dict[str, str] = {
+    ".csv": CSV_CONTENT_TYPE,
+    ".xlsx": XLSX_CONTENT_TYPE,
+    ".json": JSON_CONTENT_TYPE,
+}
 
 
 def build_csv(header: list[str], rows: list[list[Any]]) -> bytes:
@@ -111,9 +126,75 @@ def experiment_form(**fields: Any) -> dict[str, Any]:
     return encoded
 
 
-def upload_payload(content: bytes, filename: str = "dataset.csv") -> dict[str, Any]:
-    """Build the ``files=`` argument for a multipart upload."""
-    return {"file": (filename, io.BytesIO(content), CSV_CONTENT_TYPE)}
+def upload_payload(
+    content: bytes,
+    filename: str = "dataset.csv",
+    content_type: str | None = None,
+) -> dict[str, Any]:
+    """Build the ``files=`` argument for a multipart upload.
+
+    The media type is derived from the filename unless one is given, so a
+    test that uploads a workbook sends the header a browser would and a test
+    about mislabelling can state the mismatch explicitly.
+    """
+    if content_type is None:
+        suffix = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        content_type = CONTENT_TYPES.get(suffix, CSV_CONTENT_TYPE)
+    return {"file": (filename, io.BytesIO(content), content_type)}
+
+
+def frame_from_csv(content: bytes) -> pd.DataFrame:
+    """Parse CSV bytes the way the application would, for re-encoding."""
+    return pd.read_csv(io.BytesIO(content))
+
+
+def build_xlsx(header: list[str], rows: list[list[Any]]) -> bytes:
+    """Render a header and rows as a single-worksheet ``.xlsx`` workbook."""
+    return frame_to_xlsx(pd.DataFrame(rows, columns=header))
+
+
+def frame_to_xlsx(frame: pd.DataFrame, sheet_name: str = "Sheet1") -> bytes:
+    """Render a DataFrame as a one-sheet workbook."""
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        frame.to_excel(writer, index=False, sheet_name=sheet_name)
+    return buffer.getvalue()
+
+
+def multi_sheet_xlsx(sheets: dict[str, pd.DataFrame]) -> bytes:
+    """Render several named worksheets into one workbook, in order."""
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        for name, frame in sheets.items():
+            frame.to_excel(writer, index=False, sheet_name=name)
+    return buffer.getvalue()
+
+
+def build_json(header: list[str], rows: list[list[Any]]) -> bytes:
+    """Render a header and rows as a JSON array of objects."""
+    records = [dict(zip(header, row)) for row in rows]
+    return json.dumps(records).encode("utf-8")
+
+
+def frame_to_json(frame: pd.DataFrame, envelope: str | None = None) -> bytes:
+    """Render a DataFrame as JSON records, optionally under an envelope key.
+
+    ``NaN`` becomes ``null``, which is what a JSON exporter writes and what
+    the adapter reads back as a missing value.
+    """
+    records = json.loads(frame.to_json(orient="records"))
+    document: Any = records if envelope is None else {envelope: records}
+    return json.dumps(document).encode("utf-8")
+
+
+def csv_as_xlsx(content: bytes) -> bytes:
+    """Re-express CSV bytes as an equivalent one-sheet workbook."""
+    return frame_to_xlsx(frame_from_csv(content))
+
+
+def csv_as_json(content: bytes, envelope: str | None = None) -> bytes:
+    """Re-express CSV bytes as equivalent JSON records."""
+    return frame_to_json(frame_from_csv(content), envelope=envelope)
 
 
 class FakeUpload:

@@ -283,11 +283,16 @@ def get_agent_registry_factory(
     advertise two tools whose every call fails with "no such dataset", which
     wastes a planner's turns and misleads a client reading
     ``tools_available``.
+
+    The upload's format is bound here too, into the executor, so an experiment
+    the agent runs on a spreadsheet is recorded as having come from one. It
+    reaches the record without ever reaching the agent: the tool's arguments
+    have no format field, and nothing the planner writes can change it.
     """
 
-    def build(source: Any = None) -> ToolRegistry:
+    def build(dataset: Any = None) -> ToolRegistry:
         """Build the registry for one run, over the dataset it was given."""
-        chosen = source if source is not None else default_source
+        chosen = dataset.source() if dataset is not None else default_source
         return build_default_registry(
             source=chosen if chosen is not None and chosen.names() else None,
             profiler=datasets,
@@ -296,6 +301,7 @@ def get_agent_registry_factory(
                 settings=settings,
                 store=store,
                 dataset_service=datasets,
+                source_format=getattr(dataset, "source_format", None),
             ),
             retrieval=retrieval,
             lookup=store,
@@ -340,6 +346,7 @@ def get_agent_service(
     registry_factory: AgentRegistryFactoryDep,
     config: AgentConfigDep,
     artifacts: AgentArtifactsDep,
+    datasets: DatasetServiceDep,
 ) -> AgentService:
     """Provide the agent service both agent endpoints delegate to."""
     return AgentService(
@@ -347,6 +354,7 @@ def get_agent_service(
         registry_factory=registry_factory,
         config=config,
         artifacts=artifacts,
+        dataset_formats=datasets.supported_formats(),
     )
 
 

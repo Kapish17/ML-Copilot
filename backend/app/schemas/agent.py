@@ -217,11 +217,23 @@ class AgentDatasetInfo(BaseModel):
         ),
         examples=["customers.csv"],
     )
+    source_format: str = Field(
+        ...,
+        description=(
+            "How the upload was read: 'csv', 'xlsx' or 'json'. The agent "
+            "itself is not told — every format becomes the same standardised "
+            "table before the run starts, so the answer does not depend on "
+            "which one it was."
+        ),
+        examples=["csv"],
+    )
     fingerprint: str = Field(
         ...,
         description=(
-            "Content fingerprint. The canonical identity, and what any "
-            "experiment from this dataset is filed under."
+            "Content fingerprint of the standardised data. The canonical "
+            "identity, and what any experiment from this dataset is filed "
+            "under. Computed from the table, not the file, so the same data "
+            "uploaded as CSV, Excel or JSON fingerprints identically."
         ),
         examples=["86494cff7a45cb7f"],
     )
@@ -334,6 +346,15 @@ class AgentStatusResponse(BaseModel):
             "When it does, a request that uploads one gets the two "
             "dataset-dependent tools in addition to those listed above."
         ),
+    )
+    supported_dataset_formats: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The upload formats that endpoint accepts. The agent's reasoning "
+            "does not depend on which one a caller uses — every format "
+            "becomes the same standardised table before the run begins."
+        ),
+        examples=[["csv", "xlsx", "json"]],
     )
     max_tool_calls: int
     max_iterations: int

@@ -25,11 +25,17 @@ _ERROR_RESPONSES: dict[int | str, dict[str, object]] = {
     },
     status.HTTP_415_UNSUPPORTED_MEDIA_TYPE: {
         "model": ErrorResponse,
-        "description": "The file is not a supported dataset format.",
+        "description": (
+            "The file is not a supported dataset format. CSV, Excel (.xlsx) "
+            "and JSON are supported."
+        ),
     },
     status.HTTP_422_UNPROCESSABLE_CONTENT: {
         "model": ErrorResponse,
-        "description": "The request or the CSV content could not be processed.",
+        "description": (
+            "The request could not be processed, or the file's content is "
+            "not valid for the format it was sent as."
+        ),
     },
     status.HTTP_400_BAD_REQUEST: {
         "model": ErrorResponse,
@@ -42,20 +48,41 @@ _ERROR_RESPONSES: dict[int | str, dict[str, object]] = {
     "/profile",
     response_model=DatasetProfileResponse,
     responses=_ERROR_RESPONSES,
-    summary="Profile a CSV dataset",
+    summary="Profile a CSV, Excel or JSON dataset",
 )
 async def profile_dataset(
     service: DatasetServiceDep,
-    file: Annotated[UploadFile, File(description="CSV dataset to profile.")],
+    file: Annotated[
+        UploadFile,
+        File(
+            description=(
+                "Dataset to profile. CSV, Excel (.xlsx — first worksheet) or "
+                "JSON (an array of objects, or an object holding one such "
+                "array)."
+            )
+        ),
+    ],
     target_column: Annotated[
         str | None,
         Form(description="Optional name of the column to analyse as the target."),
     ] = None,
 ) -> DatasetProfileResponse:
-    """Validate an uploaded CSV file and return its profile.
+    """Validate an uploaded dataset and return its profile.
+
+    CSV, Excel (``.xlsx``) and JSON are accepted. The file's format decides
+    only which adapter reads it: every format becomes the same standardised
+    table first, and the profile is computed by one implementation that cannot
+    tell them apart. The response reports the format under ``source_format``
+    as context.
+
+    Excel workbooks are read from their **first worksheet**. JSON must be an
+    array of objects, one per row, or an object holding one such array.
 
     The file is processed in memory and is not stored.
     """
     return await service.profile_upload(
-        file, filename=file.filename, target_column=target_column
+        file,
+        filename=file.filename,
+        target_column=target_column,
+        content_type=file.content_type,
     )

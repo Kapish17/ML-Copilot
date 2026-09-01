@@ -194,6 +194,16 @@ class DatasetProfileResponse(BaseModel):
     """Full response of the dataset profiling endpoint."""
 
     filename: str
+    source_format: str | None = Field(
+        default=None,
+        description=(
+            "The format the upload was read as: 'csv', 'xlsx' or 'json'. "
+            "Reported as context only — profiling is identical for all "
+            "three, because every format becomes the same standardised "
+            "table before anything is measured."
+        ),
+        examples=["csv"],
+    )
     generated_at: datetime
     dataset: DatasetSummary
     columns: list[ColumnProfile]

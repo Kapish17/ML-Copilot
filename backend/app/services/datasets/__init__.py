@@ -3,6 +3,7 @@
 The workflow is split so each step can be tested on its own:
 
 ``validation``  upload-level checks (extension, size, emptiness)
+``ingestion``   format detection and the per-format adapters (CSV, Excel, JSON)
 ``loader``      decoding and parsing CSV bytes into a DataFrame
 ``profiler``    dataset- and column-level statistics
 ``quality``     heuristic data-quality findings

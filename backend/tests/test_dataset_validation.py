@@ -37,15 +37,28 @@ def test_safe_filename_strips_directories(raw: str | None, expected: str) -> Non
     assert safe_filename(raw) == expected
 
 
+@pytest.mark.parametrize(
+    ("filename", "extension"),
+    [("dataset.xlsx", ".xlsx"), ("dataset.JSON", ".json")],
+)
+def test_validate_extension_accepts_the_other_supported_formats(
+    filename: str, extension: str, settings: Settings
+) -> None:
+    """Excel and JSON joined the allowlist in Commit 15."""
+    assert validate_extension(filename, settings) == extension
+
+
 def test_validate_extension_accepts_csv(settings: Settings) -> None:
     """A .csv file passes validation regardless of letter case."""
     assert validate_extension("dataset.csv", settings) == ".csv"
     assert validate_extension("DATASET.CSV", settings) == ".csv"
 
 
-@pytest.mark.parametrize("filename", ["dataset.txt", "dataset.xlsx", "dataset", "data.csv.exe"])
+@pytest.mark.parametrize(
+    "filename", ["dataset.txt", "dataset.parquet", "dataset", "data.csv.exe"]
+)
 def test_validate_extension_rejects_other_types(filename: str, settings: Settings) -> None:
-    """Anything that is not a CSV is rejected with a typed error."""
+    """Anything outside the configured allowlist is rejected with a typed error."""
     with pytest.raises(UnsupportedFileTypeError) as exc_info:
         validate_extension(filename, settings)
     assert exc_info.value.code == "unsupported_file_type"

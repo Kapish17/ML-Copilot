@@ -58,7 +58,10 @@ _RUN_ERRORS: dict[int | str, dict[str, object]] = {
     },
     status.HTTP_415_UNSUPPORTED_MEDIA_TYPE: {
         "model": ErrorResponse,
-        "description": "The file is not a supported dataset format. Only CSV is implemented.",
+        "description": (
+            "The file is not a supported dataset format. CSV, Excel (.xlsx) "
+            "and JSON are implemented; Parquet, SQL and remote sources are not."
+        ),
     },
     status.HTTP_422_UNPROCESSABLE_CONTENT: {
         "model": ErrorResponse,
@@ -105,7 +108,16 @@ _COMPARE_ERRORS: dict[int | str, dict[str, object]] = {
 )
 async def run_experiment_endpoint(
     runner: ExperimentRunnerDep,
-    file: Annotated[UploadFile, File(description="CSV dataset to run on.")],
+    file: Annotated[
+        UploadFile,
+        File(
+            description=(
+                "Dataset to run on. CSV, Excel (.xlsx — first worksheet) or "
+                "JSON (an array of objects, or an object holding one such "
+                "array)."
+            )
+        ),
+    ],
     options: ExperimentOptionsDep,
 ) -> ExperimentRunResponse:
     """Profile, prepare, cross-validate, select, evaluate, explain and record.
@@ -117,6 +129,13 @@ async def run_experiment_endpoint(
     then explained with SHAP. The whole run is stored as an experiment record
     and returned here.
 
+    CSV, Excel and JSON uploads all run the identical pipeline: the ingestion
+    adapter turns each into the same standardised table, and nothing after
+    that point knows which format it was. The record notes the format under
+    ``dataset.source_format``, while the run's identity is the content
+    fingerprint — so the same data uploaded as CSV and as JSON produces the
+    same fingerprint and is recognisably the same dataset.
+
     The upload is never written to disk. What is stored is the record: the
     dataset's content fingerprint, shape and column types, the preprocessing
     decisions, the scores and the explanation — never the data, the fitted
@@ -124,7 +143,12 @@ async def run_experiment_endpoint(
 
     Execution is synchronous: the response arrives when the run has finished.
     """
-    result = await runner.run_upload(file, filename=file.filename, options=options)
+    result = await runner.run_upload(
+        file,
+        filename=file.filename,
+        options=options,
+        content_type=file.content_type,
+    )
     return ExperimentRunResponse.model_validate(result.as_dict())
 
 

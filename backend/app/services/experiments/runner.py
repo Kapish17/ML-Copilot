@@ -14,10 +14,13 @@ computed here.
               -> ExperimentRun -> ExperimentStore
 
 The entry point that matters is :meth:`ExperimentRunner.run_frame`, which takes
-a **standardised DataFrame**. CSV enters through :meth:`run_upload`, which does
-nothing but ask the dataset service for that DataFrame. Adding Excel, Parquet
-or a SQL source therefore means another loader in the dataset service and no
-change here. **No format other than CSV is implemented.**
+a **standardised DataFrame**. Files enter through :meth:`run_upload`, which
+does nothing but ask the dataset service for that DataFrame — so CSV, Excel and
+JSON uploads all arrive here as the same object and run through the identical
+pipeline. The format is carried onto the record as context and is never read by
+anything that makes a decision. Adding Parquet or a SQL source would mean
+another adapter in the dataset service and no change here. **Parquet, SQL,
+databases, cloud storage and URL ingestion are not implemented.**
 
 Execution is synchronous: one HTTP request runs the pipeline and waits. The
 limits in :class:`~app.core.config.Settings` exist to bound how long that can
@@ -56,8 +59,8 @@ from ml.pipelines.result import PreparedDataset
 
 logger = logging.getLogger(__name__)
 
-#: Recorded on every run made through this API, so history can distinguish a
-#: run made over HTTP from one made from a script.
+#: Recorded when the caller hands over a DataFrame directly and says nothing
+#: about where it came from. An upload always reports its real format.
 SOURCE_FORMAT = "csv"
 
 #: Used when the caller names neither a target column nor a run name.
@@ -153,16 +156,21 @@ class ExperimentRunner:
         upload: AsyncReadable,
         filename: str | None,
         options: ExperimentOptions,
+        content_type: str | None = None,
     ) -> ExperimentRunResult:
         """Run an experiment on an uploaded dataset file.
 
-        The upload is validated and parsed in memory and is never written to
-        disk; only its fingerprint and shape survive, inside the record.
+        CSV, Excel and JSON all arrive here; the dataset service turns each
+        into the same standardised DataFrame, and everything after that line
+        is identical. The upload is validated and parsed in memory and is
+        never written to disk; only its fingerprint, shape and format survive,
+        inside the record.
 
         Args:
             upload: The incoming file object.
             filename: Client-supplied filename, used only for its extension.
             options: The experiment configuration.
+            content_type: The client's declared media type, if any.
 
         Returns:
             ExperimentRunResult: The stored record and its warnings.
@@ -172,16 +180,30 @@ class ExperimentRunner:
             MLError: If the experiment itself cannot be run.
         """
         validated = options.validated(self._settings)
-        loaded = await self._datasets.load_upload(upload, filename)
-        return self.run_frame(loaded.frame, validated, dataset_label=loaded.filename)
+        loaded = await self._datasets.load_upload(upload, filename, content_type)
+        return self.run_frame(
+            loaded.frame,
+            validated,
+            dataset_label=loaded.filename,
+            source_format=loaded.source_format,
+        )
 
     def run_content(
-        self, filename: str | None, content: bytes, options: ExperimentOptions
+        self,
+        filename: str | None,
+        content: bytes,
+        options: ExperimentOptions,
+        content_type: str | None = None,
     ) -> ExperimentRunResult:
         """Run an experiment on dataset bytes already in memory."""
         validated = options.validated(self._settings)
-        loaded = self._datasets.load_content(filename, content)
-        return self.run_frame(loaded.frame, validated, dataset_label=loaded.filename)
+        loaded = self._datasets.load_content(filename, content, content_type)
+        return self.run_frame(
+            loaded.frame,
+            validated,
+            dataset_label=loaded.filename,
+            source_format=loaded.source_format,
+        )
 
     def run_frame(
         self,
@@ -228,7 +250,10 @@ class ExperimentRunner:
         target = self._resolve_target(frame, options, warnings)
 
         profile = self._datasets.profile_frame(
-            frame, filename=dataset_label, target_column=target
+            frame,
+            filename=dataset_label,
+            target_column=target,
+            source_format=source_format,
         )
         prepared = self._prepare(frame, profile, options, target)
         self._validate_candidates(options, prepared)
@@ -440,6 +465,7 @@ def run_experiment(
     target_column: str | None = None,
     models: Sequence[str] = (),
     dataset_label: str = "dataset",
+    source_format: str | None = None,
     retain_artifacts: bool = False,
     **option_fields: Any,
 ) -> ExperimentRunResult:
@@ -454,6 +480,11 @@ def run_experiment(
     This is the callable the agent layer is wired to. It satisfies that
     layer's executor protocol structurally, which is what lets ``agent/`` run
     real experiments without importing this package.
+
+    ``source_format`` is bound by the caller that knows it — the request that
+    ingested the upload — rather than guessed here, so a run the agent starts
+    on a spreadsheet is recorded as having come from one. The agent itself
+    never supplies it and never sees it.
     """
     options = ExperimentOptions(
         target_column=target_column, models=tuple(models), **option_fields
@@ -463,5 +494,6 @@ def run_experiment(
         frame,
         options,
         dataset_label=dataset_label,
+        source_format=source_format or SOURCE_FORMAT,
         retain_artifacts=retain_artifacts,
     )

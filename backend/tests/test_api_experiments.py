@@ -451,14 +451,19 @@ def test_a_malformed_csv_is_rejected(experiment_client: TestClient) -> None:
 
 
 def test_an_unsupported_file_type_is_rejected(experiment_client: TestClient) -> None:
-    """Only CSV is implemented, and the error says what is supported."""
+    """CSV, Excel and JSON are implemented; the error says which.
+
+    Parquet is the honest example of a format that is *not* implemented: it
+    is named in the roadmap, so a client could reasonably try it, and the
+    refusal has to be unambiguous rather than a parse failure later on.
+    """
     error = assert_envelope(
         run_experiment(experiment_client, filename="data.parquet"),
         status_code=415,
         code="unsupported_file_type",
     )
 
-    assert error["details"]["supported_extensions"] == [".csv"]
+    assert error["details"]["supported_extensions"] == [".csv", ".xlsx", ".json"]
 
 
 def test_an_empty_file_is_rejected(experiment_client: TestClient) -> None:
@@ -822,7 +827,7 @@ def test_capabilities_describe_what_a_request_may_contain(
     assert "f1" in payload["metrics"]["classification"]
     assert "rmse" in payload["metrics"]["regression"]
     assert payload["strategies"] == ["cross_validation", "holdout"]
-    assert payload["supported_dataset_extensions"] == [".csv"]
+    assert payload["supported_dataset_extensions"] == [".csv", ".xlsx", ".json"]
     assert payload["limits"]["max_cv_folds"] >= 2
 
 

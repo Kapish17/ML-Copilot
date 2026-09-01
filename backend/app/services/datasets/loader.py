@@ -4,35 +4,85 @@ Uploaded files are untrusted input. Nothing here executes file content, no
 path from the request reaches the filesystem, and the parse happens entirely
 in memory. Structural problems are converted into typed domain errors so the
 API can report them precisely.
+
+This module is the CSV *parse*. The checks it shares with the other formats —
+column count, duplicate names, emptiness, row limits — live in
+:mod:`app.services.datasets.ingestion.normalisation` and are applied by every
+adapter, so all three formats agree on what an acceptable dataset is.
+:class:`~app.services.datasets.ingestion.csv_adapter.CSVAdapter` is a thin
+wrapper around :func:`load_csv`; there is exactly one CSV implementation and
+this is it.
 """
 
 from __future__ import annotations
 
 import csv
 import io
-import re
+from collections.abc import Callable
 
 import pandas as pd
 
 from app.core.config import Settings
 from app.core.errors import (
-    DatasetTooLargeError,
-    DuplicateColumnsError,
     EmptyDatasetError,
     MalformedCSVError,
     MissingHeaderError,
 )
+from app.services.datasets.ingestion.normalisation import (
+    UNNAMED_COLUMN_PATTERN,
+    looks_binary,
+    validate_columns,
+    validate_frame,
+)
 
 CSV_DELIMITER = ","
 SUPPORTED_ENCODINGS = ("utf-8-sig", "latin-1")
-UNNAMED_COLUMN_PATTERN = re.compile(r"^Unnamed: \d+(\.\d+)?$")
+
+__all__ = [
+    "CSV_DELIMITER",
+    "SUPPORTED_ENCODINGS",
+    "UNNAMED_COLUMN_PATTERN",
+    "decode_content",
+    "decode_text",
+    "load_csv",
+    "parse_csv",
+    "read_header",
+    "validate_frame",
+    "validate_header",
+]
+
+
+def decode_text(content: bytes, on_failure: Callable[[str], Exception]) -> str:
+    """Decode raw upload bytes into text, in the encodings this project reads.
+
+    UTF-8 (with optional BOM) is tried first, then Latin-1 as a permissive
+    fallback so that a legacy encoding does not fail the whole request. Shared
+    by the text-based adapters so that a CSV and a JSON file are decoded the
+    same way.
+
+    Args:
+        content: Raw bytes of the uploaded file.
+        on_failure: Builds the error to raise when nothing decodes, so each
+            caller reports the failure in its own format's terms.
+
+    Returns:
+        str: The decoded text.
+
+    Raises:
+        Exception: Whatever ``on_failure`` returns.
+    """
+    for encoding in SUPPORTED_ENCODINGS:
+        try:
+            return content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    raise on_failure(  # pragma: no cover - latin-1 decodes any byte string
+        "The file could not be decoded as text."
+    )
 
 
 def decode_content(content: bytes) -> str:
-    """Decode raw upload bytes into text.
-
-    UTF-8 (with optional BOM) is tried first, then Latin-1 as a permissive
-    fallback so that a legacy encoding does not fail the whole request.
+    """Decode raw upload bytes as CSV text.
 
     Args:
         content: Raw bytes of the uploaded file.
@@ -43,13 +93,11 @@ def decode_content(content: bytes) -> str:
     Raises:
         MalformedCSVError: If no supported encoding can decode the bytes.
     """
-    for encoding in SUPPORTED_ENCODINGS:
-        try:
-            return content.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    raise MalformedCSVError(  # pragma: no cover - latin-1 decodes any byte string
-        "The file could not be decoded as text. Please upload a UTF-8 encoded CSV."
+    return decode_text(
+        content,
+        lambda message: MalformedCSVError(
+            f"{message} Please upload a UTF-8 encoded CSV."
+        ),
     )
 
 
@@ -96,29 +144,7 @@ def validate_header(header: list[str], settings: Settings) -> None:
         DuplicateColumnsError: If any column name appears more than once.
         DatasetTooLargeError: If the header exceeds ``max_dataset_columns``.
     """
-    if len(header) > settings.max_dataset_columns:
-        raise DatasetTooLargeError(
-            f"The dataset has {len(header)} columns, more than the "
-            f"{settings.max_dataset_columns} column limit.",
-            details={
-                "column_count": len(header),
-                "max_dataset_columns": settings.max_dataset_columns,
-            },
-        )
-
-    seen: set[str] = set()
-    duplicates: list[str] = []
-    for cell in header:
-        name = cell.strip()
-        if name in seen and name not in duplicates:
-            duplicates.append(name)
-        seen.add(name)
-
-    if duplicates:
-        raise DuplicateColumnsError(
-            "The header repeats column names: " + ", ".join(duplicates) + ".",
-            details={"duplicate_columns": duplicates},
-        )
+    validate_columns(header, settings)
 
 
 def parse_csv(text: str) -> pd.DataFrame:
@@ -152,45 +178,6 @@ def parse_csv(text: str) -> pd.DataFrame:
         raise MalformedCSVError(f"The file could not be parsed as CSV: {exc}") from exc
 
 
-def validate_frame(frame: pd.DataFrame, settings: Settings) -> None:
-    """Check a parsed frame for emptiness, unusable headers and size limits.
-
-    Args:
-        frame: The parsed dataset.
-        settings: Active application settings.
-
-    Raises:
-        EmptyDatasetError: If the frame has no columns or no rows.
-        MissingHeaderError: If every column name is a pandas placeholder,
-            which means the file had no real header row.
-        DatasetTooLargeError: If the frame exceeds the configured row limit.
-    """
-    if frame.shape[1] == 0:
-        raise EmptyDatasetError("The dataset contains no columns.")
-
-    names = [str(name) for name in frame.columns]
-    if all(UNNAMED_COLUMN_PATTERN.match(name) for name in names):
-        raise MissingHeaderError(
-            "No column names were found. The first row must contain the header."
-        )
-
-    if frame.shape[0] == 0:
-        raise EmptyDatasetError(
-            "The dataset has a header but no data rows.",
-            details={"column_count": frame.shape[1]},
-        )
-
-    if frame.shape[0] > settings.max_dataset_rows:
-        raise DatasetTooLargeError(
-            f"The dataset has {frame.shape[0]} rows, more than the "
-            f"{settings.max_dataset_rows} row limit.",
-            details={
-                "row_count": frame.shape[0],
-                "max_dataset_rows": settings.max_dataset_rows,
-            },
-        )
-
-
 def load_csv(content: bytes, settings: Settings) -> pd.DataFrame:
     """Decode, validate and parse uploaded CSV bytes.
 
@@ -203,8 +190,16 @@ def load_csv(content: bytes, settings: Settings) -> pd.DataFrame:
 
     Raises:
         DatasetError: Any of the typed loading failures described by the
-            functions this orchestrates.
+            functions this orchestrates. Binary content sent under a ``.csv``
+            name is refused here rather than decoded into unusable text: the
+            extension chose this parser, but only the parser decides whether
+            the bytes really are CSV.
     """
+    if looks_binary(content):
+        raise MalformedCSVError(
+            "The file is not text, so it cannot be read as CSV. Upload the "
+            "file in a supported format, or export the spreadsheet to CSV."
+        )
     text = decode_content(content)
     header = read_header(text)
     validate_header(header, settings)

@@ -27,6 +27,24 @@ class AsyncReadable(Protocol):
         ...
 
 
+def declared_content_type(upload: object) -> str | None:
+    """Read the media type an upload declares, when it declares one.
+
+    ``UploadFile`` carries a ``content_type``; the minimal readable object a
+    test or an in-process caller passes does not. Asking with ``getattr``
+    keeps the service working with either, and keeps this module free of any
+    import from FastAPI.
+
+    Args:
+        upload: The incoming file object.
+
+    Returns:
+        str | None: The declared media type, or ``None``.
+    """
+    value = getattr(upload, "content_type", None)
+    return value if isinstance(value, str) and value else None
+
+
 def safe_filename(filename: str | None) -> str:
     """Reduce a client-supplied filename to a bare, path-free name.
 
@@ -49,6 +67,13 @@ def safe_filename(filename: str | None) -> str:
 
 def validate_extension(filename: str, settings: Settings) -> str:
     """Check the file extension against the supported dataset formats.
+
+    Kept as the narrow extension-only check.
+    :func:`app.services.datasets.ingestion.detect_format` is what the service
+    actually calls: it makes the same allowlist decision and additionally
+    reports *which* format was recognised, which is what the adapter registry
+    needs. Both read ``settings.supported_dataset_extensions``, so they can
+    never disagree about what is permitted.
 
     Args:
         filename: A path-free filename.

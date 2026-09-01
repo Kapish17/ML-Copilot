@@ -58,10 +58,43 @@ class EmptyFileError(DatasetError):
     status_code = 400
 
 
-class MalformedCSVError(DatasetError):
+class InvalidDatasetContentError(DatasetError):
+    """The bytes are not valid content for the format they were sent as.
+
+    The common parent of every "this file is not what it claims to be"
+    failure. Each format keeps its own code beneath it so a client can tell
+    a broken spreadsheet from broken JSON, while a caller that only wants to
+    know "the content was unusable" can catch one class.
+    """
+
+    code = "invalid_dataset_content"
+    status_code = 422
+
+
+class MalformedCSVError(InvalidDatasetContentError):
     """The file could not be parsed as CSV."""
 
     code = "malformed_csv"
+    status_code = 422
+
+
+class InvalidExcelError(InvalidDatasetContentError):
+    """The file could not be read as an ``.xlsx`` workbook.
+
+    Raised for bytes that are not a workbook at all, for a workbook with no
+    readable worksheet, and for one the reader rejects. The message describes
+    the problem in the caller's terms; nothing from the underlying reader —
+    no traceback, no internal object, no path — reaches it.
+    """
+
+    code = "invalid_excel"
+    status_code = 422
+
+
+class InvalidJSONError(InvalidDatasetContentError):
+    """The file is not JSON, or is JSON that cannot become a table."""
+
+    code = "invalid_json"
     status_code = 422
 
 

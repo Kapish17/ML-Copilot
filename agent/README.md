@@ -22,7 +22,8 @@ persisted as raw data by the agent.**
 framework; multi-agent systems; streaming; conversation memory; a frontend.
 Also still absent from the project: MLflow, Optuna, Qdrant, PostgreSQL,
 XGBoost, LightGBM, authentication, background workers, and dataset ingestion
-beyond CSV — Excel, JSON, Parquet, SQL and API sources are not implemented.
+beyond CSV, Excel (`.xlsx`) and JSON — Parquet, SQL, databases, cloud storage
+and URL ingestion are not implemented.
 
 ## What it is, and why it is bounded
 
@@ -495,7 +496,7 @@ an error in one place and lets the other four through.
 choose from — a tool is registered only when the service it wraps is present,
 so a client sees what this deployment can actually do rather than a fixed list.
 A question asked without a dataset has no `dataset_profile` or
-`run_experiment`; one asked with a CSV attached has both, for that request.
+`run_experiment`; one asked with a dataset attached has both, for that request.
 
 ### With a dataset
 
@@ -504,6 +505,16 @@ curl -X POST http://127.0.0.1:8000/api/v1/agent/ask-with-dataset \
   -F "file=@customers.csv" \
   -F "question=Analyse this dataset, find the best model, and explain why."
 ```
+
+CSV, Excel (`.xlsx`, first worksheet) and JSON (an array of objects, or an
+object holding one such array) are all accepted through this one endpoint —
+there is no `ask-with-excel` and no `ask-with-json`, because the format is
+resolved by an ingestion adapter before the agent is built. **The agent is
+never told which format arrived**: it is not in the tool arguments and not in
+the planner's context, so a run cannot vary with it. The response reports it
+under `dataset.source_format` for the caller, and identity remains the content
+fingerprint of the normalised table — the same data uploaded as CSV and as JSON
+is one dataset, with one fingerprint, in the experiment history.
 
 The dataset is a **loan**. It is validated and parsed by the ingestion path the
 profiling endpoint already uses, registered under a fixed name for the length
@@ -516,11 +527,12 @@ is filed, so a run can be found again long after the data is gone.
 Three things follow from the design rather than from a filter:
 
 **The filename cannot become a path.** The agent addresses the dataset by a
-constant, so a submitted `../../secret.csv` is not a name the tool schema
-accepts and not a name anything resolves. It survives as display text and
+constant, so a submitted `../../secret.csv` or `..\..\secret.xlsx` is not a
+name the tool schema accepts and not a name anything resolves. It survives as display text and
 reaches nothing else.
 
-**Cell values cannot become instructions.** A dataset's contents reach the
+**Cell values cannot become instructions.** A CSV field, an Excel cell and a
+JSON string are all the same thing here. A dataset's contents reach the
 planner — if at all — inside a profiling observation, where they are already
 handled as untrusted, and a profile reports structure rather than values. What
 the planner is *told* is four facts: that a dataset is available, what to call

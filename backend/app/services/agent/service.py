@@ -49,7 +49,7 @@ a script, a test or a future worker.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from agent.config import AgentConfig
@@ -117,6 +117,7 @@ class AgentService:
         registry_factory: Callable[[Any], ToolRegistry] | None,
         config: AgentConfig,
         artifacts: Any = None,
+        dataset_formats: Sequence[str] = (),
     ) -> None:
         """Wire the service to the agent's collaborators and the server's limits.
 
@@ -132,11 +133,15 @@ class AgentService:
             artifacts: The in-memory cache of fitted models, so an experiment
                 run during a question can be explained in the same question.
                 Cleared by the orchestrator when a run ends.
+            dataset_formats: The upload formats the dataset endpoint accepts,
+                for reporting in ``describe``. The agent itself never reads
+                them: a run does not vary with the format its data arrived in.
         """
         self._planner = planner
         self._registry_factory = registry_factory
         self._config = config
         self._artifacts = artifacts
+        self._dataset_formats = tuple(dataset_formats)
 
     @property
     def config(self) -> AgentConfig:
@@ -158,7 +163,7 @@ class AgentService:
             raise AgentUnavailableError(
                 NOT_CONFIGURED_MESSAGE, details={"provider_ready": False}
             )
-        return self._registry_factory(dataset.source() if dataset else None)
+        return self._registry_factory(dataset)
 
     def tool_names(self, dataset: RequestDataset | None = None) -> tuple[str, ...]:
         """The tools a run with this dataset may use.
@@ -247,6 +252,7 @@ class AgentService:
             "agent_available": self.can_run,
             "tools": list(self.tool_names()),
             "dataset_upload_supported": True,
+            "supported_dataset_formats": list(self._dataset_formats),
             "max_tool_calls": self._config.max_tool_calls,
             "max_iterations": self._config.max_iterations,
             "max_context_chars": self._config.max_context_chars,

@@ -36,6 +36,7 @@ def test_profile_returns_expected_structure(client: TestClient) -> None:
     payload = _assert_strict_json(response)
     assert set(payload) == {
         "filename",
+        "source_format",
         "generated_at",
         "dataset",
         "columns",
@@ -43,6 +44,7 @@ def test_profile_returns_expected_structure(client: TestClient) -> None:
         "target",
     }
     assert payload["filename"] == "dataset.csv"
+    assert payload["source_format"] == "csv"
     assert payload["target"] is None
     assert payload["dataset"]["row_count"] == 6
     assert payload["dataset"]["column_count"] == 6
