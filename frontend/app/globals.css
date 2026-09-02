@@ -1,0 +1,30 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-ink-50 text-ink-900 antialiased;
+  }
+
+  /* Every focusable thing must show where focus is. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-accent-500 ring-offset-1;
+  }
+}
+
+@layer utilities {
+  /* Long identifiers — fingerprints, experiment ids — wrap rather than
+     stretch a table on a narrow screen. */
+  .break-id {
+    word-break: break-all;
+  }
+}

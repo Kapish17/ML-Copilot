@@ -48,13 +48,14 @@ answer grounded in retrievable context.
 | Agentic workflows | Multi-step, tool-using analysis planned and executed by a bounded agent over an explicit tool allowlist | **implemented** |
 | Experiment tracking | Reproducible run history — dataset fingerprint, configuration, metrics and explanations, stored locally as JSON | **implemented** (MLflow not implemented) |
 | HTTP API | Dataset profiling, experiment execution, history and comparison, knowledge search and grounded answers, and the bounded agent, over REST | **implemented** |
-| Web interface | Dataset upload, run monitoring, results and chat | planned |
+| Web interface | Dashboard: dataset upload and profile, the AI Data Scientist, experiments, model comparison, SHAP, history and knowledge search | **implemented** |
 
 ## High-level architecture
 
 ```
              ┌───────────────────────┐
-             │   Next.js frontend    │   (planned)
+             │   Next.js dashboard   │   ✓ upload · profile · agent ·
+             │  presentation only    │     experiments · SHAP · knowledge
              └───────────┬───────────┘
                          │ HTTP
              ┌───────────▼───────────┐
@@ -115,7 +116,7 @@ layer.
 | Agents | Bounded tool-calling orchestration over the existing services, exposed as `POST /api/v1/agent/ask` | **implemented** |
 | Agent frameworks | LangChain, LangGraph, AutoGen, CrewAI | **not implemented** |
 | Database | PostgreSQL | planned |
-| Frontend | Next.js, TypeScript | planned |
+| Frontend | Next.js, TypeScript, React, Tailwind CSS | **implemented** |
 | Local orchestration | Docker Compose | skeleton only |
 
 ## Repository layout
@@ -123,7 +124,7 @@ layer.
 ```
 ml-copilot/
 ├── backend/       FastAPI service (api, core, models, schemas, services, tests)
-├── frontend/      Next.js application (placeholder)
+├── frontend/      Next.js dashboard — the presentation layer over the API
 ├── ml/            Preprocessing, training, selection, explainability, experiment tracking
 ├── rag/           Documentation and experiment retrieval (chunking, embeddings, vector store)
 ├── llm/           Provider abstraction, prompts, grounding, citation validation
@@ -1545,7 +1546,7 @@ works. The test suite builds a real index over this repository's own
 documentation and drives `/ask` through a fake provider, so the full HTTP path
 is exercised with no network call and no key.
 
-**Not implemented:** streaming, conversation memory, a frontend,
+**Not implemented:** streaming, conversation memory,
 authentication and rate limiting. The agent described below is a library and
 has no endpoint of its own.
 
@@ -1803,6 +1804,98 @@ orchestration moves.
 
 ---
 
+## The dashboard
+
+`frontend/` is a Next.js (TypeScript, React, Tailwind) application, and it is a
+**presentation layer only**: it computes no statistic, fits no model, ranks no
+experiment and retrieves no passage. Every number it shows was produced by the
+backend and is rendered. Where a screen appears to judge something — which
+model won, whether a metric improved, which run is best — it is displaying a
+decision the backend already made and reported.
+
+```
+Frontend  ──HTTP──▶  FastAPI  ──▶  Services  ──▶  ML / RAG / LLM / Agent
+```
+
+### The workflow
+
+```
+ML COPILOT · AI Data Scientist
+Upload → Analyse → Experiment → Explain
+
+  [ Upload dataset ]   CSV · Excel (.xlsx) · JSON
+        ↓
+  Dataset      Rows · Columns · Task · Target · Quality findings
+        ↓
+  AI Data Scientist   "Which model performs best and why?"
+        ↓             profiles, trains, explains, searches — then answers
+  Experiment   model comparison · metrics · SHAP · citations
+        ↓
+  History      every run, found by the data's fingerprint
+```
+
+Upload the same data as `.csv`, as `.xlsx` and as `.json`: the fingerprint is
+identical, so all three runs appear as one dataset in the history. That is the
+clearest demonstration that the format stopped mattering at ingestion.
+
+### Routes
+
+| Route | What it is |
+| --- | --- |
+| `/` | Redirects to the dashboard |
+| `/dashboard` | Upload, profile, ask the AI Data Scientist, run an experiment |
+| `/experiments` | Stored runs, and comparison of any two or more |
+| `/experiments/[id]` | One run in full — the page an experiment citation links to |
+| `/knowledge` | Retrieval and grounded answers over the project's own documentation |
+
+### What it is careful about
+
+- **Cross-validated scores and the test score are shown as separate, labelled
+  column groups.** Candidates are scored over folds of the training rows; only
+  the winner is measured, once, on rows no model has seen. Presenting them as
+  one column is the easiest way to make a model look better than it is.
+- **Metric direction is read from the backend, never assumed** — F1 rises when
+  a model improves and RMSE falls, and each is labelled accordingly.
+- **The agent's status leads, the prose follows.** All four outcomes arrive as
+  HTTP 200 and only `completed` is an answer to act on.
+- **A citation links only where a page exists.** Experiment citations link to
+  that run's page; documentation citations are labelled with their source file
+  and not linked, because a link that goes nowhere is indistinguishable from a
+  fabricated citation. Rejected citations are shown as rejected.
+- **Attribution is not causation** — every explanation carries that sentence.
+- **Nothing hidden is reconstructed:** no chain-of-thought, no system prompt,
+  no provider name, no tool argument *values*.
+
+### Security
+
+The frontend holds **no credential of any kind**. Its only configuration is
+`NEXT_PUBLIC_API_BASE_URL`, which is public by necessity — the browser makes
+the requests. `LLM_API_KEY` lives on the server and never reaches this code.
+Uploads go to the configured backend and nowhere else; nothing about a dataset
+is written to `localStorage`, `sessionStorage`, a cookie or a URL; and no
+filesystem path, traceback or provider exception is ever rendered.
+
+### Running it
+
+```bash
+cd frontend
+npm install
+cp .env.example .env.local     # NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000
+npm run dev                    # http://127.0.0.1:3000
+```
+
+The backend must be running, and its `CORS_ALLOW_ORIGINS` must include the
+dashboard's origin — the defaults already allow `http://localhost:3000` and
+`http://127.0.0.1:3000`. Without a language-model credential or a built index
+the affected features report themselves unavailable in the header, and
+everything else still works.
+
+`npm test` runs the component and page suite (Vitest and Testing Library, with
+the API mocked at `fetch`). No test needs a running backend or a credential.
+See [`frontend/README.md`](frontend/README.md) for the full architecture.
+
+---
+
 ## Current implementation status
 
 **Implemented**
@@ -1864,6 +1957,11 @@ orchestration moves.
   Excel (`.xlsx`) and JSON into one standardised DataFrame, shared by the
   profiling, experiment and agent endpoints, with identity taken from the
   normalised data rather than the file.
+- A Next.js dashboard over all of it: upload and profile a dataset, ask the AI
+  Data Scientist, run and read an experiment with its model comparison and SHAP
+  explanation, browse and compare the history, and search the project's own
+  documentation — a presentation layer that computes nothing itself and holds
+  no credential.
 - Test suites covering the backend service, the API contract, the ML layer, the
   retrieval layer, the language-model layer and the agent layer.
 
@@ -1880,8 +1978,7 @@ orchestration moves.
 - Streaming answers and conversation memory — every question is independent
 - PostgreSQL, Qdrant and any database access
 - Background execution — no Celery, Redis, queue or worker; runs are synchronous
-- Authentication and rate limiting
-- Frontend application
+- Authentication, rate limiting and multi-user support
 - Containerisation and deployment
 
 ### Available endpoints
@@ -1906,7 +2003,8 @@ Interactive API documentation is served at `/docs`.
 
 ## Local setup
 
-**Requirements:** Python 3.11 or newer.
+**Requirements:** Python 3.11 or newer for the backend; Node.js 20 or newer for
+the dashboard.
 
 ```bash
 git clone <repository-url>
@@ -1959,6 +2057,26 @@ language-model key is configured. To make `/search` and `/ask` useful, build the
 index first — see `rag/README.md` — and set `LLM_API_KEY` in your `.env` for
 `/ask`. `GET /api/v1/knowledge/status` reports what is currently available.
 
+## Running the dashboard
+
+With the backend running, in a second terminal:
+
+```bash
+cd frontend
+npm install
+cp .env.example .env.local     # NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000
+npm run dev
+```
+
+The dashboard starts on <http://127.0.0.1:3000> and redirects to `/dashboard`.
+
+The browser calls the backend directly, so the backend must permit the
+dashboard's origin. `CORS_ALLOW_ORIGINS` defaults to
+`http://localhost:3000,http://127.0.0.1:3000`; set it in `.env` to change or
+disable that. **No secret belongs in the frontend's environment** — everything
+named `NEXT_PUBLIC_` is inlined into the browser bundle, and `LLM_API_KEY`
+stays on the server.
+
 ## Running the tests
 
 From the repository root, which runs the backend, ML, retrieval,
@@ -1986,6 +2104,17 @@ Two optional tests skip themselves unless explicitly enabled: the real
 sentence-transformer model (needs the package installed and the model cached)
 and the real LLM provider (needs a credential *and* `RUN_LLM_INTEGRATION=1`).
 
+The dashboard has its own suite, run from `frontend/`:
+
+```bash
+npm test          # component and page tests (Vitest + Testing Library)
+npm run lint      # ESLint
+npm run typecheck # tsc --noEmit
+```
+
+Its API is mocked at `fetch`, so it needs no running backend, no retrieval
+index and no credential either.
+
 ## Roadmap
 
 1. ~~**Project foundation** — repository structure, FastAPI service, tests~~
@@ -2002,6 +2131,6 @@ and the real LLM provider (needs a credential *and* `RUN_LLM_INTEGRATION=1`).
 12. ~~**Bounded agent** — tool registry, typed schemas, bounded execution, grounded final answers~~
 13. ~~**Agent HTTP endpoint** — `POST /api/v1/agent/ask`, budgets a request may lower, bounded outcomes~~
 14. ~~**A dataset-aware agent** — `POST /api/v1/agent/ask-with-dataset`, request-scoped uploads, never persisted~~
-15. **Multi-format ingestion** — a format-detection and adapter layer for CSV, Excel and JSON behind one standardised DataFrame *(current)*
-16. Next.js frontend
+15. ~~**Multi-format ingestion** — a format-detection and adapter layer for CSV, Excel and JSON behind one standardised DataFrame~~
+16. **Next.js dashboard** — upload, profile, the AI Data Scientist, experiments, SHAP, history and knowledge search over the existing API *(current)*
 17. Containerisation and deployment

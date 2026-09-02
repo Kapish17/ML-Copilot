@@ -8,6 +8,7 @@ module only assembles the application.
 from __future__ import annotations
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from agent.config import AgentConfig
 from agent.tools.datasets import InMemoryDatasetSource
@@ -28,6 +29,40 @@ from llm.providers import LLMProvider
 from rag.config import RagConfig
 
 DOCS_URL = "/docs"
+
+
+def _allow_browser_origins(application: FastAPI, settings: Settings) -> None:
+    """Let the dashboard, served from another origin, call this API.
+
+    The frontend is a separate service on a separate port, so every request it
+    makes is cross-origin and a browser will refuse it without this. It is the
+    one change the frontend required in the backend, and it is deliberately
+    narrow: an **explicit list of origins** from configuration, no wildcard, no
+    credentials, and only the methods and headers this API actually uses.
+
+    ``allow_credentials`` stays off because nothing here is authenticated —
+    there is no cookie and no session to protect, and turning it on would
+    forbid the wildcard-free list from ever being widened safely later. When
+    the allowlist is empty the middleware is not installed at all, so a
+    deployment that serves the frontend from the same origin gains no
+    cross-origin surface it did not ask for.
+
+    Args:
+        application: The application being assembled.
+        settings: Active settings, holding the configured origins.
+    """
+    origins = list(settings.cors_allow_origins)
+    if not origins:
+        return
+
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type"],
+        max_age=600,
+    )
 
 
 def create_app(
@@ -77,9 +112,9 @@ def create_app(
             "Profile a tabular dataset, run a complete machine-learning "
             "experiment on it, and read back the history of what has been "
             "run.\n\n"
-            "**CSV is currently supported; the ML pipeline is intentionally "
-            "format-agnostic** — everything downstream of ingestion works on "
-            "a standardised DataFrame.\n\n"
+            "**CSV, Excel (.xlsx) and JSON are supported; the ML pipeline is "
+            "intentionally format-agnostic** — everything downstream of "
+            "ingestion works on a standardised DataFrame.\n\n"
             "An experiment profiles the data, prepares it with a leakage-safe "
             "train/test split, cross-validates every candidate model on the "
             "training rows only, retrains the winner and measures it **once** "
@@ -105,9 +140,9 @@ def create_app(
             "never raise, and no chain-of-thought is returned.\n\n"
             "Runs are synchronous. Records and the retrieval index are local "
             "files: MLflow, any database, Qdrant, model serving, background "
-            "workers, authentication, streaming, conversation memory, a "
-            "frontend and any agent framework (LangChain, LangGraph, AutoGen, "
-            "CrewAI) are not implemented.\n\n"
+            "workers, authentication, streaming, conversation memory and any "
+            "agent framework (LangChain, LangGraph, AutoGen, CrewAI) are not "
+            "implemented.\n\n"
             "Every failure returns the same envelope: "
             "`{\"error\": {\"code\", \"message\", \"details\"}}`. An answer "
             "that could not be grounded is **not** a failure — it returns 200 "
@@ -129,6 +164,7 @@ def create_app(
     if dataset_source is not None:
         application.dependency_overrides[get_dataset_source] = lambda: dataset_source
 
+    _allow_browser_origins(application, config)
     register_exception_handlers(application)
     application.include_router(api_router)
 

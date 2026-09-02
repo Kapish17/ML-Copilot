@@ -33,6 +33,13 @@ DEFAULT_MAX_DATASET_COLUMNS = 1_000
 #: Parquet, SQL, databases, cloud storage and URL ingestion are not implemented.
 SUPPORTED_DATASET_EXTENSIONS = (".csv", ".xlsx", ".json")
 
+# Browser access -----------------------------------------------------------
+#: Origins the dashboard may be served from. The frontend runs as a separate
+#: service, so its requests are cross-origin and a browser blocks them without
+#: an explicit allowance. An explicit list, never a wildcard; empty disables
+#: the middleware entirely.
+DEFAULT_CORS_ALLOW_ORIGINS = ("http://localhost:3000", "http://127.0.0.1:3000")
+
 # Profiling / heuristic thresholds ------------------------------------------
 DEFAULT_PROFILE_TOP_VALUES = 10
 DEFAULT_HIGH_MISSING_RATIO = 0.40
@@ -64,6 +71,25 @@ DEFAULT_EXPLANATION_TOP_FEATURES = 50
 DEFAULT_EXPERIMENT_PAGE_LIMIT = 50
 DEFAULT_MAX_EXPERIMENT_PAGE_LIMIT = 200
 DEFAULT_MAX_COMPARISON_EXPERIMENTS = 25
+
+
+def _env_origins(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    """Read a comma-separated origin allowlist from the environment.
+
+    Args:
+        name: Environment variable name.
+        default: Value used when the variable is unset.
+
+    Returns:
+        tuple[str, ...]: The configured origins, blanks removed. An explicitly
+        empty value means "no cross-origin access", which is a meaningful
+        setting rather than a mistake: it is what a deployment serving the
+        dashboard from this same origin wants.
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return tuple(origin.strip() for origin in raw.split(",") if origin.strip())
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
@@ -108,6 +134,9 @@ class Settings:
     max_dataset_rows: int = DEFAULT_MAX_DATASET_ROWS
     max_dataset_columns: int = DEFAULT_MAX_DATASET_COLUMNS
     supported_dataset_extensions: tuple[str, ...] = SUPPORTED_DATASET_EXTENSIONS
+
+    # Browser access
+    cors_allow_origins: tuple[str, ...] = DEFAULT_CORS_ALLOW_ORIGINS
 
     # Profiling behaviour
     profile_top_values: int = DEFAULT_PROFILE_TOP_VALUES
@@ -162,6 +191,9 @@ def get_settings() -> Settings:
         app_env=os.getenv("APP_ENV", "development"),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         max_upload_bytes=_env_int("MAX_UPLOAD_MB", DEFAULT_MAX_UPLOAD_MB) * BYTES_PER_MB,
+        cors_allow_origins=_env_origins(
+            "CORS_ALLOW_ORIGINS", DEFAULT_CORS_ALLOW_ORIGINS
+        ),
         max_dataset_rows=_env_int("MAX_DATASET_ROWS", DEFAULT_MAX_DATASET_ROWS),
         max_dataset_columns=_env_int("MAX_DATASET_COLUMNS", DEFAULT_MAX_DATASET_COLUMNS),
         experiment_store_dir=(
