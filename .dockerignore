@@ -1,0 +1,68 @@
+# What the backend build context excludes.
+#
+# The context is the repository root, because the API imports `ml`, `rag`,
+# `llm` and `agent` and the retrieval layer indexes the project's own README
+# files. So this file's job is to exclude everything that is *not* backend
+# source — above all the frontend, which has its own image.
+#
+# Nothing here excludes a source file the build needs; the Dockerfile COPYs
+# each package explicitly, so an over-broad rule would fail the build loudly
+# rather than produce a subtly incomplete image.
+
+# Version control and CI
+.git/
+.gitignore
+.github/
+
+# The dashboard has its own image and its own context.
+frontend/
+
+# Python caches and environments
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Test, lint and type-check caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Local state that belongs in a volume, never in an image. The container
+# builds its own retrieval index at start-up and writes experiment records to
+# a volume; a developer's local copies of either must not be baked in.
+rag/index/
+ml/experiments/runs/
+data/raw/
+data/processed/
+
+# Local configuration and anything secret. `.env.example` is documentation and
+# is kept; a real `.env` never enters the context.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.log
+
+# Docker's own files
+Dockerfile
+*/Dockerfile
+.dockerignore
+docker-compose*.yml

@@ -1131,7 +1131,7 @@ structured result with a reason.
 ## Setup and tests
 
 ```bash
-pip install -r backend/requirements.txt -r ml/requirements.txt \
+pip install -r backend/requirements-dev.txt -r ml/requirements.txt \
             -r rag/requirements.txt -r llm/requirements.txt
 pytest              # from the repository root: backend, ML and retrieval suites
 pytest ml/tests     # ML layer only

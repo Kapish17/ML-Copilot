@@ -1,4 +1,9 @@
-# Runtime dependencies
+# Runtime dependencies of the backend service.
+#
+# Runtime only — this is what the production container installs. The test
+# dependencies live in `requirements-dev.txt`, which pulls this file in, so a
+# development environment is one extra `-r` and the image carries neither
+# pytest nor an HTTP test client.
 fastapi==0.141.1
 uvicorn==0.52.4
 python-multipart==0.0.32
@@ -8,7 +13,3 @@ pandas==3.0.5
 # dependency: xlrd, pyxlsb and the rest are deliberately absent, since .xls,
 # .xlsb and macro-enabled workbooks are not accepted formats.
 openpyxl==3.1.5
-
-# Test dependencies
-pytest==9.1.1
-httpx2==2.12.0

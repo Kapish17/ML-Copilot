@@ -103,7 +103,11 @@ backend/
 │   ├── test_api_agent.py          The agent endpoint, security and architecture
 │   ├── test_api_agent_dataset.py  The dataset-aware endpoint, and the loan it makes
 │   └── test_experiment_service.py Service layer and architecture rules
-├── requirements.txt
+├── requirements.txt      Runtime dependencies (what the container installs)
+├── requirements-dev.txt  Adds the test dependencies
+├── Dockerfile            Production image, built from the repository root
+├── docker-entrypoint.sh  Updates the retrieval index, then starts uvicorn
+├── healthcheck.py        Asks /health — used by Docker and by Compose
 └── README.md
 ```
 
@@ -689,7 +693,7 @@ experiment record and never included in a response or an error.
 ```bash
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ```
 
 ## Run
@@ -766,15 +770,19 @@ See `ml/README.md`, `rag/README.md`, `llm/README.md` and `agent/README.md`.
 | `python-multipart` | Required by FastAPI to parse multipart file uploads |
 | `pandas` | Parsing every dataset format and the statistics behind the profile |
 | `openpyxl` | Reading `.xlsx` workbooks, through pandas' Excel reader |
-| `pytest` | Test runner |
-| `httpx2` | HTTP client required by Starlette's `TestClient` |
+| `pytest` | Test runner — `requirements-dev.txt` only |
+| `httpx2` | HTTP client required by Starlette's `TestClient` — `requirements-dev.txt` only |
+
+`requirements.txt` is runtime-only, which is what the production container
+installs; `requirements-dev.txt` adds the two test packages and pulls the
+runtime file in, so a development environment is a single command.
 
 Running experiments additionally needs `ml/requirements.txt` (scikit-learn and
 SHAP), and the knowledge endpoints need `rag/requirements.txt` and
 `llm/requirements.txt`, since this service now calls all three layers:
 
 ```bash
-pip install -r backend/requirements.txt -r ml/requirements.txt \
+pip install -r backend/requirements-dev.txt -r ml/requirements.txt \
             -r rag/requirements.txt -r llm/requirements.txt
 ```
 

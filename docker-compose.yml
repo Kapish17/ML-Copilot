@@ -1,15 +1,134 @@
-# ML Copilot — local development stack (skeleton)
+# ML Copilot — the whole application, in one command.
 #
-# No services are defined yet. The backend currently runs directly with
-# uvicorn (see README.md), and the infrastructure this project will depend on
-# is added one commit at a time, together with the code that uses it:
+#   cp .env.example .env
+#   docker compose up --build
 #
-#   api       FastAPI backend (containerised once a Dockerfile is added)
-#   web       Next.js frontend
-#   postgres  metadata: datasets, runs, experiments
-#   qdrant    vector store for the RAG layer
+#   dashboard  http://localhost:3000
+#   API        http://localhost:8000
+#   API docs   http://localhost:8000/docs
 #
-# Services are intentionally left out until they are actually implemented, so
-# this file never claims more than the project delivers.
+# ---------------------------------------------------------------------------
+# The shape of it
+# ---------------------------------------------------------------------------
+#
+#   Browser ──▶ Next.js dashboard ──▶ FastAPI backend ──▶ ML / Agent / RAG / LLM
+#    :3000            :3000                 :8000
+#
+# The arrow from the browser to the backend is the one that decides this file.
+# The dashboard is a **client-side** application: the browser, not the Node
+# server, makes every API call. So the backend port is published, and the URL
+# the frontend is built with must be one the *browser* can resolve —
+# `http://localhost:8000`, never `http://backend:8000`, which resolves only
+# inside this network.
+#
+# Both services still join the default Compose network, which is what lets the
+# backend name the frontend's origin for CORS and what a future server-side
+# call would use.
+#
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+#
+# One source: the `.env` file beside this one, which Compose reads for `${...}`
+# interpolation. Every value below has a working default, so the stack runs
+# with no `.env` at all.
+#
+# The backend's environment is listed explicitly rather than injected with
+# `env_file`. That is deliberate: `.env` documents repository-relative paths
+# for the experiment store and the retrieval index, which are right for a
+# checkout and wrong for a container, where both live on volumes. Naming each
+# variable here keeps the two from colliding.
+#
+# No secret is written in this file. `LLM_API_KEY` is read from your `.env` and
+# defaults to empty — see the note on the backend service.
 
-services: {}
+name: ml-copilot
+
+services:
+  # -------------------------------------------------------------------------
+  # FastAPI: the ML pipeline, the agent, retrieval and grounded answers.
+  # -------------------------------------------------------------------------
+  backend:
+    build:
+      # The repository root, because the API imports `ml`, `rag`, `llm` and
+      # `agent`, and the retrieval layer indexes the project's own READMEs.
+      context: .
+      dockerfile: backend/Dockerfile
+    image: ml-copilot-backend:local
+    restart: unless-stopped
+    ports:
+      # Published because the browser calls this directly.
+      - "${BACKEND_PORT:-8000}:8000"
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+      # The origins a browser may call this API from. An explicit list, never
+      # a wildcard. It must match where the dashboard is actually served from,
+      # which is the host, not the Compose network.
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+
+      # Container paths, on the volumes declared below. These deliberately
+      # override the repository-relative defaults in `.env.example`.
+      EXPERIMENT_STORE_DIR: /data/experiments
+      RAG_INDEX_DIR: /data/rag-index
+
+      # Optional. Everything except answer generation works without it:
+      # profiling, experiments, SHAP, history and retrieval all run, and the
+      # dashboard reports the language-model features as unavailable rather
+      # than failing. Set it in `.env`, never here.
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+
+      # Upload and execution limits, as documented in `.env.example`.
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-25}
+      MAX_EXPERIMENT_ROWS: ${MAX_EXPERIMENT_ROWS:-200000}
+
+      # Agent ceilings. A request may lower these and never raise them.
+      AGENT_MAX_TOOL_CALLS: ${AGENT_MAX_TOOL_CALLS:-6}
+      AGENT_MAX_ITERATIONS: ${AGENT_MAX_ITERATIONS:-8}
+    volumes:
+      # Experiment records: JSON files, no data and no fitted model in them.
+      - experiment-store:/data/experiments
+      # The retrieval index, rebuilt incrementally at every start.
+      - rag-index:/data/rag-index
+      #
+      # There is deliberately no volume for uploads. An uploaded dataset is
+      # parsed in memory for one request and released; giving it a mount would
+      # quietly turn a request-scoped loan into permanent storage, which is
+      # exactly the property Commit 14 was built to guarantee.
+    # The healthcheck lives in `backend/Dockerfile` so the image and this file
+    # cannot drift apart. It asks `GET /health`, not whether a process exists.
+
+  # -------------------------------------------------------------------------
+  # Next.js: the dashboard. Presentation only — it computes nothing.
+  # -------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Inlined into the browser bundle at build time, which is why this is
+        # a build argument. It must be resolvable **by the browser**, so it is
+        # the published host URL and not the `backend` service name. Changing
+        # it requires `docker compose up --build`.
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    image: ml-copilot-frontend:local
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      backend:
+        # Waits for the backend's own healthcheck to pass, so the first page
+        # load finds a working API rather than a connection refusal. This is a
+        # courtesy, not a requirement: the dashboard handles an unreachable
+        # backend on its own and says so in the header.
+        condition: service_healthy
+    # The healthcheck lives in `frontend/Dockerfile`, for the same reason.
+
+volumes:
+  # Survives `docker compose down`, and is removed by `docker compose down -v`.
+  experiment-store:
+  rag-index:

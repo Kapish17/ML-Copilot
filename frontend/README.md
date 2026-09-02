@@ -19,11 +19,26 @@ Frontend  ──HTTP──▶  FastAPI  ──▶  Services  ──▶  ML / RAG
 
 ## Quick start
 
+### With Docker (the whole stack)
+
+From the repository root:
+
+```bash
+cp .env.example .env          # optional: every value has a working default
+docker compose up --build     # dashboard on :3000, API on :8000
+```
+
+That builds this image and the backend's, and starts both. See
+**Run with Docker** in the [root README](../README.md) for logs, rebuilds,
+persistence and troubleshooting.
+
+### Without Docker
+
 The backend must be running first; the frontend is useless without it.
 
 ```bash
 # 1. Backend (from the repository root)
-pip install -r backend/requirements.txt -r ml/requirements.txt \
+pip install -r backend/requirements-dev.txt -r ml/requirements.txt \
             -r rag/requirements.txt -r llm/requirements.txt
 uvicorn app.main:app --app-dir backend --reload      # http://127.0.0.1:8000
 
@@ -72,10 +87,51 @@ unset, a documented development default is used and a test pins that behaviour.
 
 ---
 
+## Running in a container
+
+`Dockerfile` is a three-stage build — install, build, run. The runtime stage
+carries the compiled application and nothing else: no TypeScript, no ESLint,
+no Vitest, no build tooling. `output: "standalone"` in `next.config.mjs` is
+what makes that possible; it emits a self-contained server plus only the
+`node_modules` the application actually reaches, which here is 79 MB against
+665 MB for the full dependency tree.
+
+The build runs this project's own gates — `npm run lint`, `npm run typecheck`,
+`npm run build` — so a broken image fails at `docker compose build` rather than
+at first page load.
+
+### The one thing to understand before changing the Dockerfile
+
+`NEXT_PUBLIC_API_BASE_URL` is inlined into the JavaScript bundle at **build**
+time, because the browser is what reads it. Two consequences:
+
+1. **It is a build argument, not a runtime variable.** Changing the backend
+   URL means rebuilding: `docker compose up --build`.
+2. **It must be a URL the browser can resolve.** `http://backend:8000` is the
+   Compose service name; it resolves inside the container network and nowhere
+   else, so a browser handed it would fail every request. Compose passes the
+   published host URL instead — `http://localhost:8000` by default.
+
+No backend secret is ever passed as a build argument. Anything named
+`NEXT_PUBLIC_` is served to every visitor, so only genuinely public values may
+be configured that way — and the only one this application has is the API URL.
+
+`.dockerignore` keeps `node_modules`, `.next`, coverage output and any local
+`.env` out of the build context; the image regenerates all of them and a host
+copy of the first two would be wrong for the image's platform anyway.
+
+The image runs as the base image's unprivileged `node` user and healthchecks
+itself by requesting `/dashboard` — a wedged server fails the check, a merely
+running process does not pass it.
+
+---
+
 ## Architecture
 
 ```
 frontend/
+├── Dockerfile                   Three-stage production image
+├── .dockerignore                What never enters the build context
 ├── app/                         Routes (Next.js App Router)
 │   ├── layout.tsx               The shell every page sits in
 │   ├── page.tsx                 /            → redirects to the dashboard
@@ -301,7 +357,8 @@ there.
 - Node.js 20 or newer.
 - A running ML Copilot backend, reachable at `NEXT_PUBLIC_API_BASE_URL`, with
   the dashboard's origin in its `CORS_ALLOW_ORIGINS`. The backend defaults
-  allow `http://localhost:3000` and `http://127.0.0.1:3000`.
+  allow `http://localhost:3000` and `http://127.0.0.1:3000`. Under Docker
+  Compose both are wired for you.
 - For grounded answers and the agent, the backend needs a language-model
   credential and a built retrieval index. Without either, the affected features
   report themselves unavailable in the header and everything else still works.

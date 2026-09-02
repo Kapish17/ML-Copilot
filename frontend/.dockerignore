@@ -1,0 +1,29 @@
+# Everything the dashboard image must never see.
+#
+# `node_modules` and `.next` are the important two: both are large, both are
+# regenerated inside the build, and a host copy of either would be wrong for
+# the image's platform. `.env*` matters for a different reason — a developer's
+# real configuration must not be copied into a layer.
+
+node_modules/
+.next/
+out/
+coverage/
+.turbo/
+
+# Local configuration. `.env.example` is kept: it is documentation, holds no
+# secret, and the README refers to it.
+.env
+.env.*
+!.env.example
+
+# Build and editor artefacts
+*.tsbuildinfo
+next-env.d.ts
+.DS_Store
+*.log
+npm-debug.log*
+
+# Docker's own files: nothing in the image reads them.
+Dockerfile
+.dockerignore

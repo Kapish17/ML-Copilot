@@ -1,0 +1,15 @@
+# Development and test dependencies of the backend service.
+#
+# Installing this file installs the runtime dependencies too, so a development
+# environment needs one command:
+#
+#   pip install -r backend/requirements-dev.txt
+#
+# The production container installs `requirements.txt` alone and therefore
+# ships neither of these.
+-r requirements.txt
+
+pytest==9.1.1
+
+# The HTTP client Starlette's TestClient is built on. Used only by the tests.
+httpx2==2.12.0

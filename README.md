@@ -117,14 +117,16 @@ layer.
 | Agent frameworks | LangChain, LangGraph, AutoGen, CrewAI | **not implemented** |
 | Database | PostgreSQL | planned |
 | Frontend | Next.js, TypeScript, React, Tailwind CSS | **implemented** |
-| Local orchestration | Docker Compose | skeleton only |
+| Local orchestration | Docker Compose — two services, one command | **implemented** |
 
 ## Repository layout
 
 ```
 ml-copilot/
 ├── backend/       FastAPI service (api, core, models, schemas, services, tests)
+│   └── Dockerfile         Production image, built from the repository root
 ├── frontend/      Next.js dashboard — the presentation layer over the API
+│   └── Dockerfile         Production image, three stages
 ├── ml/            Preprocessing, training, selection, explainability, experiment tracking
 ├── rag/           Documentation and experiment retrieval (chunking, embeddings, vector store)
 ├── llm/           Provider abstraction, prompts, grounding, citation validation
@@ -134,12 +136,13 @@ ml-copilot/
 ├── docs/          Project documentation
 ├── scripts/       Developer and operational scripts
 ├── .env.example   Template for local environment configuration
-└── docker-compose.yml   Skeleton for the future local stack
+├── .dockerignore  What the backend build context excludes
+└── docker-compose.yml   The whole stack: `docker compose up --build`
 ```
 
-`backend/`, `ml/`, `rag/`, `llm/` and `agent/` hold implemented code. The
-remaining directories are placeholders holding the structure the project will
-grow into.
+`backend/`, `frontend/`, `ml/`, `rag/`, `llm/` and `agent/` hold implemented
+code. `data/`, `configs/`, `docs/` and `scripts/` are placeholders holding the
+structure the project will grow into.
 
 ---
 
@@ -1962,6 +1965,10 @@ See [`frontend/README.md`](frontend/README.md) for the full architecture.
   explanation, browse and compare the history, and search the project's own
   documentation — a presentation layer that computes nothing itself and holds
   no credential.
+- Containerisation: a production image per service and a Compose stack that
+  brings the whole application up with `docker compose up --build`, with the
+  experiment store and the retrieval index on named volumes and uploaded
+  datasets still stored nowhere at all.
 - Test suites covering the backend service, the API contract, the ML layer, the
   retrieval layer, the language-model layer and the agent layer.
 
@@ -1979,7 +1986,7 @@ See [`frontend/README.md`](frontend/README.md) for the full architecture.
 - PostgreSQL, Qdrant and any database access
 - Background execution — no Celery, Redis, queue or worker; runs are synchronous
 - Authentication, rate limiting and multi-user support
-- Containerisation and deployment
+- Any deployment target beyond a local or demo Compose stack
 
 ### Available endpoints
 
@@ -1998,6 +2005,128 @@ See [`frontend/README.md`](frontend/README.md) for the full architecture.
 | `GET` | `/api/v1/knowledge/status` | Whether search and answering are available, and their limits |
 
 Interactive API documentation is served at `/docs`.
+
+---
+
+## Run with Docker
+
+The whole application — dashboard, API, ML pipeline, retrieval and agent — in
+one command.
+
+```bash
+git clone <repository-url>
+cd ml-copilot
+cp .env.example .env          # optional: every value has a working default
+docker compose up --build
+```
+
+| | |
+| --- | --- |
+| Dashboard | <http://localhost:3000> |
+| API | <http://localhost:8000> |
+| API docs | <http://localhost:8000/docs> |
+
+The first build takes a few minutes — scikit-learn, SHAP and the Next.js build
+are the bulk of it. Afterwards `docker compose up` starts in seconds.
+
+```bash
+docker compose logs -f            # follow both services
+docker compose logs -f backend    # one of them
+docker compose down               # stop; volumes are kept
+docker compose down -v            # stop and discard the stored data
+docker compose up --build         # rebuild after a code change
+```
+
+### What runs where
+
+```
+Browser ──▶ Next.js dashboard ──▶ FastAPI backend ──▶ ML / Agent / RAG / LLM
+ :3000            :3000                  :8000
+```
+
+The dashboard is a **client-side** application: the browser, not the Node
+server, makes every API call. That single fact explains most of the Compose
+file. The backend port is published because the browser talks to it directly,
+and the URL the dashboard is built with must be one the *browser* can
+resolve — `http://localhost:8000`, never `http://backend:8000`, which is a
+Compose service name that exists only inside the container network.
+
+`NEXT_PUBLIC_API_BASE_URL` is inlined into the JavaScript bundle at build time,
+so changing it means rebuilding: `docker compose up --build`.
+
+### Configuration
+
+Everything has a default, so the stack runs with no `.env` at all. One
+variable is worth setting and it is the only secret:
+
+| Variable | Required | What it does |
+| --- | --- | --- |
+| `LLM_API_KEY` | **Optional** | Enables answer generation. See below. |
+| `CORS_ALLOW_ORIGINS` | no | Origins the browser may call the API from. Explicit list, never `*`. Default: `http://localhost:3000,http://127.0.0.1:3000` |
+| `NEXT_PUBLIC_API_BASE_URL` | no | Where the browser sends API requests. Default: `http://localhost:8000` |
+| `FRONTEND_PORT` / `BACKEND_PORT` | no | Host ports. Change both the URL and the CORS list to match. |
+| `LLM_MODEL`, `LLM_BASE_URL` | no | Which model, and which OpenAI-compatible endpoint |
+| `MAX_UPLOAD_MB`, `AGENT_MAX_TOOL_CALLS`, … | no | Limits, documented in `.env.example` |
+
+**Without an API key**, dataset profiling, experiments, cross-validation,
+SHAP, experiment history and retrieval search all work. Only *answer
+generation* — `POST /api/v1/ask` and the AI Data Scientist — needs a
+credential, and the dashboard reports those two as unavailable in its header
+instead of failing. Nothing crashes and nothing else is affected.
+
+To enable them, put a key in your `.env`:
+
+```bash
+LLM_API_KEY=your-key-here
+```
+
+`LLM_BASE_URL` points the same provider at any OpenAI-compatible endpoint —
+vLLM, Ollama, LM Studio, OpenRouter — so a local model works without an
+external credential.
+
+The key is read from `.env`, which is git-ignored. It is never written into a
+Dockerfile, never passed to the frontend, and never baked into an image.
+
+### What survives a restart
+
+| | Survives `down` | Survives `down -v` |
+| --- | --- | --- |
+| Experiment records (`experiment-store` volume) | yes | no |
+| Retrieval index (`rag-index` volume) | yes | no |
+| **Uploaded datasets** | **never stored at all** | — |
+
+An uploaded dataset is parsed in memory for one request and released — no
+volume, no temporary file, nothing on disk. Containerising the application did
+not change that, and there is deliberately no mount that could. An experiment
+record holds the dataset's content fingerprint, its shape, the preprocessing
+decisions and the scores; it holds no rows and no fitted model.
+
+The retrieval index is rebuilt incrementally at every start, so a fresh volume
+is never empty and a wiped one repairs itself.
+
+### Troubleshooting
+
+**The dashboard loads but every request fails, or the header says "Backend
+unreachable".** Almost always CORS or the API URL. Check that
+`CORS_ALLOW_ORIGINS` contains the origin you actually opened —
+`http://localhost:3000` and `http://127.0.0.1:3000` are *different* origins to
+a browser — and that `NEXT_PUBLIC_API_BASE_URL` matches the published backend
+port. After changing either, rebuild: `docker compose up --build`.
+
+**"port is already allocated".** Something else holds 3000 or 8000. Set
+`FRONTEND_PORT` / `BACKEND_PORT` in `.env`, and update
+`NEXT_PUBLIC_API_BASE_URL` and `CORS_ALLOW_ORIGINS` to match.
+
+**The Knowledge page is empty.** The index builds on first start; check
+`docker compose logs backend` for the `entrypoint: updating the retrieval
+index` line. `GET /api/v1/knowledge/status` reports what is available.
+
+**The AI Data Scientist says it is unavailable.** No `LLM_API_KEY` is
+configured. That is the expected state — everything else still works.
+
+**The backend never becomes healthy.** `docker compose logs backend`. The
+healthcheck asks `GET /health`; a container that is up but unhealthy is a
+container whose application did not start.
 
 ---
 
@@ -2031,7 +2160,7 @@ scikit-learn and SHAP). From the repository root, install both for a full
 development environment:
 
 ```bash
-pip install -r backend/requirements.txt -r ml/requirements.txt \
+pip install -r backend/requirements-dev.txt -r ml/requirements.txt \
             -r rag/requirements.txt -r llm/requirements.txt
 ```
 
@@ -2132,5 +2261,5 @@ index and no credential either.
 13. ~~**Agent HTTP endpoint** — `POST /api/v1/agent/ask`, budgets a request may lower, bounded outcomes~~
 14. ~~**A dataset-aware agent** — `POST /api/v1/agent/ask-with-dataset`, request-scoped uploads, never persisted~~
 15. ~~**Multi-format ingestion** — a format-detection and adapter layer for CSV, Excel and JSON behind one standardised DataFrame~~
-16. **Next.js dashboard** — upload, profile, the AI Data Scientist, experiments, SHAP, history and knowledge search over the existing API *(current)*
-17. Containerisation and deployment
+16. ~~**Next.js dashboard** — upload, profile, the AI Data Scientist, experiments, SHAP, history and knowledge search over the existing API~~
+17. **Containerisation** — production images for both services and a one-command Compose stack *(current)*
