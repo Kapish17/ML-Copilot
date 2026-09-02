@@ -1,5 +1,11 @@
 # ML Copilot — AI Data Scientist
 
+<!-- Replace OWNER/REPO with this repository's path once it has a remote.
+     The workflow file is .github/workflows/ci.yml, so the badge path is
+     .../actions/workflows/ci.yml/badge.svg — only the owner and repository
+     name are unknown here. -->
+[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+
 ML Copilot is a production-oriented AI system that will act as an assistant data
 scientist: you give it a dataset and a question, it profiles the data, trains and
 evaluates candidate models, explains what the models learned, and answers
@@ -118,6 +124,7 @@ layer.
 | Database | PostgreSQL | planned |
 | Frontend | Next.js, TypeScript, React, Tailwind CSS | **implemented** |
 | Local orchestration | Docker Compose — two services, one command | **implemented** |
+| Continuous integration | GitHub Actions — backend, frontend and a Docker stack smoke test | **implemented** |
 
 ## Repository layout
 
@@ -134,15 +141,16 @@ ml-copilot/
 ├── data/          Local datasets — raw and processed (git-ignored contents)
 ├── configs/       Configuration files
 ├── docs/          Project documentation
-├── scripts/       Developer and operational scripts
+├── .github/       CI workflow — tests, lint, and a Docker stack smoke test
+├── scripts/       smoke-test.sh — 30 checks against a running stack
 ├── .env.example   Template for local environment configuration
 ├── .dockerignore  What the backend build context excludes
 └── docker-compose.yml   The whole stack: `docker compose up --build`
 ```
 
-`backend/`, `frontend/`, `ml/`, `rag/`, `llm/` and `agent/` hold implemented
-code. `data/`, `configs/`, `docs/` and `scripts/` are placeholders holding the
-structure the project will grow into.
+`backend/`, `frontend/`, `ml/`, `rag/`, `llm/`, `agent/`, `scripts/` and
+`.github/` hold implemented code. `data/`, `configs/` and `docs/` are
+placeholders holding the structure the project will grow into.
 
 ---
 
@@ -1969,6 +1977,10 @@ See [`frontend/README.md`](frontend/README.md) for the full architecture.
   brings the whole application up with `docker compose up --build`, with the
   experiment store and the retrieval index on named volumes and uploaded
   datasets still stored nowhere at all.
+- Continuous integration: a GitHub Actions workflow that runs the backend
+  suites, the frontend's four gates, and — the part a local checkout cannot
+  always do — builds both images, starts the Compose stack and runs a
+  thirty-check smoke test against the running containers, needing no secret.
 - Test suites covering the backend service, the API contract, the ML layer, the
   retrieval layer, the language-model layer and the agent layer.
 
@@ -2206,6 +2218,78 @@ disable that. **No secret belongs in the frontend's environment** — everything
 named `NEXT_PUBLIC_` is inlined into the browser bundle, and `LLM_API_KEY`
 stays on the server.
 
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to `main` and every pull request
+targeting it. Three jobs, in parallel:
+
+| Job | What it does |
+| --- | --- |
+| **Backend tests** | Installs the documented development dependencies, compiles every module, runs the five pytest suites |
+| **Frontend tests** | `npm ci` from the lockfile, then lint, typecheck, the Vitest suite and a production build |
+| **Docker stack smoke test** | Builds both images, starts the Compose stack, waits for the healthchecks, and runs `scripts/smoke-test.sh` against the running containers |
+
+**No secret is required and none is used.** The workflow reads nothing from
+`secrets.`, and the token is `contents: read`. The suites run on the project's
+deterministic fake provider, and the smoke test exercises the paths that need
+no language model — upload, profile, cross-validated experiment, SHAP,
+history, retrieval — while checking that the two paths which *do* need a
+credential return the documented structured refusal rather than a traceback.
+That means CI works unchanged on a fork.
+
+### The Docker job
+
+This is the addition that matters. Commit 17 wrote the images and the Compose
+stack but could not run them: the environment they were built in blocks
+container registries by policy, so `docker compose build` never completed
+there. On a GitHub-hosted runner it does, and this job is where that gap
+closes.
+
+```
+docker compose config -q      # fails on an unresolvable variable, cheaply
+docker compose build          # both images, from the committed Dockerfiles
+docker compose up -d --wait   # blocks until each image's healthcheck passes
+./scripts/smoke-test.sh       # 30 checks against the running stack
+docker compose logs           # on failure only
+docker compose down -v        # always, so nothing is left behind
+```
+
+`--wait` is what makes the job reliable: it blocks on the healthchecks the
+images define, so the smoke test never races a container that is running but
+not yet serving. A `sleep` would pass on a fast runner and fail on a slow one.
+
+### The smoke test
+
+`scripts/smoke-test.sh` runs against any live stack, in CI or locally:
+
+```bash
+docker compose up -d --wait
+./scripts/smoke-test.sh
+```
+
+It checks the backend's health, service info, OpenAPI schema and capabilities;
+that the retrieval index really was built by the entrypoint and that search
+returns cited passages; a full functional workflow on a 60-row deterministic
+dataset — profile, cross-validated experiment, SHAP explanation, stored record,
+found again by its content fingerprint; all four dashboard routes; and the
+three things that fail *silently* in a container and nowhere else:
+
+- **The URL in the browser bundle.** Every script the dashboard loads is
+  fetched and searched. `http://backend:8000` resolves inside the Compose
+  network and nowhere else, so a stack built with it looks healthy from the
+  outside and is broken for every visitor. The published URL must be present
+  and the service name must not.
+- **CORS.** The dashboard's origin must be permitted, the allowance must not
+  be a wildcard, and an origin outside the list must get nothing.
+- **Secrets.** No credential-shaped string in any response or in the bundle,
+  and no mention of an API key in what the browser downloads.
+
+Both of the first two were verified to *fail* when the corresponding mistake
+is made — a bundle built with the internal hostname, and a backend whose
+allowlist does not include the dashboard — so the checks are known to bite.
+
+---
+
 ## Running the tests
 
 From the repository root, which runs the backend, ML, retrieval,
@@ -2262,4 +2346,5 @@ index and no credential either.
 14. ~~**A dataset-aware agent** — `POST /api/v1/agent/ask-with-dataset`, request-scoped uploads, never persisted~~
 15. ~~**Multi-format ingestion** — a format-detection and adapter layer for CSV, Excel and JSON behind one standardised DataFrame~~
 16. ~~**Next.js dashboard** — upload, profile, the AI Data Scientist, experiments, SHAP, history and knowledge search over the existing API~~
-17. **Containerisation** — production images for both services and a one-command Compose stack *(current)*
+17. ~~**Containerisation** — production images for both services and a one-command Compose stack~~
+18. **Continuous integration** — GitHub Actions running the suites, the gates, and a real Docker stack smoke test *(current)*

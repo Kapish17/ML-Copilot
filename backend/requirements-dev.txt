@@ -13,3 +13,8 @@ pytest==9.1.1
 
 # The HTTP client Starlette's TestClient is built on. Used only by the tests.
 httpx2==2.12.0
+
+# Reads the CI workflow so its jobs and steps can be asserted structurally
+# rather than by matching strings in a YAML file. Test-only: no application
+# code parses YAML, and the production image installs neither this nor pytest.
+PyYAML==6.0.2
