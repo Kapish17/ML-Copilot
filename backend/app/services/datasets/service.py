@@ -25,12 +25,14 @@ cannot tell which adapter produced the data.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import pandas as pd
 
 from app.core.config import Settings
+from app.core.errors import DatasetError
 from app.schemas.dataset import DatasetProfileResponse, TargetProfile
 from app.services.datasets.ingestion import (
     DatasetAdapterRegistry,
@@ -49,6 +51,8 @@ from app.services.datasets.validation import (
     safe_filename,
     validate_size,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -145,17 +149,16 @@ class DatasetProfilingService:
         Raises:
             DatasetError: If the upload or its content fails validation.
         """
-        name = safe_filename(filename)
-        detected = detect_format(
-            name, self._settings, content_type or declared_content_type(upload)
-        )
-        content = await read_upload(upload, self._settings)
-        ingested = self._adapters.load(
-            content, detected, self._settings, filename=name
-        )
-        return LoadedDataset(
-            frame=ingested.frame, filename=name, format=ingested.source_format
-        )
+        try:
+            name = safe_filename(filename)
+            detected = detect_format(
+                name, self._settings, content_type or declared_content_type(upload)
+            )
+            content = await read_upload(upload, self._settings)
+        except DatasetError as exc:
+            logger.info("Rejected an upload before parsing: %s", exc.code)
+            raise
+        return self._accept(content, detected, name)
 
     def load_content(
         self,
@@ -177,11 +180,60 @@ class DatasetProfilingService:
         Raises:
             DatasetError: If the content fails validation.
         """
-        name = safe_filename(filename)
-        detected = detect_format(name, self._settings, content_type)
-        validate_size(len(content), self._settings)
-        ingested = self._adapters.load(
-            content, detected, self._settings, filename=name
+        try:
+            name = safe_filename(filename)
+            detected = detect_format(name, self._settings, content_type)
+            validate_size(len(content), self._settings)
+        except DatasetError as exc:
+            logger.info("Rejected an upload before parsing: %s", exc.code)
+            raise
+        return self._accept(content, detected, name)
+
+    def _accept(
+        self, content: bytes, dataset_format: DatasetFormat, name: str
+    ) -> LoadedDataset:
+        """Parse validated bytes, recording the outcome either way.
+
+        This is the one place an upload becomes a DataFrame, so it is the right
+        place to say in the log whether that worked. Both lines carry the
+        format and, on failure, the stable error code — enough to answer "are
+        people's Excel files failing?" from a log alone.
+
+        **What is deliberately absent: the filename.** It is chosen by whoever
+        made the request, and text a caller chooses does not belong in a line
+        an operator reads as though the server wrote it. The shape of the data
+        is the useful part, and it is the server's own measurement.
+
+        Args:
+            content: The validated bytes.
+            dataset_format: The format detection settled on.
+            name: Path-free filename, carried into the dataset's metadata.
+
+        Returns:
+            LoadedDataset: The parsed frame and the facts about its origin.
+
+        Raises:
+            DatasetError: If the adapter rejects the bytes.
+        """
+        try:
+            ingested = self._adapters.load(
+                content, dataset_format, self._settings, filename=name
+            )
+        except DatasetError as exc:
+            logger.info(
+                "Rejected a %s upload of %d bytes: %s",
+                dataset_format.value,
+                len(content),
+                exc.code,
+            )
+            raise
+
+        rows, columns = ingested.frame.shape
+        logger.info(
+            "Ingested a %s dataset: %d rows x %d columns",
+            ingested.source_format.value,
+            rows,
+            columns,
         )
         return LoadedDataset(
             frame=ingested.frame, filename=name, format=ingested.source_format

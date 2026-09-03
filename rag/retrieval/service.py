@@ -164,6 +164,14 @@ class RetrievalService:
 
         candidates = self._store.count(active_filter)
         if candidates == 0:
+            # Worth a line of its own: an empty result with no candidates means
+            # the filter or the index is the problem, not the question, and
+            # that is the distinction people waste time on.
+            logger.info(
+                "Search matched no candidates (query %d chars, filter=%s)",
+                len(text),
+                active_filter.as_dict() or "none",
+            )
             return RetrievalResponse(
                 question=text,
                 results=(),
@@ -185,6 +193,20 @@ class RetrievalService:
         results = tuple(
             RetrievalResult.from_chunk(hit.chunk, rank=rank, score=hit.score)
             for rank, hit in enumerate(hits, start=1)
+        )
+        # **The query text is never logged.** It is written by whoever is
+        # asking, may quote their own data, and is exactly the kind of thing
+        # that turns a log into a record of what people typed. Its length,
+        # what it was filtered by and how well it matched are enough to tell
+        # whether retrieval is working.
+        logger.info(
+            "Search returned %d of %d candidate(s) at threshold %.2f "
+            "(query %d chars, best score %s)",
+            len(results),
+            candidates,
+            threshold,
+            len(text),
+            f"{results[0].score:.3f}" if results else "none",
         )
         return RetrievalResponse(
             question=text,

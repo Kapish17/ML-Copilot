@@ -688,6 +688,44 @@ the limits actually in force.
 from the environment, never from a body, never logged, never stored in an
 experiment record and never included in a response or an error.
 
+## Logging and request correlation
+
+Every request is given an id at the edge by `app/api/middleware.py`, bound to a
+context variable for the length of the request, attached to every log record by
+a filter in `app/core/logging.py`, and returned in the **`X-Request-ID`**
+response header:
+
+```
+2026-09-03T11:20:14 INFO  app.api.middleware [3f9a1c7e2b8d4a15] POST /api/v1/experiments/run -> 200 in 14428.6ms
+2026-09-03T11:20:14 INFO  app.services.datasets.service [3f9a1c7e2b8d4a15] Ingested a csv dataset: 300 rows x 11 columns
+```
+
+One upload produces lines from `app`, `ml`, `rag` and `llm`. The id is what
+selects one request's lines out of all of them, and a user reporting a problem
+can quote the header they got. A caller may send their own id to correlate
+across a hop it made first — it is honoured only if it matches
+`[A-Za-z0-9_-]{1,64}`, because this value is written into log lines and a
+newline or an escape sequence in it would let a caller forge one. It is an
+opaque per-request label: not a session, not a user identifier, and stored
+nowhere.
+
+`LOG_LEVEL` raises the level on this project's five loggers — `app`, `ml`,
+`rag`, `llm`, `agent` — and on nothing else, so `DEBUG` does not turn on every
+installed package.
+
+**What the logs contain**, at INFO: application start-up (version, environment,
+whether a credential is configured, whether an index is present — all
+booleans); one line per request with method, path, status and duration; dataset
+ingestion by format and shape; experiment start and finish with the selected
+model and duration; each agent tool call by name, outcome and duration; the
+agent run's final status; retrieval result counts; and each language-model call
+by provider, model, finish reason and token counts.
+
+**What they never contain:** a credential, an uploaded filename, a dataset row
+or column value, a prompt, a completion, a retrieval query's text, a raw tool
+argument, chain-of-thought, or a filesystem path.
+`backend/tests/test_observability.py` asserts several of these directly.
+
 ## Setup
 
 ```bash

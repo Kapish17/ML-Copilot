@@ -236,6 +236,22 @@ class AgentService:
             )
             raise AgentRunFailedError.from_result(result)
 
+        # One line per run, after the per-tool lines the orchestrator writes.
+        # The *outcome* is the operationally interesting part: a run that
+        # finishes `insufficient_evidence` is working correctly and a run that
+        # finishes `grounding_failed` is a model that cited something it was
+        # not given, and those two need telling apart without reading a
+        # response body.
+        #
+        # The question is not logged, and neither is the answer.
+        logger.info(
+            "Agent run %s after %d tool call(s) in %d iteration(s) "
+            "(with_dataset=%s)",
+            result.status.value,
+            result.tool_call_count,
+            result.iterations,
+            dataset is not None,
+        )
         return result
 
     def describe(self) -> dict[str, Any]:

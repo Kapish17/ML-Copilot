@@ -327,12 +327,21 @@ or a baseline comparison really looks like.
 
 ---
 
-## Screenshots
+## Seeing it
 
-*Placeholder — no screenshots are checked in.* To capture your own, run the
-backend and `npm run dev`, then use the workflow above. The views worth
-capturing are the dashboard with a profile and a grounded answer, the
-experiment result with its two column groups, and an experiment detail page.
+No screenshots are checked in — an image of a dashboard goes stale the first
+time a label changes, and this one is two commands away from being live:
+
+```bash
+docker compose up --build
+open http://localhost:3000/dashboard      # then upload examples/customer_churn.csv
+```
+
+The [five-minute demo](../README.md#the-five-minute-demo) walks the whole
+product and says what to expect at each step, down to the scores. The three
+views worth looking at are the dashboard with a profile and a grounded answer,
+the experiment result with its two column groups, and an experiment detail
+page.
 
 ---
 

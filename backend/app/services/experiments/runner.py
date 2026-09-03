@@ -249,6 +249,23 @@ class ExperimentRunner:
         self._check_size(frame)
         target = self._resolve_target(frame, options, warnings)
 
+        # A run is the longest thing this service does and the only one that
+        # holds its request open for seconds or minutes. Two lines — one when
+        # it starts, one when it finishes — turn "the API is hanging" into "it
+        # is cross-validating six models on 40,000 rows".
+        #
+        # Shape, strategy and column *names* only. No cell value is logged
+        # here or anywhere below.
+        logger.info(
+            "Experiment started: %d rows x %d columns, target=%r, strategy=%s, "
+            "models=%s",
+            len(frame),
+            frame.shape[1],
+            target,
+            options.strategy,
+            len(options.models) or "all",
+        )
+
         profile = self._datasets.profile_frame(
             frame,
             filename=dataset_label,
@@ -296,11 +313,23 @@ class ExperimentRunner:
             else None
         )
 
+        duration = round(time.perf_counter() - started, 3)
+        logger.info(
+            "Experiment finished in %.1fs: %s selected on %s, stored as %s "
+            "(explanation=%s, warnings=%d)",
+            duration,
+            record.selection.selected_model,
+            record.selection.primary_metric,
+            record.experiment_id,
+            record.explainability.status if record.explainability else "skipped",
+            len(warnings),
+        )
+
         return ExperimentRunResult(
             record=record,
             warnings=tuple(warnings),
             stored=True,
-            duration_seconds=round(time.perf_counter() - started, 3),
+            duration_seconds=duration,
             artifacts=artifacts,
         )
 

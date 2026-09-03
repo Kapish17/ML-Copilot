@@ -7,6 +7,10 @@ module only assembles the application.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -21,14 +25,71 @@ from app.api.dependencies import (
     get_rag_config,
 )
 from app.api.error_handlers import register_exception_handlers
+from app.api.middleware import RequestContextMiddleware
 from app.api.v1 import api_router
 from app.core.config import Settings, get_settings
+from app.core.logging import REQUEST_ID_HEADER, configure_logging
 from app.schemas.system import HealthStatus, ServiceInfo
-from llm.config import LLMConfig
+from llm.config import LLMConfig, config_from_env as llm_config_from_env
 from llm.providers import LLMProvider
-from rag.config import RagConfig
+from rag.config import RagConfig, config_from_env as rag_config_from_env
+
+logger = logging.getLogger(__name__)
 
 DOCS_URL = "/docs"
+
+#: Descriptions for the tag groups the generated documentation renders. Without
+#: these, `/docs` shows five bare headings and a reader has to open an endpoint
+#: to learn what a group is for.
+OPENAPI_TAGS: list[dict[str, str]] = [
+    {
+        "name": "system",
+        "description": (
+            "Service identity and liveness. `/health` is what both container "
+            "healthchecks call."
+        ),
+    },
+    {
+        "name": "datasets",
+        "description": (
+            "Upload a CSV, Excel (`.xlsx`) or JSON file and get its structure, "
+            "per-column statistics, data-quality findings and an optional "
+            "target analysis. Nothing is trained and nothing is stored: the "
+            "file is parsed in memory for the request and released."
+        ),
+    },
+    {
+        "name": "experiments",
+        "description": (
+            "Run a complete experiment and read the history back. One run "
+            "profiles the data, prepares it with a leakage-safe split, "
+            "cross-validates every candidate on the training rows, retrains "
+            "the winner and measures it **once** on the untouched test set, "
+            "explains it with SHAP and stores the result under the dataset's "
+            "content fingerprint. Cross-validated and held-out scores are "
+            "always reported as separate fields."
+        ),
+    },
+    {
+        "name": "knowledge",
+        "description": (
+            "Search the project's own documentation and its experiment "
+            "history, and answer questions from what was retrieved. Search "
+            "needs no credential. An answer that cannot be grounded in "
+            "retrieved evidence is returned as a status, not as an error."
+        ),
+    },
+    {
+        "name": "agent",
+        "description": (
+            "Let the system choose which of its own capabilities a question "
+            "needs, then answer from what those steps returned. Bounded by "
+            "construction: four registered tools, typed arguments validated "
+            "before anything runs, and budgets a request may lower and never "
+            "raise. No chain-of-thought is returned."
+        ),
+    },
+]
 
 
 def _allow_browser_origins(application: FastAPI, settings: Settings) -> None:
@@ -60,9 +121,69 @@ def _allow_browser_origins(application: FastAPI, settings: Settings) -> None:
         allow_origins=origins,
         allow_credentials=False,
         allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["Content-Type"],
+        # `X-Request-ID` is accepted so a caller may supply its own, and
+        # exposed so a browser can read the one the server chose. It is an
+        # opaque per-request label — not a session, not a user identifier, and
+        # not stored anywhere.
+        allow_headers=["Content-Type", REQUEST_ID_HEADER],
+        expose_headers=[REQUEST_ID_HEADER],
         max_age=600,
     )
+
+
+def _describe_startup(settings: Settings) -> dict[str, object]:
+    """Return the facts worth logging once, at start-up.
+
+    Booleans and counts. Whether a credential is configured is operationally
+    important — it is the difference between "the agent is broken" and "the
+    agent was never switched on" — and it is answerable without going anywhere
+    near the value itself. Neither the key, nor the variable's contents, nor
+    any absolute path appears here.
+
+    Args:
+        settings: The active settings.
+
+    Returns:
+        dict: Plain values, safe to write to a log.
+    """
+    facts: dict[str, object] = {
+        "version": settings.app_version,
+        "environment": settings.app_env,
+        "cors_origins": len(settings.cors_allow_origins),
+        "formats": ",".join(settings.supported_dataset_extensions),
+    }
+    try:
+        facts["llm_credential_configured"] = llm_config_from_env().has_api_key
+    except Exception:  # pragma: no cover - configuration is best-effort here
+        facts["llm_credential_configured"] = False
+    try:
+        facts["retrieval_index_present"] = rag_config_from_env().index_dir.is_dir()
+    except Exception:  # pragma: no cover - configuration is best-effort here
+        facts["retrieval_index_present"] = False
+    return facts
+
+
+@asynccontextmanager
+async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+    """Configure logging, announce what is running, and say when it stops.
+
+    The startup line is the one log entry that answers "what is this process,
+    and what can it do?" without a request having to arrive first — which is
+    exactly the question asked of a container that is up but behaving
+    unexpectedly.
+    """
+    settings = get_settings()
+    configure_logging(settings.log_level)
+
+    facts = _describe_startup(settings)
+    logger.info(
+        "ML Copilot API started (%s)",
+        " ".join(f"{key}={value}" for key, value in facts.items()),
+    )
+    try:
+        yield
+    finally:
+        logger.info("ML Copilot API stopped")
 
 
 def create_app(
@@ -149,6 +270,8 @@ def create_app(
             "with a status saying so."
         ),
         docs_url=DOCS_URL,
+        openapi_tags=OPENAPI_TAGS,
+        lifespan=lifespan,
     )
 
     if settings is not None:
@@ -165,6 +288,10 @@ def create_app(
         application.dependency_overrides[get_dataset_source] = lambda: dataset_source
 
     _allow_browser_origins(application, config)
+    # Added last, so it sits outside the CORS middleware and every response —
+    # including a preflight that CORS answers on its own — carries a request id
+    # and produces one log line.
+    application.add_middleware(RequestContextMiddleware)
     register_exception_handlers(application)
     application.include_router(api_router)
 

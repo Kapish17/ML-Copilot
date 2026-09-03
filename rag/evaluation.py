@@ -39,12 +39,22 @@ from rag.documents import SourceType, make_document_id
 from rag.retrieval.service import RetrievalService
 
 #: Document ids for the documentation the default queries expect.
-ROOT_README = make_document_id(SourceType.PROJECT_DOCUMENTATION.value, "README.md")
+#:
+#: The root README is deliberately **not** among them. It is the project's
+#: front door — what this is, why it is interesting, how to run it — and it
+#: says a sentence about leakage where `ml/README.md` says a section. Listing
+#: a document that only mentions a subject as one that should *answer* a
+#: question about it measures the wrong thing: recall then falls whenever the
+#: front page is edited, which is not a retrieval regression.
 ML_README = make_document_id(SourceType.PROJECT_DOCUMENTATION.value, "ml/README.md")
 BACKEND_README = make_document_id(
     SourceType.PROJECT_DOCUMENTATION.value, "backend/README.md"
 )
 RAG_README = make_document_id(SourceType.PROJECT_DOCUMENTATION.value, "rag/README.md")
+ARCHITECTURE_DOC = make_document_id(
+    SourceType.PROJECT_DOCUMENTATION.value, "docs/ARCHITECTURE.md"
+)
+API_DOC = make_document_id(SourceType.PROJECT_DOCUMENTATION.value, "docs/API.md")
 
 
 @dataclass(frozen=True)
@@ -70,36 +80,36 @@ class EvaluationQuery:
 DEFAULT_EVALUATION_QUERIES: tuple[EvaluationQuery, ...] = (
     EvaluationQuery(
         question="How does ML Copilot prevent data leakage during preprocessing?",
-        relevant_document_ids=(ML_README, ROOT_README),
+        relevant_document_ids=(ML_README, ARCHITECTURE_DOC),
         source_types=(SourceType.PROJECT_DOCUMENTATION.value,),
-        note="Leakage prevention is described in the preprocessing sections.",
+        note="A section in the ML README, a paragraph in the architecture doc.",
     ),
     EvaluationQuery(
         question=(
             "What is the difference between cross-validation and the final "
             "test evaluation?"
         ),
-        relevant_document_ids=(ML_README, ROOT_README),
+        relevant_document_ids=(ML_README, ARCHITECTURE_DOC),
         source_types=(SourceType.PROJECT_DOCUMENTATION.value,),
-        note="Both READMEs explain why the test set is measured once.",
+        note="Both explain why the test set is measured once.",
     ),
     EvaluationQuery(
         question="What preprocessing is applied to categorical columns?",
-        relevant_document_ids=(ML_README, ROOT_README),
+        relevant_document_ids=(ML_README, ARCHITECTURE_DOC),
         source_types=(SourceType.PROJECT_DOCUMENTATION.value,),
         note="One-hot encoding and cardinality limits.",
     ),
     EvaluationQuery(
         question="Which HTTP endpoints run an experiment and list past experiments?",
-        relevant_document_ids=(BACKEND_README, ROOT_README),
+        relevant_document_ids=(BACKEND_README, API_DOC),
         source_types=(SourceType.PROJECT_DOCUMENTATION.value,),
-        note="The endpoint tables.",
+        note="The endpoint tables, and the API reference.",
     ),
     EvaluationQuery(
         question="How are documents chunked and embedded for retrieval?",
-        relevant_document_ids=(RAG_README, ROOT_README),
+        relevant_document_ids=(RAG_README, ARCHITECTURE_DOC),
         source_types=(SourceType.PROJECT_DOCUMENTATION.value,),
-        note="The RAG layer's own documentation.",
+        note="The RAG layer's own documentation, and the architecture doc.",
     ),
 )
 

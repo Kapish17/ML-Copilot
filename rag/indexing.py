@@ -201,6 +201,25 @@ class RagIndexer:
                 report.failed.append(document.document_id)
 
         self._finalise(report)
+        # One line for a run that is otherwise silent. The container entrypoint
+        # indexes at every start, so this is what distinguishes "the index was
+        # rebuilt from scratch" from "nothing had changed" — and, when search
+        # later returns nothing, whether anything was ever indexed at all.
+        #
+        # Counts and document ids, which are this project's own file
+        # references. No chunk text: the whole point of the index is that its
+        # contents are documents, and documents do not belong in a log.
+        logger.info(
+            "Indexed %d document(s), skipped %d, removed %d, failed %d "
+            "(%d chunks written, %d deleted, rebuilt=%s)",
+            len(report.indexed),
+            len(report.skipped),
+            len(report.removed),
+            len(report.failed),
+            report.chunks_written,
+            report.chunks_deleted,
+            report.rebuilt,
+        )
         return report
 
     def _index_one(self, document: Document, *, force: bool) -> IndexReport:

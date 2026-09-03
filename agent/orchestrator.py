@@ -223,7 +223,7 @@ class AgentOrchestrator:
         if not isinstance(output, dict):  # pragma: no cover - defensive
             output = {"value": output}
 
-        return state.record(
+        observation = state.record(
             Observation(
                 call_id=call_id,
                 tool_name=tool_name,
@@ -238,6 +238,24 @@ class AgentOrchestrator:
                 citations=tuple(result.citations),
             )
         )
+
+        # The tool's *name*, whether it worked and how long it took — which is
+        # what makes a run's shape readable in a log: four calls, one of them
+        # slow, one unavailable.
+        #
+        # **Never the arguments.** They can carry a question, a target column
+        # or a dataset name, all of them written by whoever asked. The count of
+        # validated arguments is logged at DEBUG by the registry, and the
+        # authored `input_summary` on the observation is what a caller sees.
+        logger.info(
+            "Tool %r %s in %.1fms (call %d of at most %d)",
+            tool_name,
+            "succeeded" if result.available else "was unavailable",
+            duration_ms,
+            state.tool_call_count,
+            self._config.max_tool_calls,
+        )
+        return observation
 
     # -- The run -----------------------------------------------------------
 

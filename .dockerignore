@@ -17,6 +17,11 @@
 # The dashboard has its own image and its own context.
 frontend/
 
+# The demo data and its generator. Useful in a checkout, pointless in the
+# image: `scripts/demo.sh` runs on the host and uploads these files over HTTP,
+# so nothing inside the container ever reads them.
+examples/
+
 # Python caches and environments
 __pycache__/
 *.py[cod]

@@ -166,10 +166,38 @@ class OpenAIProvider:
                 timeout=request.timeout_seconds,
             )
         except Exception as exc:  # noqa: BLE001 - every SDK failure is mapped
-            raise self._translate(exc) from None
+            translated = self._translate(exc)
+            # The outcome of a call that leaves this process is worth recording
+            # either way. The exception *type* and this project's own error
+            # code say what happened; the provider's message may quote the
+            # request back and is left to the error envelope.
+            logger.warning(
+                "Generation failed after %.2fs: %s -> %s (provider=%s model=%s)",
+                time.perf_counter() - started,
+                type(exc).__name__,
+                type(translated).__name__,
+                self.name,
+                request.model or self._config.model,
+            )
+            raise translated from None
 
         latency = round(time.perf_counter() - started, 3)
-        return self._read_response(response, request=request, latency=latency)
+        result = self._read_response(response, request=request, latency=latency)
+        # **No prompt and no completion.** Both are the sensitive halves of
+        # this call — the prompt carries retrieved passages and the user's
+        # question, the completion is the answer — so what is recorded is the
+        # shape of the exchange, not its content.
+        logger.info(
+            "Generation succeeded in %.2fs: provider=%s model=%s finish=%s "
+            "prompt_tokens=%s completion_tokens=%s",
+            latency,
+            result.provider,
+            result.model,
+            result.finish_reason,
+            result.prompt_tokens,
+            result.completion_tokens,
+        )
+        return result
 
     def _read_response(
         self, response: Any, *, request: GenerationRequest, latency: float
