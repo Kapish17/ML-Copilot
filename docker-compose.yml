@@ -58,7 +58,19 @@ services:
     restart: unless-stopped
     ports:
       # Published because the browser calls this directly.
-      - "${BACKEND_PORT:-8000}:8000"
+      #
+      # Bound to the loopback interface by default. This API has no
+      # authentication — by design, it is a local analysis tool — and it
+      # accepts file uploads and runs model training synchronously. Docker's
+      # default of `0.0.0.0` would offer all of that to every machine on the
+      # network the moment someone starts the stack on a laptop in a café, and
+      # it does so *past* a host firewall, because publishing a port writes a
+      # DNAT rule the firewall never sees.
+      #
+      # Set BIND_ADDRESS=0.0.0.0 to serve the stack to other machines
+      # deliberately. Nothing in the documented workflow needs it: the browser
+      # and the smoke test both reach the stack over loopback.
+      - "${BIND_ADDRESS:-127.0.0.1}:${BACKEND_PORT:-8000}:8000"
     environment:
       APP_ENV: ${APP_ENV:-production}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -118,7 +130,8 @@ services:
     image: ml-copilot-frontend:local
     restart: unless-stopped
     ports:
-      - "${FRONTEND_PORT:-3000}:3000"
+      # Loopback by default, for the reason given on the backend's port.
+      - "${BIND_ADDRESS:-127.0.0.1}:${FRONTEND_PORT:-3000}:3000"
     depends_on:
       backend:
         # Waits for the backend's own healthcheck to pass, so the first page

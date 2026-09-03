@@ -141,7 +141,7 @@ ml-copilot/
 ├── data/          Local datasets — raw and processed (git-ignored contents)
 ├── configs/       Configuration files
 ├── docs/          Project documentation
-├── .github/       CI workflow — tests, lint, and a Docker stack smoke test
+├── .github/       CI workflow, and the Dependabot configuration that watches every manifest
 ├── scripts/       smoke-test.sh — 30 checks against a running stack
 ├── .env.example   Template for local environment configuration
 ├── .dockerignore  What the backend build context excludes
@@ -1981,6 +1981,11 @@ See [`frontend/README.md`](frontend/README.md) for the full architecture.
   suites, the frontend's four gates, and — the part a local checkout cannot
   always do — builds both images, starts the Compose stack and runs a
   thirty-check smoke test against the running containers, needing no secret.
+- Dependency security monitoring: Dependabot over every Python, npm and GitHub
+  Actions manifest with no ignore rules and no automatic merging, plus
+  `pip-audit` over the production and development closures and `npm audit` at
+  the high threshold as merge gates — none of which can be suppressed without
+  failing the suite.
 - Test suites covering the backend service, the API contract, the ML layer, the
   retrieval layer, the language-model layer and the agent layer.
 
@@ -1997,8 +2002,12 @@ See [`frontend/README.md`](frontend/README.md) for the full architecture.
 - Streaming answers and conversation memory — every question is independent
 - PostgreSQL, Qdrant and any database access
 - Background execution — no Celery, Redis, queue or worker; runs are synchronous
-- Authentication, rate limiting and multi-user support
+- Authentication, rate limiting and multi-user support — which is why the
+  Compose stack publishes both ports on loopback by default
 - Any deployment target beyond a local or demo Compose stack
+- Static application security testing, secret scanning, container image
+  scanning and signed images — the audits added here read dependency manifests,
+  not this project's own code or its built images
 
 ### Available endpoints
 
@@ -2077,6 +2086,7 @@ variable is worth setting and it is the only secret:
 | `CORS_ALLOW_ORIGINS` | no | Origins the browser may call the API from. Explicit list, never `*`. Default: `http://localhost:3000,http://127.0.0.1:3000` |
 | `NEXT_PUBLIC_API_BASE_URL` | no | Where the browser sends API requests. Default: `http://localhost:8000` |
 | `FRONTEND_PORT` / `BACKEND_PORT` | no | Host ports. Change both the URL and the CORS list to match. |
+| `BIND_ADDRESS` | no | Host interface those ports are published on. Default: `127.0.0.1` — this machine only. |
 | `LLM_MODEL`, `LLM_BASE_URL` | no | Which model, and which OpenAI-compatible endpoint |
 | `MAX_UPLOAD_MB`, `AGENT_MAX_TOOL_CALLS`, … | no | Limits, documented in `.env.example` |
 
@@ -2098,6 +2108,27 @@ external credential.
 
 The key is read from `.env`, which is git-ignored. It is never written into a
 Dockerfile, never passed to the frontend, and never baked into an image.
+
+### Who the stack answers
+
+Both ports are published on `127.0.0.1`, so a `docker compose up` serves this
+machine and nothing else. That is a deliberate departure from Docker's default
+of every interface: this API has no authentication — it is a local analysis
+tool — and it accepts file uploads and runs model training synchronously.
+Published on `0.0.0.0` it would offer all of that to every machine on whatever
+network the host happens to be attached to, and it would do so *past* a host
+firewall rather than through one, because publishing a port installs a routing
+rule the firewall never sees.
+
+To serve other machines on purpose:
+
+```bash
+BIND_ADDRESS=0.0.0.0
+```
+
+and put something in front of it that authenticates. Nothing in the documented
+workflow needs this: the browser and `scripts/smoke-test.sh` both reach the
+stack over loopback.
 
 ### What survives a restart
 
@@ -2221,12 +2252,13 @@ stays on the server.
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on every push to `main` and every pull request
-targeting it. Three jobs, in parallel:
+targeting it. Four jobs, in parallel:
 
 | Job | What it does |
 | --- | --- |
 | **Backend tests** | Installs the documented development dependencies, compiles every module, runs the five pytest suites |
-| **Frontend tests** | `npm ci` from the lockfile, then lint, typecheck, the Vitest suite and a production build |
+| **Frontend tests** | `npm ci` from the lockfile, then `npm audit`, lint, typecheck, the Vitest suite and a production build |
+| **Dependency audit** | `pip-audit` over the production dependency closure, and again over the development one |
 | **Docker stack smoke test** | Builds both images, starts the Compose stack, waits for the healthchecks, and runs `scripts/smoke-test.sh` against the running containers |
 
 **No secret is required and none is used.** The workflow reads nothing from
@@ -2290,6 +2322,120 @@ allowlist does not include the dashboard — so the checks are known to bite.
 
 ---
 
+## Dependency security
+
+Most of this project's attack surface is code nobody here wrote. Nine runtime
+pins across the four Python layers resolve to 37 packages; 20 direct entries in
+`frontend/package.json` resolve to 609. Two mechanisms watch them: Dependabot
+opens a pull request when something falls behind, and CI refuses to go green
+when something is known-vulnerable.
+
+### What is watched
+
+`.github/dependabot.yml` covers every manifest in the repository — the four
+Python requirements directories as one entry with a `directories:` list,
+`frontend/package.json`, and the GitHub Actions the workflow itself uses.
+Weekly. `backend/requirements-dev.txt` needs no entry of its own because it
+begins with `-r requirements.txt` and Dependabot follows the reference.
+
+Two things it deliberately does not do. There are **no `ignore` rules** — an
+ignored advisory is one nobody hears about again. And **nothing merges
+itself**: no auto-merge is configured, in this file or in any workflow. A
+dependency bump is a code change written outside this repository; it goes
+through CI and a human like any other.
+
+Dependabot opens one pull request per directory, and three pins are shared
+across two files each — pandas, scikit-learn and numpy. When two PRs arrive for
+the same package they belong together: merge both or neither, or the "keep this
+pin in sync" comments in those files stop being true.
+
+### What blocks a merge
+
+| Where | Command | Fails on |
+| --- | --- | --- |
+| **Dependency audit** job | `pip-audit --strict` over `backend`, `ml`, `rag`, `llm` | any advisory against the production closure |
+| **Dependency audit** job | `pip-audit --strict` over `requirements-dev` plus the layers | any advisory against the test dependencies |
+| **Frontend tests** job | `npm audit --audit-level=high`, immediately after `npm ci` | a high or critical advisory in the installed tree |
+
+Each `-r` is resolved to its **full transitive closure** before auditing, so
+the production audit covers all 37 packages that reach the container —
+starlette, pydantic, scipy, numba and the rest — not only the names written in
+the requirements files. `--strict` is what keeps that honest: without it,
+pip-audit skips a dependency it cannot collect and still exits zero, which is
+how an audit ends up covering a fraction of an application while printing "no
+known vulnerabilities found".
+
+pip-audit is installed into a virtual environment of its own, so its own
+dependency tree is not part of what it audits. The tool is pinned; the advisory
+data is not — it queries PyPI's vulnerability API on every run, so a pinned
+checker still finds something published this morning.
+
+Nothing suppresses a finding. No `|| true`, no `continue-on-error`, no lowered
+threshold, and no `npm audit fix` in CI — that command rewrites the lockfile,
+which would mean CI testing a dependency set that is not the one in the
+repository. Fixes are made locally, reviewed, and committed as a lockfile
+change. `backend/tests/test_dependency_security.py` asserts all of it, and each
+of its assertions was checked by making the corresponding mistake and watching
+it fail.
+
+### Running the audits locally
+
+```bash
+# Python — in a throwaway environment, so pip-audit is not audited too
+python -m venv .venv-audit
+.venv-audit/bin/pip install pip-audit
+.venv-audit/bin/pip-audit --strict \
+  -r backend/requirements.txt -r ml/requirements.txt \
+  -r rag/requirements.txt -r llm/requirements.txt
+
+# JavaScript
+cd frontend && npm ci && npm audit --audit-level=high
+```
+
+### Where things stand
+
+On **3 September 2026**, with the pins currently in this repository:
+
+| Audit | Packages | Result |
+| --- | --- | --- |
+| Python, production | 37 | no known vulnerabilities |
+| Python, development | 42 | no known vulnerabilities |
+| npm, whole installed tree | 609 | no known vulnerabilities |
+
+That is a reading taken on a date, not a property of the project. It was not
+the reading when this section was written: `npm audit` reported four
+advisories, and three real fixes were made rather than silenced.
+
+| Package | Was | Now | Advisory |
+| --- | --- | --- | --- |
+| `vitest` | 3.2.4 | 3.2.7 | GHSA-5xrq-8626-4rwp — **critical**; arbitrary file read and execution while the Vitest UI server is listening |
+| `postcss` | 8.5.6, and 8.4.31 inside Next.js | 8.5.27 everywhere | GHSA-6g55-p6wh-862q and GHSA-r28c-9q8g-f849 — **high**; arbitrary `.map` file disclosure through an attacker-controlled `sourceMappingURL` |
+| `sharp` | 0.34.5 | 0.35.4 | GHSA-f88m-g3jw-g9cj — **high**; four CVEs inherited from libvips |
+
+The `postcss` one is the interesting fix, because `npm audit fix --force`
+proposed Next.js 16 — a major upgrade of the framework to patch a CSS parser.
+Next.js pins `postcss` to `8.4.31` exactly, so instead `package.json` carries a
+single `overrides` entry pinning `postcss` to `8.5.27` for the whole tree. That
+is one minor version bump of one transitive dependency; it deduplicates the two
+copies into one, and it leaves Next.js, React, TypeScript, ESLint and Tailwind
+on the versions this project was built and tested against. The `sharp` bump
+needed no override at all — Next.js already declares `^0.34.3 || ^0.35.4`, so
+0.35.4 was inside its own supported range and only the lockfile was behind.
+
+The whole lockfile change is those three packages and their platform variants:
+33 versions changed, 2 added, 3 removed, and nothing else moved. `npm ci`,
+lint, typecheck, the 131 Vitest tests and a production build were all re-run
+afterwards, and the compiled Tailwind stylesheet was checked to be non-empty,
+since a broken PostCSS override would show up as a page with no styling rather
+than as a failing build.
+
+The override is a debt, not a fix in the abstract. When Next.js ships a release
+that no longer depends on a vulnerable `postcss`, it should be removed —
+`.github/dependabot.yml` says so at the npm entry, because `package.json` is
+strict JSON and cannot hold the explanation itself.
+
+---
+
 ## Running the tests
 
 From the repository root, which runs the backend, ML, retrieval,
@@ -2347,4 +2493,5 @@ index and no credential either.
 15. ~~**Multi-format ingestion** — a format-detection and adapter layer for CSV, Excel and JSON behind one standardised DataFrame~~
 16. ~~**Next.js dashboard** — upload, profile, the AI Data Scientist, experiments, SHAP, history and knowledge search over the existing API~~
 17. ~~**Containerisation** — production images for both services and a one-command Compose stack~~
-18. **Continuous integration** — GitHub Actions running the suites, the gates, and a real Docker stack smoke test *(current)*
+18. ~~**Continuous integration** — GitHub Actions running the suites, the gates, and a real Docker stack smoke test~~
+19. **Dependency security** — Dependabot over every manifest, `pip-audit` and `npm audit` as merge gates, and a security review of the workflow, the images and the application *(current)*

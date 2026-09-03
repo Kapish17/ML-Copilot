@@ -92,9 +92,9 @@ def test_it_runs_on_pushes_and_pull_requests_to_main() -> None:
     assert triggers["pull_request"]["branches"] == ["main"]
 
 
-def test_the_three_jobs_exist_and_no_more() -> None:
-    """Backend, frontend, Docker. Nothing speculative."""
-    assert set(workflow()["jobs"]) == {"backend", "frontend", "docker"}
+def test_the_four_jobs_exist_and_no_more() -> None:
+    """Backend, frontend, dependency audit, Docker. Nothing speculative."""
+    assert set(workflow()["jobs"]) == {"backend", "frontend", "security", "docker"}
 
 
 # ---------------------------------------------------------------------------

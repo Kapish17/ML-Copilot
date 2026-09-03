@@ -17,6 +17,12 @@ coverage/
 .env.*
 !.env.example
 
+# Key material, for the same reason the repository-root .dockerignore excludes
+# it. Nothing in this build reads a certificate or a private key, so a stray
+# one in the working tree can only leak into a layer.
+*.pem
+*.key
+
 # Build and editor artefacts
 *.tsbuildinfo
 next-env.d.ts

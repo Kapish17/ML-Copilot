@@ -177,6 +177,39 @@ def test_only_the_two_ports_a_person_uses_are_published() -> None:
     assert published == {"3000", "8000"}
 
 
+def test_both_published_ports_are_bound_to_loopback_by_default() -> None:
+    """`127.0.0.1`, not Docker's default of every interface.
+
+    This API has no authentication — deliberately, it is a local analysis tool
+    — and it accepts file uploads and runs training synchronously. Published on
+    `0.0.0.0` it offers all of that to every machine on whatever network the
+    host is attached to, and it does so past a host firewall rather than
+    through it, because publishing a port installs a DNAT rule the firewall
+    never sees.
+
+    Serving other machines stays possible: both bindings interpolate
+    `BIND_ADDRESS`, so `BIND_ADDRESS=0.0.0.0` is one line in `.env`. What this
+    test fixes is which of the two you get by not deciding.
+    """
+    services = compose_config()["services"]
+    bindings = {
+        (name, str(entry["published"])): entry.get("host_ip")
+        for name, service in services.items()
+        for entry in service.get("ports", [])
+    }
+
+    assert bindings, "no port is published at all"
+    for (service, port), host_ip in bindings.items():
+        assert host_ip == "127.0.0.1", (
+            f"{service}:{port} is published on {host_ip or '0.0.0.0'}, which "
+            "offers an unauthenticated API to the whole network"
+        )
+
+    # The escape hatch exists, so the default is a choice rather than a limit.
+    compose = COMPOSE_FILE.read_text(encoding="utf-8")
+    assert "${BIND_ADDRESS:-127.0.0.1}" in compose
+
+
 def test_cors_permits_the_dashboard_and_is_never_a_wildcard() -> None:
     """An explicit list. `*` would let any page on the internet call this API."""
     environment = compose_config()["services"]["backend"]["environment"]
