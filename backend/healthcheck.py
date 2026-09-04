@@ -5,6 +5,13 @@ scikit-learn, or after it had wedged. This asks ``/health`` — the endpoint tha
 has existed since Commit 1 — and exits non-zero on anything but a 200. No new
 API surface was added for Docker's benefit.
 
+``/health`` is public on every deployment, including one with
+``API_AUTH_ENABLED=true``, and that is what lets this file exist as it is. The
+alternative — a healthcheck carrying the API key — would mean the credential
+appearing in an image layer, in ``docker inspect`` and in every process list on
+the host, which is a worse trade than a liveness endpoint anyone may call. So
+protecting ``/health`` would break this, deliberately.
+
 Run as the image's ``HEALTHCHECK`` and as the Compose healthcheck, so the two
 can never drift apart.
 """

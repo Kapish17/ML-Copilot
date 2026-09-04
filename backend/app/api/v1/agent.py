@@ -38,6 +38,7 @@ from typing import Annotated
 from fastapi import APIRouter, File, UploadFile, status
 
 from app.api.dependencies import AgentServiceDep, DatasetServiceDep
+from app.api.security import UNAUTHORIZED_RESPONSE, Protected
 from app.api.v1.agent_form import AgentAskFormDep
 from app.schemas.agent import AgentAskRequest, AgentAskResponse, AgentStatusResponse
 from app.schemas.errors import ErrorResponse
@@ -166,6 +167,9 @@ _ASK_EXAMPLES: dict[str, dict[str, object]] = {
 }
 
 _ASK_ERRORS: dict[int | str, dict[str, object]] = {
+    # Every route below is protected, so each can be refused before it
+    # runs. Documented here rather than left for a reader to discover.
+    **UNAUTHORIZED_RESPONSE,
     status.HTTP_200_OK: {
         "description": (
             "The run finished. Read `status`: `completed`, `partial`, "
@@ -206,6 +210,7 @@ _ASK_ERRORS: dict[int | str, dict[str, object]] = {
 
 @router.post(
     "/agent/ask",
+    dependencies=[Protected],
     response_model=AgentAskResponse,
     responses=_ASK_ERRORS,
     summary="Answer a question by orchestrating the system's own capabilities",
@@ -266,6 +271,9 @@ def agent_ask(agent: AgentServiceDep, request: AgentAskRequest) -> AgentAskRespo
 
 
 _ASK_WITH_DATASET_ERRORS: dict[int | str, dict[str, object]] = {
+    # Every route below is protected, so each can be refused before it
+    # runs. Documented here rather than left for a reader to discover.
+    **UNAUTHORIZED_RESPONSE,
     **_ASK_ERRORS,
     status.HTTP_413_CONTENT_TOO_LARGE: {
         "model": ErrorResponse,
@@ -289,6 +297,7 @@ _ASK_WITH_DATASET_ERRORS: dict[int | str, dict[str, object]] = {
 
 @router.post(
     "/agent/ask-with-dataset",
+    dependencies=[Protected],
     response_model=AgentAskResponse,
     responses=_ASK_WITH_DATASET_ERRORS,
     summary="Answer a question about an uploaded dataset",

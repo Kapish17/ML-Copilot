@@ -108,6 +108,19 @@ const FRIENDLY_MESSAGES: Record<string, string> = {
   invalid_agent_budget:
     "That limit is higher than the server allows. Lower it and try again.",
 
+  // Authentication.
+  //
+  // Both say the same true thing in different words: this dashboard cannot
+  // fix a 401 by itself. It holds no key, and it must not — anything a
+  // browser application ships is readable by everyone who loads the page, so
+  // a "secret" embedded here would not be one. Telling the user to call the
+  // API directly, or to put an authenticating proxy in front, is the honest
+  // instruction; pretending a retry might work is not.
+  authentication_required:
+    "This backend requires an API key. The dashboard is a browser application and cannot hold one safely, so use the API directly with an Authorization header, or run the dashboard behind a server-side proxy that adds it.",
+  invalid_credentials:
+    "The API key this request carried was rejected by the backend.",
+
   // Client-side
   [CLIENT_ERROR_CODES.NETWORK]:
     "The backend could not be reached. Check that it is running and that the API URL is correct.",

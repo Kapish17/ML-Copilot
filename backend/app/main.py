@@ -125,7 +125,23 @@ def _allow_browser_origins(application: FastAPI, settings: Settings) -> None:
         # exposed so a browser can read the one the server chose. It is an
         # opaque per-request label — not a session, not a user identifier, and
         # not stored anywhere.
+        #
+        # **`Authorization` is deliberately absent**, so a browser on an
+        # allowed origin cannot send the API key cross-origin at all. That is
+        # not an oversight and it breaks nothing this project ships: the
+        # dashboard holds no key, because a browser bundle is readable by every
+        # visitor and a "secret" in one is not secret. Server-to-server callers
+        # are unaffected — CORS is a browser rule and applies to none of them —
+        # and the supported way to put a browser in front of a protected
+        # deployment is a server-side proxy that adds the header, whose own
+        # requests are not cross-origin browser requests either.
+        #
+        # So the only thing this refusal blocks is the anti-pattern, and it
+        # blocks it loudly, in the console, at the first attempt.
         allow_headers=["Content-Type", REQUEST_ID_HEADER],
+        # `allow_credentials` stays off: bearer authentication travels in a
+        # header the caller sets explicitly, never in a cookie a browser
+        # attaches on its own, so nothing here needs ambient credentials.
         expose_headers=[REQUEST_ID_HEADER],
         max_age=600,
     )
@@ -149,6 +165,10 @@ def _describe_startup(settings: Settings) -> dict[str, object]:
     facts: dict[str, object] = {
         "version": settings.app_version,
         "environment": settings.app_env,
+        # Whether the API is protected is the first thing to want from a log
+        # when a deployment behaves unexpectedly. The key itself is not here
+        # and is not derivable from anything that is.
+        "api_auth_enabled": settings.api_auth_enabled,
         "cors_origins": len(settings.cors_allow_origins),
         "formats": ",".join(settings.supported_dataset_extensions),
     }
@@ -264,6 +284,14 @@ def create_app(
             "workers, authentication, streaming, conversation memory and any "
             "agent framework (LangChain, LangGraph, AutoGen, CrewAI) are not "
             "implemented.\n\n"
+            "**Authentication is optional and off by default**, which is what "
+            "lets the local and demo stack run with no secret at all. A "
+            "deployment that sets `API_AUTH_ENABLED=true` requires "
+            "`Authorization: Bearer <key>` on every endpoint marked with a "
+            "padlock; health, service info and the three capability endpoints "
+            "stay open. This is a single shared key, not identity: there are "
+            "no users, no roles and no expiry, and it must be carried over "
+            "TLS in any remote deployment.\n\n"
             "Every failure returns the same envelope: "
             "`{\"error\": {\"code\", \"message\", \"details\"}}`. An answer "
             "that could not be grounded is **not** a failure — it returns 200 "
@@ -308,6 +336,7 @@ def create_app(
             version=active_settings.app_version,
             environment=active_settings.app_env,
             docs_url=DOCS_URL,
+            authentication_required=active_settings.api_auth_enabled,
         )
 
     @application.get(

@@ -563,6 +563,29 @@ export interface AskResponse {
   metadata: AnswerMetadata;
 }
 
+/** `GET /` — who is running, and whether the protected endpoints are locked. */
+export interface ServiceInfo {
+  name: string;
+  version: string;
+  environment: string;
+  docs_url: string;
+  /**
+   * Whether the protected endpoints require `Authorization: Bearer <key>`.
+   *
+   * A fact about the deployment's configuration, never about the key. The
+   * dashboard reads it to say so in the header — it cannot act on it, because
+   * a browser application cannot hold a shared backend secret.
+   */
+  authentication_required: boolean;
+}
+
+/** `GET /health` — liveness, and what both container healthchecks call. */
+export interface HealthStatus {
+  status: string;
+  version: string;
+  environment: string;
+}
+
 export interface KnowledgeStatus {
   search_available: boolean;
   answering_available: boolean;

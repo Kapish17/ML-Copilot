@@ -61,6 +61,7 @@ def build_error_response(
     code: str,
     message: str,
     details: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     """Build a JSON response carrying the standard error envelope.
 
@@ -69,6 +70,8 @@ def build_error_response(
         code: Stable, machine-readable error code.
         message: Explanation safe to show to an API consumer.
         details: Optional structured context.
+        headers: Optional response headers the status requires — in practice
+            only ``WWW-Authenticate`` on a 401.
 
     Returns:
         JSONResponse: The serialised error envelope.
@@ -76,16 +79,25 @@ def build_error_response(
     payload = ErrorResponse(
         error=ErrorDetail(code=code, message=message, details=details or {})
     )
-    return JSONResponse(status_code=status_code, content=jsonable_encoder(payload))
+    return JSONResponse(
+        status_code=status_code, content=jsonable_encoder(payload), headers=headers
+    )
 
 
 async def handle_application_error(_: Request, exc: MLCopilotError) -> JSONResponse:
-    """Return the envelope for an expected, typed application error."""
+    """Return the envelope for an expected, typed application error.
+
+    Authentication failures arrive here like any other typed error, which is
+    the point: a 401 is the same envelope as a 413 or a 422, with a stable
+    code, a safe message and no traceback. It is not a second error format and
+    it is never a 500.
+    """
     return build_error_response(
         status_code=exc.status_code,
         code=exc.code,
         message=exc.message,
         details=exc.details,
+        headers=exc.headers,
     )
 
 

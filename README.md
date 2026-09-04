@@ -126,6 +126,7 @@ Full detail, including the ingestion adapters, storage and deployment:
 | **Grounded answers** | Evidence-first generation with validated citations, over any OpenAI-compatible endpoint — hosted, or a model on your laptop via `LLM_BASE_URL`. |
 | **Bounded agent** | Four registered tools, typed arguments, hard budgets, four outcomes all returned as HTTP 200 with a status. No chain-of-thought is ever returned. |
 | **Dashboard** | Upload, profile, ask, run, compare, explain, browse history, search knowledge. Runtime dependencies: Next.js, React, React DOM. No UI kit, no chart library, no state manager. |
+| **Authentication** | Optional shared API key over `Authorization: Bearer`, compared in constant time, on the nine endpoints that cost something. Off by default so the demo needs no secret; enabling it without a key fails at start-up rather than pretending to be protected. The key never reaches the browser, an image, a log or the schema. |
 
 ## The five-minute demo
 
@@ -253,16 +254,19 @@ Both run as unprivileged users and define their own `HEALTHCHECK`, so
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `LLM_API_KEY` | *(empty)* | The only secret. Never baked into an image, never passed to the frontend |
+| `API_AUTH_ENABLED` | `false` | Require an API key on the protected endpoints. See [Authentication](#authentication) |
+| `API_AUTH_KEY` | *(empty)* | The key itself. Backend only — never a build argument, never passed to the frontend, never in an image |
+| `LLM_API_KEY` | *(empty)* | Unrelated to the above: this one lets the API *call* a language model. Never baked into an image, never passed to the frontend |
 | `CORS_ALLOW_ORIGINS` | `http://localhost:3000,http://127.0.0.1:3000` | Explicit list, never `*` |
 | `NEXT_PUBLIC_API_BASE_URL` | `http://localhost:8000` | Inlined at **build** time — must be a URL the *browser* can resolve, never the Compose service name |
 | `BIND_ADDRESS` | `127.0.0.1` | Host interface the ports are published on |
 | `FRONTEND_PORT` / `BACKEND_PORT` | `3000` / `8000` | Update the URL and the CORS list to match |
 
-**Both ports bind loopback by default.** This API has no authentication and
-accepts file uploads, and a published Docker port bypasses a host firewall
-rather than being filtered by it. `BIND_ADDRESS=0.0.0.0` is the deliberate
-opt-in.
+**Both ports bind loopback by default.** Authentication is off unless you turn
+it on, so a stock stack accepts file uploads from anyone who can reach the
+port — and a published Docker port bypasses a host firewall rather than being
+filtered by it. `BIND_ADDRESS=0.0.0.0` is the deliberate opt-in, and it is the
+point at which [Authentication](#authentication) stops being optional.
 
 | | Survives `down` | Survives `down -v` |
 | --- | --- | --- |
@@ -303,6 +307,107 @@ That id is also returned in the `X-Request-ID` response header, so a request
 someone reports can be found in the log by its header. Send your own to have it
 used instead. Set `LOG_LEVEL=DEBUG` for more; it raises the level only on this
 project's own loggers, never on a third-party package.
+
+## Authentication
+
+**Off by default, and on with two environment variables.**
+
+That default is deliberate. `docker compose up --build` has to bring up a
+working system with no secret to configure, and the stack publishes both ports
+on `127.0.0.1`, so what it starts is a local tool rather than an exposed
+service. Turning authentication on is what you do before it stops being local.
+
+```bash
+# .env
+API_AUTH_ENABLED=true
+API_AUTH_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(24))")
+```
+
+Then every protected endpoint needs the key:
+
+```bash
+curl -H "Authorization: Bearer $API_AUTH_KEY" \
+     -F "file=@examples/customer_churn.csv" \
+     http://localhost:8000/api/v1/datasets/profile
+```
+
+Enabling it **without** a key is a start-up failure, not a warning. No key is
+generated and there is no built-in default: a generated one would be a secret
+nobody knows that changes every restart, and a shipped one would be a password
+published in this repository. The remaining option — refusing to start — is the
+only one that cannot leave an operator believing the service is protected when
+it is not. A key under 32 characters is refused for the same reason.
+
+### What is protected, and what is not
+
+| | Endpoints | Why |
+| --- | --- | --- |
+| **Public** | `GET /` · `GET /health` · `/experiments/capabilities` · `/knowledge/status` · `/agent/status` | Liveness and capability booleans. A container healthcheck cannot carry a credential, and a client has to be able to ask *whether* it needs one before it has one. None of them reads stored state, costs CPU, or reports anything but limits and availability. |
+| **Protected** | `/datasets/profile` · `/experiments/run` · `/experiments` · `/experiments/{id}` · `/experiments/compare` · `/search` · `/ask` · `/agent/ask` · `/agent/ask-with-dataset` | Everything that accepts an upload, trains a model, reads stored experiments, or reaches a language model. |
+
+The split is asserted from the running application rather than kept in a list,
+and a rule — *every non-GET route must be protected* — fails the suite if a new
+expensive endpoint is ever added without a decision being made about it.
+
+### Why the dashboard has no API key
+
+**A browser application cannot hold a shared secret.** Anything shipped in a
+Next.js bundle is readable by every visitor who opens developer tools, so a
+`NEXT_PUBLIC_API_KEY` would not be a key — it would be a public string that
+happens to open the API. There is none, there is no hard-coded credential in
+the TypeScript, and Compose passes nothing of the sort to the frontend service.
+A test walks the frontend source and fails if the name of the server-side
+variable appears there at all.
+
+So when the backend is protected, the dashboard is honest about it: the header
+reads **"API key required — this dashboard cannot hold one"**, and any request
+that is refused explains the same thing rather than suggesting a retry. It
+reads that state from `GET /`, which reports `authentication_required` as a
+boolean — a fact about the configuration that anyone could learn by making one
+request and reading the 401.
+
+CORS backs that up rather than working around it: `Authorization` is **not** in
+the allowed request headers, so a browser on an allowed origin cannot send the
+key cross-origin at all. Nothing legitimate is blocked by that — a
+server-to-server caller is not subject to CORS, and a proxy that adds the
+header server-side is not making a cross-origin browser request either — but
+putting the key into JavaScript now fails visibly at the first request instead
+of quietly working with a leaked credential.
+
+To use a protected deployment from a browser, put something in front of the
+dashboard that holds the credential server-side: a reverse proxy that injects
+the header, or a small backend-for-frontend. **Neither is in this commit** —
+adding a proxy purely to hide a key would replace an honest limitation with a
+component nobody had asked for, and the security model would be no better for
+it.
+
+### What this is, and is not
+
+This is a **single shared API key**, compared in constant time, with
+`Authorization: Bearer <key>`. It is not identity management. There are no
+users, no roles, no sessions, no expiry and no revocation short of changing the
+key and restarting; everyone holding it is the same caller and the log cannot
+tell them apart. No JWT, no OAuth, no SSO, no database of users and no
+third-party authentication library — FastAPI's own security utilities and
+`secrets` are the whole implementation.
+
+It addresses one precise threat: an unauthenticated service that accepts file
+uploads and runs model training synchronously lets anyone who can reach the
+port spend the host's CPU. It does nothing about an authorised caller doing the
+same thing, which is why the [existing hard
+budgets](docs/PRODUCTION_READINESS.md) matter as much as the key does.
+
+### It still needs TLS
+
+```
+Client ──HTTPS──▶ reverse proxy / load balancer ──HTTP──▶ FastAPI
+```
+
+A bearer token is a password sent on every request. Over plain HTTP anyone on
+the path reads it once and has it forever, so **API-key authentication without
+TLS is not sufficient for a remote deployment**. Terminating TLS is the
+proxy's job, not this application's; no Nginx, Caddy, Traefik or cloud load
+balancer is included here.
 
 ## CI and security
 
@@ -414,9 +519,14 @@ does not: **[ml](ml/README.md)** · **[rag](rag/README.md)** ·
 Stated plainly, because a portfolio project that hides its edges is not worth
 reading.
 
-- **No authentication, authorisation or rate limiting.** Anyone who can reach
-  the port can use every endpoint — which is why Compose binds loopback.
-- **No TLS and no reverse proxy.**
+- **Authentication is one shared key, not identity.** No users, no roles, no
+  sessions, no expiry, no revocation short of restarting. It is off by default,
+  so a stock `docker compose up` is still open to anyone who can reach the port
+  — which is why Compose binds loopback. See [Authentication](#authentication).
+- **No authorisation and no rate limiting.** Every holder of the key can do
+  everything, as often as the budgets allow.
+- **No TLS and no reverse proxy.** A bearer token over plain HTTP is readable
+  by anyone on the path.
 - **Training is synchronous.** A run holds its HTTP request open for its whole
   duration. No queue, no worker, no Celery, no Redis.
 - **No model persistence**, and therefore no prediction or model-serving
@@ -457,10 +567,14 @@ reading.
 17. ~~Containerisation — production images and a one-command stack~~
 18. ~~Continuous integration — suites, gates and a real Docker smoke test~~
 19. ~~Dependency security — Dependabot, `pip-audit` and `npm audit` as gates~~
-20. **Production readiness and demo experience** — architecture and API docs,
-    the demo dataset and script, request correlation and useful logs
-    *(current)*
+20. ~~Production readiness and demo experience — architecture and API docs, the
+    demo dataset and script, request correlation and useful logs~~
+21. **Lightweight API authentication** — one shared key on the nine endpoints
+    that cost something, off by default, with the secret kept out of the
+    browser and out of every image, log and schema *(current)*
 
-**Next**, in the honest order: authentication and TLS, then background
-execution, then model persistence. Everything else is premature until a
-stranger cannot train a model on your CPU.
+**Next**, in the honest order: **TLS**, then background execution, then model
+persistence. TLS comes first now, and it is a precondition rather than a
+successor — a bearer token sent over plain HTTP is captured once and reused
+forever, so the authentication that now exists is only as good as the transport
+under it.

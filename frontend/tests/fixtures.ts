@@ -18,6 +18,7 @@ import type {
   ExperimentRunResponse,
   KnowledgeStatus,
   SearchResponse,
+  ServiceInfo,
 } from "@/lib/api/types";
 
 export const CLASSIFICATION_PROFILE: DatasetProfile = {
@@ -631,6 +632,21 @@ export const AGENT_REJECTED_TOOL: AgentAnswer = {
     },
   ],
   observations: [],
+};
+
+/** `GET /` on an ordinary local deployment: no API key required. */
+export const SERVICE_INFO: ServiceInfo = {
+  name: "ML Copilot API",
+  version: "0.1.0",
+  environment: "test",
+  docs_url: "/docs",
+  authentication_required: false,
+};
+
+/** The same service with `API_AUTH_ENABLED=true`. */
+export const SERVICE_INFO_AUTHENTICATED: ServiceInfo = {
+  ...SERVICE_INFO,
+  authentication_required: true,
 };
 
 export const AGENT_STATUS: AgentStatusResponse = {

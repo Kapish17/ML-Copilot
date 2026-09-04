@@ -17,6 +17,11 @@ class MLCopilotError(Exception):
 
     code = "internal_error"
     status_code = 500
+    #: Response headers this error requires. Almost every error needs none;
+    #: a 401 needs ``WWW-Authenticate``, which HTTP requires on that status
+    #: and which tells a client *how* to authenticate rather than only that
+    #: it must. Declared on the class so the handler needs no special case.
+    headers: dict[str, str] | None = None
 
     def __init__(self, message: str, *, details: dict[str, Any] | None = None) -> None:
         """Store the user-facing message and optional structured context.
@@ -28,6 +33,43 @@ class MLCopilotError(Exception):
         super().__init__(message)
         self.message = message
         self.details: dict[str, Any] = details or {}
+
+
+class AuthenticationError(MLCopilotError):
+    """Base class for a refused credential.
+
+    Both subclasses answer **401** and carry ``WWW-Authenticate: Bearer``.
+    Neither ever quotes what was supplied: echoing a credential back puts it
+    into the caller's logs, into any proxy in between, and into a browser's
+    network panel, and it tells an attacker their guess was received intact.
+    """
+
+    code = "authentication_required"
+    status_code = 401
+    headers = {"WWW-Authenticate": "Bearer"}
+
+
+class AuthenticationRequiredError(AuthenticationError):
+    """No usable credential was presented at all.
+
+    Distinct from :class:`InvalidCredentialsError` on purpose: "you sent
+    nothing" and "what you sent is wrong" are different problems for the
+    person debugging, and the distinction is not an oracle — it says nothing
+    about the key itself, only about the shape of the request.
+    """
+
+    code = "authentication_required"
+
+
+class InvalidCredentialsError(AuthenticationError):
+    """A credential was presented and it is not the configured one.
+
+    The message is identical whatever was wrong with it — wrong value, wrong
+    length, one character out. Nothing in the response distinguishes a near
+    miss from a random guess.
+    """
+
+    code = "invalid_credentials"
 
 
 class DatasetError(MLCopilotError):

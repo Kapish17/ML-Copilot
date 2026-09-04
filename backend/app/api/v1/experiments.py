@@ -24,6 +24,7 @@ from app.api.dependencies import (
     ExperimentRunnerDep,
     SettingsDep,
 )
+from app.api.security import UNAUTHORIZED_RESPONSE, Protected
 from app.api.v1.experiment_form import ExperimentOptionsDep
 from app.schemas.errors import ErrorResponse
 from app.schemas.experiment import (
@@ -44,6 +45,9 @@ from ml.models.registry import list_available_models
 router = APIRouter(prefix="/experiments", tags=["experiments"])
 
 _RUN_ERRORS: dict[int | str, dict[str, object]] = {
+    # Every route below is protected, so each can be refused before it
+    # runs. Documented here rather than left for a reader to discover.
+    **UNAUTHORIZED_RESPONSE,
     status.HTTP_400_BAD_REQUEST: {
         "model": ErrorResponse,
         "description": "The configuration is invalid — unknown model, metric, strategy or fold count.",
@@ -70,6 +74,9 @@ _RUN_ERRORS: dict[int | str, dict[str, object]] = {
 }
 
 _LOOKUP_ERRORS: dict[int | str, dict[str, object]] = {
+    # Every route below is protected, so each can be refused before it
+    # runs. Documented here rather than left for a reader to discover.
+    **UNAUTHORIZED_RESPONSE,
     status.HTTP_400_BAD_REQUEST: {
         "model": ErrorResponse,
         "description": "The experiment id is malformed.",
@@ -85,6 +92,9 @@ _LOOKUP_ERRORS: dict[int | str, dict[str, object]] = {
 }
 
 _COMPARE_ERRORS: dict[int | str, dict[str, object]] = {
+    # Every route below is protected, so each can be refused before it
+    # runs. Documented here rather than left for a reader to discover.
+    **UNAUTHORIZED_RESPONSE,
     status.HTTP_400_BAD_REQUEST: {
         "model": ErrorResponse,
         "description": "Fewer than two ids, too many ids, or a malformed id.",
@@ -102,6 +112,7 @@ _COMPARE_ERRORS: dict[int | str, dict[str, object]] = {
 
 @router.post(
     "/run",
+    dependencies=[Protected],
     response_model=ExperimentRunResponse,
     responses=_RUN_ERRORS,
     summary="Run a complete experiment on an uploaded dataset",
@@ -154,8 +165,10 @@ async def run_experiment_endpoint(
 
 @router.get(
     "",
+    dependencies=[Protected],
     response_model=ExperimentListResponse,
     responses={
+        **UNAUTHORIZED_RESPONSE,
         status.HTTP_400_BAD_REQUEST: {
             "model": ErrorResponse,
             "description": "A filter, sort key, order or limit is invalid.",
@@ -274,6 +287,7 @@ def experiment_capabilities(settings: SettingsDep) -> ExperimentCapabilitiesResp
 
 @router.post(
     "/compare",
+    dependencies=[Protected],
     response_model=ExperimentComparisonResponse,
     responses=_COMPARE_ERRORS,
     summary="Rank several stored experiments against each other",
@@ -297,6 +311,7 @@ def compare_experiments_endpoint(
 
 @router.get(
     "/{experiment_id}",
+    dependencies=[Protected],
     response_model=ExperimentRecord,
     responses=_LOOKUP_ERRORS,
     summary="Fetch one stored experiment",

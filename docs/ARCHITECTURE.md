@@ -107,8 +107,16 @@ Its jobs, and only these:
   stripped from details before they leave the process.
 - **Bounds.** Upload size, row and column ceilings, agent budgets a request may
   lower and never raise.
+- **Authentication.** Optional and off by default. When
+  `API_AUTH_ENABLED=true`, a dependency on nine routes checks
+  `Authorization: Bearer <key>` against the configured key in constant time.
+  The five liveness and capability routes stay open, so a container healthcheck
+  never carries a credential. One shared key, not identity — see
+  [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md).
 - **CORS.** An explicit origin list from configuration, never a wildcard, with
-  credentials off.
+  credentials off. Bearer authentication is explicit and unaffected by that:
+  it travels in a header the caller sets, not in a cookie the browser attaches,
+  which is why `allow_credentials` stays off.
 - **Request correlation.** Every request gets an `X-Request-ID`, returned in
   the response and attached to every log line the request produces.
 
@@ -362,8 +370,11 @@ no ignore rules and no automatic merging.
 
 Absent by decision, not by oversight:
 
-- No authentication, authorisation, rate limiting or multi-user separation.
-- No TLS and no reverse proxy.
+- No identity, authorisation, rate limiting or multi-user separation. There is
+  one optional shared API key (below) and it says *that* a caller is allowed,
+  never *who* they are.
+- No TLS and no reverse proxy — which the API key needs, since a bearer
+  credential over plain HTTP is captured once and reused forever.
 - No background execution — training is synchronous inside the request.
 - No model persistence, and therefore no prediction or model-serving endpoint.
 - No database (PostgreSQL or otherwise) and no vector database (Qdrant or

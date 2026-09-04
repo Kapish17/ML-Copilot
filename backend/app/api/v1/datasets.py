@@ -13,12 +13,16 @@ from typing import Annotated
 from fastapi import APIRouter, File, Form, UploadFile, status
 
 from app.api.dependencies import DatasetServiceDep
+from app.api.security import UNAUTHORIZED_RESPONSE, Protected
 from app.schemas.dataset import DatasetProfileResponse
 from app.schemas.errors import ErrorResponse
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
 _ERROR_RESPONSES: dict[int | str, dict[str, object]] = {
+    # Every route below is protected, so each can be refused before it
+    # runs. Documented here rather than left for a reader to discover.
+    **UNAUTHORIZED_RESPONSE,
     status.HTTP_413_CONTENT_TOO_LARGE: {
         "model": ErrorResponse,
         "description": "The upload or the parsed dataset exceeds a configured limit.",
@@ -46,6 +50,7 @@ _ERROR_RESPONSES: dict[int | str, dict[str, object]] = {
 
 @router.post(
     "/profile",
+    dependencies=[Protected],
     response_model=DatasetProfileResponse,
     responses=_ERROR_RESPONSES,
     summary="Profile a CSV, Excel or JSON dataset",

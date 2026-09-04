@@ -10,11 +10,20 @@
 
 import { vi } from "vitest";
 import type { ErrorResponse } from "@/lib/api/types";
+import { SERVICE_INFO } from "./fixtures";
 
 /** One rule: a path fragment, and what the backend answers for it. */
 export interface Route {
   /** Matched with `includes` against the request URL. */
-  match: string;
+  match?: string;
+  /**
+   * Matched against the URL's pathname exactly.
+   *
+   * `match` cannot express the service-info endpoint: its path is `/`, and
+   * `includes("/")` is true of every URL there has ever been. This is the
+   * escape hatch for a path that is a prefix of all the others.
+   */
+  exactPath?: string;
   status?: number;
   body: unknown;
   /** Delay the response, so a test can observe the loading state. */
@@ -63,7 +72,11 @@ export function mockBackend(routes: Route[]): MockBackend {
         body: init?.body,
       });
 
-      const route = routes.find((candidate) => url.includes(candidate.match));
+      const route = routes.find((candidate) =>
+        candidate.exactPath !== undefined
+          ? new URL(url).pathname === candidate.exactPath
+          : candidate.match !== undefined && url.includes(candidate.match),
+      );
       if (!route) {
         throw new Error(`No mock route matched ${init?.method ?? "GET"} ${url}`);
       }
@@ -118,13 +131,21 @@ export function mockNonJsonResponse(): void {
   );
 }
 
-/** The routes that keep the app shell's status indicator quiet. */
+/**
+ * The routes that keep the app shell's status indicator quiet.
+ *
+ * Three, since the header also asks the service whether it requires an API
+ * key. `serviceBody` defaults to an unauthenticated deployment, which is what
+ * every test that does not care about authentication should see.
+ */
 export function statusRoutes(
   agentBody: unknown,
   knowledgeBody: unknown,
+  serviceBody: unknown = SERVICE_INFO,
 ): Route[] {
   return [
     { match: "/api/v1/agent/status", body: agentBody },
     { match: "/api/v1/knowledge/status", body: knowledgeBody },
+    { exactPath: "/", body: serviceBody },
   ];
 }

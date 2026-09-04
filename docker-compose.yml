@@ -75,6 +75,18 @@ services:
       APP_ENV: ${APP_ENV:-production}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
 
+      # API authentication. Off unless your `.env` turns it on, which is what
+      # keeps `docker compose up --build` a one-command demo with no secret to
+      # configure. Enabling it without a key fails at start-up rather than
+      # serving unprotected traffic.
+      #
+      # **Backend only.** These two lines are the only place the key appears
+      # in this file: the frontend service below receives no API key, has no
+      # build argument for one, and could not use one if it did — anything a
+      # browser bundle carries is readable by every visitor.
+      API_AUTH_ENABLED: ${API_AUTH_ENABLED:-false}
+      API_AUTH_KEY: ${API_AUTH_KEY:-}
+
       # The origins a browser may call this API from. An explicit list, never
       # a wildcard. It must match where the dashboard is actually served from,
       # which is the host, not the Compose network.

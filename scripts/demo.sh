@@ -19,12 +19,20 @@
 # two tools `scripts/smoke-test.sh` uses, and both are already present anywhere
 # this project runs.
 #
-# Does **not** need an API key, a network connection, a database, or any cloud
-# service. Seven of the eight steps are entirely deterministic and local. The
-# eighth asks the AI Data Scientist, which is the one feature that needs a
-# language model; without one configured it prints the documented "not
-# configured" response and carries on, because a demo that dies on step four
-# demonstrates nothing.
+# Does **not** need a network connection, a database, or any cloud service.
+# Seven of the eight steps are entirely deterministic and local. The eighth
+# asks the AI Data Scientist, which is the one feature that needs a language
+# model; without one configured it prints the documented "not configured"
+# response and carries on, because a demo that dies on step four demonstrates
+# nothing.
+#
+# Nor does it need an API key, on the default configuration where the backend
+# has authentication switched off. Against a deployment that has it on:
+#
+#   API_AUTH_KEY=<the key> ./scripts/demo.sh
+#
+# The three status calls in step 0 deliberately go without the header even
+# then, because they are public on every deployment and this demonstrates it.
 #
 # ---------------------------------------------------------------------------
 # On Windows
@@ -39,6 +47,17 @@ BACKEND_URL="${BACKEND_URL:-http://localhost:8000}"
 DATASET="${DATASET:-examples/customer_churn.csv}"
 TARGET="${TARGET:-renewed}"
 QUESTION="${QUESTION:-Which model performs best and why?}"
+
+#: Sent on every request when it is set, and omitted entirely when it is not.
+#: A demo against a protected deployment is `API_AUTH_KEY=... ./scripts/demo.sh`
+#: — the key comes from the environment, is never written to a file here, and
+#: is never printed. `curl` is given the header through an array so it cannot
+#: appear in a shell trace or a process list built from a single string.
+API_AUTH_KEY="${API_AUTH_KEY:-}"
+AUTH_HEADER=()
+if [ -n "$API_AUTH_KEY" ]; then
+    AUTH_HEADER=(-H "Authorization: Bearer $API_AUTH_KEY")
+fi
 
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
@@ -95,7 +114,7 @@ fi
 # ---------------------------------------------------------------------------
 step "1. Profile the dataset"
 # ---------------------------------------------------------------------------
-curl -sS --max-time 60 \
+curl -sS --max-time 60 "${AUTH_HEADER[@]}" \
     -F "file=@$DATASET" -F "target_column=$TARGET" \
     "$BACKEND_URL/api/v1/datasets/profile" -o "$WORK_DIR/profile.json"
 
@@ -123,7 +142,7 @@ import json
 print(json.dumps({'question': '''$QUESTION'''}))
 " > "$WORK_DIR/agent-request.json"
 
-curl -sS --max-time 300 -H 'Content-Type: application/json' \
+curl -sS --max-time 300 "${AUTH_HEADER[@]}" -H 'Content-Type: application/json' \
     --data-binary "@$WORK_DIR/agent-request.json" \
     "$BACKEND_URL/api/v1/agent/ask" -o "$WORK_DIR/agent.json"
 
@@ -139,7 +158,7 @@ note "no chain-of-thought is returned — the trace is which tools ran, not why"
 step "4. Run an experiment"
 # ---------------------------------------------------------------------------
 note "cross-validating every candidate on the training rows only..."
-curl -sS --max-time 900 \
+curl -sS --max-time 900 "${AUTH_HEADER[@]}" \
     -F "file=@$DATASET" -F "target_column=$TARGET" -F "explain=true" \
     -F "name=Demo run" -F "tags=demo" \
     "$BACKEND_URL/api/v1/experiments/run" -o "$WORK_DIR/run.json"
@@ -200,7 +219,7 @@ note "importance describes model behaviour and association, NOT causation"
 step "8. The run is in the history, found by its content fingerprint"
 # ---------------------------------------------------------------------------
 FINGERPRINT="$(read_json "$WORK_DIR/run.json" 'data["dataset"]["fingerprint"]')"
-curl -sS --max-time 60 \
+curl -sS --max-time 60 "${AUTH_HEADER[@]}" \
     "$BACKEND_URL/api/v1/experiments?dataset_fingerprint=$FINGERPRINT&limit=5" \
     -o "$WORK_DIR/history.json"
 
@@ -222,7 +241,7 @@ step "9. Search the project's own documentation"
 # vocabulary of the documentation retrieves noticeably better than a short
 # paraphrase. That is a real property of the default and worth demonstrating
 # honestly; `RAG_EMBEDDING_PROVIDER=sentence_transformer` is the alternative.
-curl -sS --max-time 60 -H 'Content-Type: application/json' \
+curl -sS --max-time 60 "${AUTH_HEADER[@]}" -H 'Content-Type: application/json' \
     -d '{"query": "cross-validation versus the final test evaluation", "top_k": 3}' \
     "$BACKEND_URL/api/v1/search" -o "$WORK_DIR/search.json"
 

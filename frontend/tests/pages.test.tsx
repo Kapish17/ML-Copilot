@@ -28,6 +28,7 @@ import {
   JSON_PROFILE,
   KNOWLEDGE_STATUS,
   SEARCH_RESPONSE,
+  SERVICE_INFO_AUTHENTICATED,
   XLSX_PROFILE,
   csvFile,
   jsonFile,
@@ -97,6 +98,39 @@ describe("application shell", () => {
     const group = await screen.findByRole("group", { name: /system status/i });
     expect(within(group).getByText("not indexed")).toBeInTheDocument();
     expect(within(group).getAllByText("not configured")).toHaveLength(2);
+  });
+
+  it("says nothing about authentication when the backend needs none", async () => {
+    mockBackend(statusRoutes(AGENT_STATUS, KNOWLEDGE_STATUS));
+    render(
+      <AppShell>
+        <div />
+      </AppShell>,
+    );
+
+    const group = await screen.findByRole("group", { name: /system status/i });
+    expect(within(group).queryByText(/API key required/i)).toBeNull();
+  });
+
+  it("admits it cannot use a protected backend rather than pretending", async () => {
+    // The honest state. This dashboard holds no API key and must not — a
+    // browser bundle is readable by every visitor, so anything shipped in it
+    // would not be a secret. Saying so in the header is much better than
+    // letting someone upload a dataset and meet a 401 they cannot satisfy.
+    mockBackend(
+      statusRoutes(AGENT_STATUS, KNOWLEDGE_STATUS, SERVICE_INFO_AUTHENTICATED),
+    );
+    render(
+      <AppShell>
+        <div />
+      </AppShell>,
+    );
+
+    const group = await screen.findByRole("group", { name: /system status/i });
+    expect(within(group).getByText(/API key required/i)).toBeInTheDocument();
+    expect(
+      within(group).getByText(/this dashboard cannot hold one/i),
+    ).toBeInTheDocument();
   });
 
   it("reports an unreachable backend rather than pretending", async () => {

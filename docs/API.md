@@ -13,7 +13,58 @@ Everything here exists. No endpoint on this page is planned.
 
 **Base path.** Everything except `/` and `/health` lives under `/api/v1`.
 
-**Authentication.** None. This API is unauthenticated by design — see
+**Authentication.** Optional, and **off by default** — which is what lets the
+local and demo stack run with no secret at all. A deployment that sets
+`API_AUTH_ENABLED=true` (and a key in `API_AUTH_KEY`) requires a bearer token
+on every protected endpoint:
+
+```
+Authorization: Bearer <API_AUTH_KEY>
+```
+
+| Public — never needs a credential | Protected — needs one when enabled |
+| --- | --- |
+| `GET /` | `POST /api/v1/datasets/profile` |
+| `GET /health` | `POST /api/v1/experiments/run` |
+| `GET /api/v1/experiments/capabilities` | `GET /api/v1/experiments` |
+| `GET /api/v1/knowledge/status` | `GET /api/v1/experiments/{id}` |
+| `GET /api/v1/agent/status` | `POST /api/v1/experiments/compare` |
+| | `POST /api/v1/search` |
+| | `POST /api/v1/ask` |
+| | `POST /api/v1/agent/ask` |
+| | `POST /api/v1/agent/ask-with-dataset` |
+
+The public five are liveness and capability information: booleans, limits and
+the service's own version. A container healthcheck cannot carry a credential,
+and a client has to be able to ask *whether* one is needed before it has one —
+`GET /` answers that with `authentication_required`.
+
+**401 behaviour.** Every failure is the same envelope as any other error, with
+`WWW-Authenticate: Bearer` and an `X-Request-ID`:
+
+| Situation | `code` |
+| --- | --- |
+| No `Authorization` header | `authentication_required` |
+| A header that is not `Bearer <token>` | `authentication_required` |
+| `Bearer` with an empty token | `authentication_required` |
+| A bearer token that is not the configured key | `invalid_credentials` |
+
+The comparison is constant-time over SHA-256 digests, so neither the response
+nor its timing distinguishes a near miss from a random guess. **Nothing echoes
+the credential** — not the message, not the details, not a header, not a log
+line. A rejected request logs `Authentication failed` and the value that
+failed appears nowhere.
+
+**From a browser, deliberately not.** `Authorization` is not among the CORS
+allowed request headers, so a page on an allowed origin cannot send the key
+cross-origin. A browser cannot hold a shared secret safely, so the supported
+way to reach a protected deployment from one is a server-side proxy that adds
+the header — whose own requests are not cross-origin browser requests, and are
+unaffected. Server-to-server callers are not subject to CORS at all.
+
+This is a single shared key, not identity: no users, no roles, no expiry. And
+it is a password sent on every request, so a remote deployment must terminate
+TLS in front of it — see
 [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md).
 
 **Uploads** are `multipart/form-data`; everything else is JSON. Three formats
@@ -51,13 +102,22 @@ so. Only a genuine provider or server failure is 5xx.
 
 ### `GET /`
 
-Describe the running service.
+Describe the running service. **Public.**
 
-**Returns** `name`, `version`, `environment`, `docs_url`.
+**Returns** `name`, `version`, `environment`, `docs_url`, and
+`authentication_required` — whether the protected endpoints need a bearer
+token on this deployment. That last one is a fact about the *configuration*,
+never about the key: it says a credential is required, not what it is. It is
+also not a disclosure, since one unauthenticated request and a 401 reveals the
+same thing; publishing it lets a client say so up front instead of failing on
+the user's first action.
 
 ### `GET /health`
 
-Liveness. This is what both container healthchecks call.
+Liveness. This is what both container healthchecks call, and it is **public on
+every deployment** — a healthcheck that carried the API key would put the
+credential into an image layer, into `docker inspect` and into every process
+list on the host.
 
 **Returns** `{"status": "ok", "version": "...", "environment": "..."}`.
 
@@ -353,9 +413,18 @@ curl -F "file=@examples/customer_churn.csv" -F "target_column=renewed" \
 
 # Search the project's own documentation
 curl -H 'Content-Type: application/json' \
-     -d '{"query": "how is data leakage prevented"}' \
+     -d '{"query": "cross-validation versus the final test evaluation"}' \
      http://localhost:8000/api/v1/search
 ```
 
-`scripts/demo.sh` runs the whole sequence. See
+On a deployment with `API_AUTH_ENABLED=true`, add the header to each of those:
+
+```bash
+curl -H "Authorization: Bearer $API_AUTH_KEY" \
+     -F "file=@examples/customer_churn.csv" -F "target_column=renewed" \
+     http://localhost:8000/api/v1/datasets/profile
+```
+
+`scripts/demo.sh` runs the whole sequence, and passes the header when
+`API_AUTH_KEY` is set in the environment. See
 [ARCHITECTURE.md](ARCHITECTURE.md) for how the pieces fit together.

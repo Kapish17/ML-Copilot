@@ -33,6 +33,21 @@ DEFAULT_MAX_DATASET_COLUMNS = 1_000
 #: Parquet, SQL, databases, cloud storage and URL ingestion are not implemented.
 SUPPORTED_DATASET_EXTENSIONS = (".csv", ".xlsx", ".json")
 
+# API authentication --------------------------------------------------------
+#: **Off by default, and that is a deliberate choice rather than an oversight.**
+#: `docker compose up --build` has to bring up a working system with no secret
+#: to configure, because that is what makes this project demonstrable. Turning
+#: authentication on is one environment variable; leaving it off is a local
+#: tool listening on loopback, which is what the Compose file publishes.
+DEFAULT_API_AUTH_ENABLED = False
+#: Shortest key accepted when authentication is enabled. Not a strength
+#: estimate — a long key can still be guessable — but it refuses the failure
+#: mode that actually happens: someone types `API_AUTH_KEY=test` to get past a
+#: start-up error and leaves it there. 32 characters is what
+#: `secrets.token_urlsafe(24)` produces, which is what the documentation tells
+#: people to run.
+MIN_API_AUTH_KEY_LENGTH = 32
+
 # Browser access -----------------------------------------------------------
 #: Origins the dashboard may be served from. The frontend runs as a separate
 #: service, so its requests are cross-origin and a browser blocks them without
@@ -119,6 +134,42 @@ def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
     return value
 
 
+#: What counts as "on". Spelled out rather than "anything but empty", so
+#: `API_AUTH_ENABLED=false` cannot switch authentication on, and a typo cannot
+#: switch it *off* silently either — an unrecognised value is an error.
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_VALUES = frozenset({"0", "false", "no", "off", ""})
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """Read a boolean environment variable.
+
+    Args:
+        name: Variable to read.
+        default: Value used when the variable is unset or blank.
+
+    Returns:
+        bool: The parsed value.
+
+    Raises:
+        ValueError: If the variable holds something that is neither true nor
+            false. A security switch must never be decided by a guess: with
+            `API_AUTH_ENABLED=ture`, refusing to start is the safe outcome and
+            quietly serving unauthenticated traffic is not.
+    """
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in _TRUE_VALUES:
+        return True
+    if raw in _FALSE_VALUES:
+        return False
+    raise ValueError(
+        f"{name} must be one of {sorted(_TRUE_VALUES | _FALSE_VALUES - {''})}, "
+        f"got {raw!r}"
+    )
+
+
 @dataclass(frozen=True)
 class Settings:
     """Immutable runtime settings for the backend service."""
@@ -134,6 +185,15 @@ class Settings:
     max_dataset_rows: int = DEFAULT_MAX_DATASET_ROWS
     max_dataset_columns: int = DEFAULT_MAX_DATASET_COLUMNS
     supported_dataset_extensions: tuple[str, ...] = SUPPORTED_DATASET_EXTENSIONS
+
+    # API authentication
+    api_auth_enabled: bool = DEFAULT_API_AUTH_ENABLED
+    #: The expected bearer token. Empty unless authentication is enabled, and
+    #: **read from the environment only** — there is no default, none is
+    #: generated, and nothing writes it anywhere. It never reaches a response
+    #: body, a log line, an experiment record, a RAG document or the OpenAPI
+    #: schema; `backend/tests/test_authentication.py` asserts each of those.
+    api_auth_key: str = ""
 
     # Browser access
     cors_allow_origins: tuple[str, ...] = DEFAULT_CORS_ALLOW_ORIGINS
@@ -172,6 +232,41 @@ class Settings:
     max_experiment_page_limit: int = DEFAULT_MAX_EXPERIMENT_PAGE_LIMIT
     max_comparison_experiments: int = DEFAULT_MAX_COMPARISON_EXPERIMENTS
 
+    def __post_init__(self) -> None:
+        """Refuse a configuration that would run unprotected while claiming not to.
+
+        The dangerous state is ``API_AUTH_ENABLED=true`` with no key. Whatever
+        the intent, the outcome would be an operator who believes the service
+        is protected. Two ways to resolve that are both wrong: generating a key
+        would produce a secret nobody knows and every restart would change it,
+        and falling back to a built-in default would ship a password that is in
+        the source of a public repository.
+
+        So this fails, here, before the application is built — which means
+        `uvicorn` exits with the reason on stderr rather than serving traffic.
+        The check lives on the dataclass rather than in :func:`get_settings`
+        so it holds for every ``Settings`` ever constructed, including the ones
+        tests build by hand.
+
+        Raises:
+            ValueError: If authentication is enabled without a usable key.
+        """
+        if not self.api_auth_enabled:
+            return
+        key = self.api_auth_key
+        if not key.strip():
+            raise ValueError(
+                "API_AUTH_ENABLED is true but API_AUTH_KEY is empty. Set a key, "
+                "or set API_AUTH_ENABLED=false. No key is generated and there "
+                "is no default."
+            )
+        if len(key) < MIN_API_AUTH_KEY_LENGTH:
+            raise ValueError(
+                f"API_AUTH_KEY must be at least {MIN_API_AUTH_KEY_LENGTH} "
+                "characters. Generate one with: "
+                "python -c \"import secrets; print(secrets.token_urlsafe(24))\""
+            )
+
     @property
     def max_upload_mb(self) -> float:
         """Upload limit expressed in megabytes, for user-facing messages."""
@@ -190,6 +285,11 @@ def get_settings() -> Settings:
     return Settings(
         app_env=os.getenv("APP_ENV", "development"),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        api_auth_enabled=_env_bool("API_AUTH_ENABLED", DEFAULT_API_AUTH_ENABLED),
+        # Stripped, because a `.env` file routinely leaves a trailing newline
+        # or a stray space and a credential that fails to match for that reason
+        # is an afternoon nobody gets back.
+        api_auth_key=os.getenv("API_AUTH_KEY", "").strip(),
         max_upload_bytes=_env_int("MAX_UPLOAD_MB", DEFAULT_MAX_UPLOAD_MB) * BYTES_PER_MB,
         cors_allow_origins=_env_origins(
             "CORS_ALLOW_ORIGINS", DEFAULT_CORS_ALLOW_ORIGINS

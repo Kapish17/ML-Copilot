@@ -24,6 +24,7 @@ from __future__ import annotations
 from fastapi import APIRouter, status
 
 from app.api.dependencies import KnowledgeServiceDep
+from app.api.security import UNAUTHORIZED_RESPONSE, Protected
 from app.schemas.errors import ErrorResponse
 from app.schemas.knowledge import (
     AskRequest,
@@ -37,6 +38,9 @@ from app.schemas.knowledge import (
 router = APIRouter(tags=["knowledge"])
 
 _SEARCH_ERRORS: dict[int | str, dict[str, object]] = {
+    # Every route below is protected, so each can be refused before it
+    # runs. Documented here rather than left for a reader to discover.
+    **UNAUTHORIZED_RESPONSE,
     status.HTTP_400_BAD_REQUEST: {
         "model": ErrorResponse,
         "description": (
@@ -58,6 +62,9 @@ _SEARCH_ERRORS: dict[int | str, dict[str, object]] = {
 }
 
 _ASK_ERRORS: dict[int | str, dict[str, object]] = {
+    # Every route below is protected, so each can be refused before it
+    # runs. Documented here rather than left for a reader to discover.
+    **UNAUTHORIZED_RESPONSE,
     **_SEARCH_ERRORS,
     status.HTTP_502_BAD_GATEWAY: {
         "model": ErrorResponse,
@@ -78,6 +85,7 @@ _ASK_ERRORS: dict[int | str, dict[str, object]] = {
 
 @router.post(
     "/search",
+    dependencies=[Protected],
     response_model=SearchResponse,
     responses=_SEARCH_ERRORS,
     summary="Search project documentation and experiment history",
@@ -137,6 +145,7 @@ def search_knowledge(
 
 @router.post(
     "/ask",
+    dependencies=[Protected],
     response_model=AskResponse,
     responses=_ASK_ERRORS,
     summary="Answer a question from retrieved evidence, with citations",
