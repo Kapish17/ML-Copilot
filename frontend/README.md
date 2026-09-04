@@ -144,7 +144,8 @@ frontend/
 │   ├── common/                  Card, DataTable, Badge, Tabs, Button, …
 │   ├── dataset/                 Upload, profile, quality findings, columns
 │   ├── agent/                   Answer card, tool trace, citations
-│   ├── experiments/             Model comparison, metrics, history, compare
+│   ├── experiments/             Model comparison, metrics, history, compare,
+│   │                            prediction
 │   ├── explainability/          Global importance, local explanation
 │   └── knowledge/               Search results, grounded answer
 ├── lib/
@@ -198,7 +199,12 @@ than the name.
    citations, the tools that ran, and the dataset's fingerprint.
 4. **Run an experiment** directly if you would rather drive it yourself.
 5. **Read the result** — the model comparison, the metrics, the explanation.
-6. **Open the experiment** from a citation, or from the history page.
+6. **Predict with it** — the run's **Predict** tab builds a form from the
+   model's own declared schema and sends one record. The values go through the
+   same fitted preprocessing the run produced; nothing is re-fitted. A run with
+   no stored model says so rather than showing a form whose requests could not
+   succeed.
+7. **Open the experiment** from a citation, or from the history page.
 
 Repeat with the same data as `.xlsx` and `.json`: the fingerprint is identical,
 so all three runs appear as one dataset in the history. That is the clearest
@@ -315,7 +321,9 @@ credential.
 The suite covers the API client and configuration, the error mapper, the upload
 control for all three formats, the profile and quality views, classification
 and regression metrics, the CV-versus-test distinction, SHAP and local
-explanations, the experiment history, detail and comparison, retrieval, grounded
+explanations, the experiment history, detail and comparison, prediction —
+availability, the schema-driven form, classification and regression results and
+every failure it can meet — retrieval, grounded
 answers and all four agent outcomes, loading and empty states, malformed
 responses, browser-storage emptiness, and the accessibility and responsive
 contracts above.

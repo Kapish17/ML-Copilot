@@ -6,8 +6,8 @@
 #   ./scripts/demo.sh
 #
 # It walks the same path the README's demo walks in the dashboard — profile,
-# ask, experiment, compare, explain, history, search — and prints the answer at
-# each step. The point is to make the product's claims *checkable* in one
+# ask, experiment, compare, explain, history, search, predict — and prints the
+# answer at each step. The point is to make the product's claims *checkable* in one
 # command: the leakage-safe split, the separation of cross-validation from the
 # held-out measurement, the baseline comparison, and the fact that the same
 # table in three formats has one identity.
@@ -20,11 +20,11 @@
 # this project runs.
 #
 # Does **not** need a network connection, a database, or any cloud service.
-# Seven of the eight steps are entirely deterministic and local. The eighth
-# asks the AI Data Scientist, which is the one feature that needs a language
-# model; without one configured it prints the documented "not configured"
-# response and carries on, because a demo that dies on step four demonstrates
-# nothing.
+# Every step but one is entirely deterministic and local. The exception is
+# step 3, which asks the AI Data Scientist — the one feature that needs a
+# language model; without one configured it prints the documented "not
+# configured" response and carries on, because a demo that dies on step three
+# demonstrates nothing.
 #
 # Nor does it need an API key, on the default configuration where the backend
 # has authentication switched off. Against a deployment that has it on:
@@ -251,6 +251,58 @@ read_json "$WORK_DIR/search.json" '
         r["rank"], r["citation_id"], r["source_title"], r["score"])
     for r in data.get("results", [])) or "  (no results)"'
 note "every passage carries a citation id; answers may cite only these"
+
+# ---------------------------------------------------------------------------
+step "10. Predict with the model that run produced"
+# ---------------------------------------------------------------------------
+# The point of this step is what it does *not* do. It sends feature values and
+# an experiment id — no path, no filename, no model reference. The backend
+# loads the pipeline that run fitted and calls it; the preprocessing is the one
+# fitted on the training rows above, and nothing here re-fits anything.
+curl -sS --max-time 60 "${AUTH_HEADER[@]}" \
+    "$BACKEND_URL/api/v1/experiments/$EXPERIMENT_ID/model" \
+    -o "$WORK_DIR/model.json"
+
+AVAILABLE="$(read_json "$WORK_DIR/model.json" 'str(data["available"]).lower()')"
+
+if [ "$AVAILABLE" != "true" ]; then
+    note "no model stored: $(read_json "$WORK_DIR/model.json" 'data.get("reason") or "?"')"
+elif [ "${DATASET##*.}" != "csv" ]; then
+    note "skipped: this step reads its example row from a CSV, and DATASET is not one"
+else
+    read_json "$WORK_DIR/model.json" '
+"  %s predicts %r from %d feature(s)" % (
+    data["display_name"], data["target_column"], len(data["features"]))'
+
+    # One record, built from the first row of the demo file and narrowed to
+    # exactly the features the model declares. A feature the model was not
+    # trained on is refused rather than ignored, so narrowing is not optional.
+    python3 -c "
+import csv, json
+with open('$DATASET', newline='') as handle:
+    row = next(iter(csv.DictReader(handle)))
+model = json.load(open('$WORK_DIR/model.json'))
+record = {f['name']: (row.get(f['name']) or None) for f in model['features']}
+print(json.dumps({'records': [record]}))
+" > "$WORK_DIR/predict-request.json"
+
+    curl -sS --max-time 60 "${AUTH_HEADER[@]}" -H 'Content-Type: application/json' \
+        --data-binary "@$WORK_DIR/predict-request.json" \
+        "$BACKEND_URL/api/v1/experiments/$EXPERIMENT_ID/predict" \
+        -o "$WORK_DIR/predict.json"
+
+    read_json "$WORK_DIR/predict.json" '
+"  predicted %s = %r" % (
+    data["model"]["target_column"], data["predictions"][0]["prediction"])
+if "predictions" in data else "  " + data.get("error", {}).get("message", "?")'
+    read_json "$WORK_DIR/predict.json" '
+"  " + "  ".join(
+    "%s=%.3f" % (label, value)
+    for label, value in sorted(
+        (data["predictions"][0].get("probabilities") or {}).items()))
+if "predictions" in data else ""'
+    note "the held-out score above measures the model, not this prediction"
+fi
 
 printf '\n\033[1m\033[32mDemo complete.\033[0m Experiment %s is at %s/api/v1/experiments/%s\n' \
     "$EXPERIMENT_ID" "$BACKEND_URL" "$EXPERIMENT_ID"

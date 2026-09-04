@@ -12,6 +12,7 @@ import { Tabs } from "@/components/common/Tabs";
 import { ExperimentSummary } from "@/components/experiments/ExperimentSummary";
 import { MetricsPanel } from "@/components/experiments/MetricsPanel";
 import { ModelComparisonTable } from "@/components/experiments/ModelComparisonTable";
+import { PredictionPanel } from "@/components/experiments/PredictionPanel";
 import { GlobalImportance } from "@/components/explainability/GlobalImportance";
 import { QualityFindings } from "@/components/dataset/QualityFindings";
 import { getExperiment } from "@/lib/api/experiments";
@@ -104,6 +105,11 @@ export default function ExperimentDetailPage() {
                   ),
                 },
                 {
+                  id: "predict",
+                  label: "Predict",
+                  content: <PredictionPanel experimentId={record.experiment_id} />,
+                },
+                {
                   id: "data",
                   label: "Data & preparation",
                   content: (
@@ -184,9 +190,11 @@ export default function ExperimentDetailPage() {
 
                       <p className="text-xs text-ink-500">
                         The stored record holds the fingerprint, the decisions
-                        and the scores. It contains no dataset rows and no
-                        fitted model — models are not persisted, so an older run
-                        cannot be re-explained per prediction.
+                        and the scores. It contains no dataset rows: the
+                        uploaded file was parsed in memory for one request and
+                        released, and nothing here is a copy of it. The fitted
+                        model is kept separately — see the Predict tab — and it
+                        holds learned coefficients, not data.
                       </p>
                     </div>
                   ),

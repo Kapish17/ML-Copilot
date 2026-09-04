@@ -29,10 +29,14 @@ that never stored one. The answer is a structured result with
 ``reason = "fitted_model_not_persisted"`` and an explanation of why. No SHAP
 value is ever invented, estimated, or carried over from a different run.
 
-A caller that wants live explanations of historical experiments needs model
-persistence, which is a deliberate future decision with real costs — artefact
-storage, versioning, and the security question of loading a pickled estimator.
-It is not something this tool should quietly introduce.
+The application does now persist a successful run's fitted pipeline, and
+``POST /api/v1/experiments/{id}/predict`` uses it. **This tool deliberately
+does not.** Reaching a stored artifact means deserialising a pickle, and this
+package holds the tightest boundary in the project: it imports no filesystem
+access, no ``scikit-learn`` and nothing from the backend, and it is handed the
+models it may explain rather than going to find them. A live explanation of a
+historical run would be a genuine feature, and it belongs on the side of that
+boundary that already owns the artifact store — not inside the agent.
 """
 
 from __future__ import annotations

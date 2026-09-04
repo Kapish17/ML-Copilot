@@ -75,7 +75,7 @@ Next.js 15 (App Router), React 19, TypeScript, Tailwind. Four routes:
 | --- | --- |
 | `/dashboard` | Upload a dataset, read its profile and quality findings, ask the AI Data Scientist, run an experiment |
 | `/experiments` | Browse stored runs; select several and compare them |
-| `/experiments/[id]` | One run in full: model comparison, metrics, SHAP |
+| `/experiments/[id]` | One run in full: model comparison, metrics, SHAP, and predicting from its stored model |
 | `/knowledge` | Search the project's own documentation and run history |
 
 The API client is hand-written and fully typed — no `any` on a response — and
@@ -108,7 +108,7 @@ Its jobs, and only these:
 - **Bounds.** Upload size, row and column ceilings, agent budgets a request may
   lower and never raise.
 - **Authentication.** Optional and off by default. When
-  `API_AUTH_ENABLED=true`, a dependency on nine routes checks
+  `API_AUTH_ENABLED=true`, a dependency on eleven routes checks
   `Authorization: Bearer <key>` against the configured key in constant time.
   The five liveness and capability routes stay open, so a container healthcheck
   never carries a credential. One shared key, not identity — see
@@ -167,6 +167,11 @@ CSV, Excel, JSON or HTTP.
 ```
 profile ─▶ preprocessing config ─▶ leakage-safe split ─▶ cross-validated
 selection ─▶ retrain winner ─▶ one test measurement ─▶ SHAP ─▶ stored record
+                                                                     │
+                                                     persist winner ─┘
+                                                             │
+                                                             ▼
+                                            predict on new records later
 ```
 
 - **Preprocessing** is a scikit-learn `Pipeline` + `ColumnTransformer`:
@@ -190,6 +195,62 @@ selection ─▶ retrain winner ─▶ one test measurement ─▶ SHAP ─▶ s
   accuracy" can be read against what predicting the majority class would score.
 
 Details: [ml/README.md](../ml/README.md).
+
+---
+
+## Model artifacts and prediction
+
+The winner of a successful run is the whole point of having run it, and it is
+already a single object: `TrainedModel.pipeline` is a fitted
+`Pipeline(preprocessing, estimator)` that accepts **raw feature rows**. So
+persistence is that one object written out, and prediction is that one object
+called.
+
+```
+run finishes  ─▶  joblib.dump(pipeline)  +  manifest (feature schema, classes,
+                                              metrics, environment, sha256)
+                          │
+                          ▼
+       POST /experiments/{id}/predict  ─▶  validate records against the
+                                            manifest  ─▶  pipeline.predict
+```
+
+**Nothing is re-fitted and nothing is reassembled.** The preprocessing that
+transforms a prediction request is the object fitted on that run's training
+rows — the same one the held-out score was measured through. A test proves this
+by making `fit` and `fit_transform` raise for the duration of a prediction.
+
+`ml/artifacts/` holds three pieces: `schema.py` (the manifest and what a
+feature is), `store.py` (a `ModelArtifactStore` `Protocol` and a local
+filesystem implementation) and `prediction.py` (validating records against a
+manifest, and predicting). The backend owns a store instance and passes it to
+the experiment runner and the prediction service; a second implementation —
+object storage, a registry — is a new class behind the same `Protocol`.
+
+**Trust boundary.** A `joblib` file is a pickle, and loading one executes code,
+so the control is *what may be loaded*. Four barriers, in order:
+
+1. **No path ever comes from a request.** The API accepts feature values and an
+   experiment id. There is no field, anywhere, that names a file.
+2. **The id is validated as an id** before it is used to address anything.
+3. **The resolved directory is re-checked** against the artifact root, so a
+   traversal that survived step 2 still cannot escape.
+4. **The filename is a constant.** It is never read from the manifest, so a
+   tampered manifest cannot redirect the load.
+
+Then the manifest is parsed and its schema version checked **before** anything
+is unpickled, the model file's SHA-256 is verified against the manifest, a size
+ceiling applies, and the loaded object must be a `Pipeline`. Anyone who can
+write into the artifact directory can run code as the service — that directory
+is trusted exactly as much as the application's own source, which is why it is
+application-owned and why **no endpoint accepts a model file**. Third-party
+model files are not supported.
+
+Persistence happens **only after** evaluation succeeds, so an incomplete run
+leaves nothing behind; a failed write is a warning on the run, not a failed
+experiment. A run recorded before this existed answers `model_not_available`
+rather than having an artifact conjured for it. And **no dataset row is written
+at any point** — the manifest holds column names, kinds and dtypes.
 
 ---
 
@@ -222,8 +283,11 @@ decision, the candidate results, the CV score and its spread, the single test
 measurement, the baseline comparison, the explanation and the environment
 (Python version, platform, package versions, random state).
 
-It does **not** hold dataset rows and does **not** hold a fitted model. That is
-why there is no prediction endpoint: nothing is persisted that could serve one.
+It does **not** hold dataset rows. It does not hold the fitted model either —
+that lives in the artifact store described above, and the record carries only a
+`model_artifact` note saying one was written and what features it expects. The
+note is history; the store is the authority on whether a prediction can be made
+today.
 
 Identifiers are validated and resolved paths are re-checked against the store
 root, so an experiment id can never address a file outside it.
@@ -315,8 +379,12 @@ Details: [agent/README.md](../agent/README.md).
 | What | Where | Survives `down` | Survives `down -v` |
 | --- | --- | --- | --- |
 | Experiment records | `experiment-store` volume, JSON files | yes | no |
+| Trained model artifacts | `model-artifacts` volume, one directory per experiment | yes | no |
 | Retrieval index | `rag-index` volume, rebuilt at start | yes | no |
 | Uploaded datasets | **nowhere — never written to disk** | — | — |
+
+An artifact directory holds two files: the fitted pipeline and its manifest.
+Learned parameters and column *names* — no dataset row, in either.
 
 No database. No object store. No model registry.
 
@@ -376,7 +444,9 @@ Absent by decision, not by oversight:
 - No TLS and no reverse proxy — which the API key needs, since a bearer
   credential over plain HTTP is captured once and reused forever.
 - No background execution — training is synchronous inside the request.
-- No model persistence, and therefore no prediction or model-serving endpoint.
+- No model registry, versioning, promotion or rollback. A run's winning
+  pipeline is persisted to a local volume and can be predicted from; that is
+  serving on one node, not a managed release.
 - No database (PostgreSQL or otherwise) and no vector database (Qdrant or
   otherwise). Records and the index are local files.
 - No hyperparameter optimisation, no gradient-boosting libraries, no MLflow.

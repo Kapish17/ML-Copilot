@@ -22,6 +22,7 @@ from fastapi import APIRouter, File, Path, Query, UploadFile, status
 from app.api.dependencies import (
     ExperimentHistoryDep,
     ExperimentRunnerDep,
+    PredictionServiceDep,
     SettingsDep,
 )
 from app.api.security import UNAUTHORIZED_RESPONSE, Protected
@@ -36,6 +37,11 @@ from app.schemas.experiment import (
     ExperimentRecord,
     ExperimentRunResponse,
     ModelInfo,
+)
+from app.schemas.prediction import (
+    ModelAvailability,
+    PredictionRequest,
+    PredictionResponse,
 )
 from app.services.experiments.history import SORT_KEYS, SORT_ORDERS
 from app.services.experiments.options import SELECTION_STRATEGIES
@@ -329,3 +335,117 @@ def get_experiment(
     evaluation, the explanation and the environment.
     """
     return ExperimentRecord.model_validate(history.get(experiment_id).to_dict())
+
+
+_MODEL_ERRORS: dict[int | str, dict[str, object]] = {
+    **UNAUTHORIZED_RESPONSE,
+    status.HTTP_400_BAD_REQUEST: {
+        "model": ErrorResponse,
+        "description": "The experiment id is malformed.",
+    },
+    status.HTTP_404_NOT_FOUND: {
+        "model": ErrorResponse,
+        "description": "No experiment is stored under that id.",
+    },
+}
+
+_PREDICT_ERRORS: dict[int | str, dict[str, object]] = {
+    **_MODEL_ERRORS,
+    status.HTTP_409_CONFLICT: {
+        "model": ErrorResponse,
+        "description": (
+            "`model_not_available` — the experiment exists but has no stored "
+            "model. A run recorded before model persistence existed, or one "
+            "whose artifact has been removed. Re-run the experiment to make "
+            "one. Deliberately not a 404: the run itself is fine."
+        ),
+    },
+    status.HTTP_422_UNPROCESSABLE_CONTENT: {
+        "model": ErrorResponse,
+        "description": (
+            "`invalid_prediction_input` — a record is missing a feature the "
+            "model needs, carries one it was not trained on, or holds a value "
+            "that is not the kind of thing the column expects. The details "
+            "name the record and the columns."
+        ),
+    },
+    status.HTTP_500_INTERNAL_SERVER_ERROR: {
+        "model": ErrorResponse,
+        "description": "The stored model could not be read.",
+    },
+}
+
+
+@router.get(
+    "/{experiment_id}/model",
+    dependencies=[Protected],
+    response_model=ModelAvailability,
+    responses=_MODEL_ERRORS,
+    summary="Report whether an experiment can be predicted from",
+)
+def experiment_model(
+    predictions: PredictionServiceDep,
+    experiment_id: Annotated[
+        str, Path(description="Identifier returned when the experiment ran.")
+    ],
+) -> ModelAvailability:
+    """Describe the stored model, or say why there is none.
+
+    Answered from the **artifact store**, not from the stored record. The
+    record notes that a model was written when the run finished; this says
+    whether one is there now, which is a different question once an artifact
+    can be deleted or a volume wiped.
+
+    When a model is present the response carries the exact feature schema a
+    prediction must satisfy — each column's name, the branch of the fitted
+    preprocessing that handles it, and the dtype it had at training time — so
+    a client builds its form from what the model actually wants rather than
+    from a guess. Only the manifest is read; the model itself is not
+    deserialised, so asking is cheap.
+
+    **No filesystem location appears in the response**, and none is available
+    to appear: nothing in this path handles one.
+    """
+    return ModelAvailability.model_validate(predictions.describe(experiment_id))
+
+
+@router.post(
+    "/{experiment_id}/predict",
+    dependencies=[Protected],
+    response_model=PredictionResponse,
+    responses=_PREDICT_ERRORS,
+    summary="Predict from the model this experiment trained",
+)
+def predict_from_experiment(
+    predictions: PredictionServiceDep,
+    experiment_id: Annotated[
+        str, Path(description="Identifier returned when the experiment ran.")
+    ],
+    request: PredictionRequest,
+) -> PredictionResponse:
+    """Predict for one or more records, using the model this run produced.
+
+    The model is chosen by the id in the URL and by nothing else. **No path,
+    filename or artifact reference is accepted from a request**, so there is
+    nothing for a caller to point at another file; the id is validated before
+    it addresses either a record or a directory.
+
+    The prediction runs through the **same fitted pipeline the experiment
+    produced** — the preprocessing that learned its statistics from the
+    training rows, with the winning estimator behind it. Nothing is refitted,
+    which is what makes a prediction made today comparable to the held-out
+    score that run reported.
+
+    One record or a thousand take the same shape: `records` is always a list,
+    and `predictions` comes back in the same order and the same length, with
+    each item carrying the index of the record that produced it. A classifier
+    whose estimator supplies them also returns a probability per class.
+
+    A feature the model was not trained on is **refused**, not ignored. Such a
+    column is dropped rather than used, so a misspelt name would otherwise
+    produce a confident prediction made without the value the caller believed
+    they supplied.
+    """
+    return PredictionResponse.model_validate(
+        predictions.predict(experiment_id, request.records)
+    )

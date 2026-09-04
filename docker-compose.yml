@@ -96,6 +96,12 @@ services:
       # override the repository-relative defaults in `.env.example`.
       EXPERIMENT_STORE_DIR: /data/experiments
       RAG_INDEX_DIR: /data/rag-index
+      # The fitted model of each finished run, so it can be predicted from
+      # later. A volume of its own rather than a corner of the experiment
+      # store: it holds binary pickles rather than readable JSON, and
+      # unpickling executes code — so it is a directory that must be treated
+      # as executable and written to by nothing but this service.
+      MODEL_ARTIFACT_DIR: /data/models
 
       # Optional. Everything except answer generation works without it:
       # profiling, experiments, SHAP, history and retrieval all run, and the
@@ -116,6 +122,10 @@ services:
     volumes:
       # Experiment records: JSON files, no data and no fitted model in them.
       - experiment-store:/data/experiments
+      # Fitted models. Removed by `docker compose down -v` along with the
+      # records they belong to, which is the right coupling: a model whose
+      # experiment is gone is a model nobody can interpret.
+      - model-artifacts:/data/models
       # The retrieval index, rebuilt incrementally at every start.
       - rag-index:/data/rag-index
       #
@@ -156,4 +166,5 @@ services:
 volumes:
   # Survives `docker compose down`, and is removed by `docker compose down -v`.
   experiment-store:
+  model-artifacts:
   rag-index:

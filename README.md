@@ -121,12 +121,14 @@ Full detail, including the ingestion adapters, storage and deployment:
 | **Model selection** | Six models, cross-validated on the **training rows only**, with fold-level scores, mean and spread. The winner is chosen from CV scores and never from the test set. |
 | **Unbiased evaluation** | The winner is retrained on the full training set and measured **once** on the untouched test set, against a naive baseline, with metric direction carried alongside so nothing assumes higher is better. |
 | **Explainability** | SHAP over the transformed features with readable names, global ranked importance and signed per-prediction contributions, and a permutation fallback for models SHAP cannot handle. A failed explanation is a status, not a 500. |
-| **Experiment tracking** | Versioned JSON records: fingerprint, every preprocessing decision, candidate results, both scores, the baseline, the explanation, and the environment. Atomic writes. No rows and no fitted model are stored. |
+| **Experiment tracking** | Versioned JSON records: fingerprint, every preprocessing decision, candidate results, both scores, the baseline, the explanation, and the environment. Atomic writes. **No dataset rows are stored** — the record holds column names and statistics, never a cell. |
+| **Model persistence** | A successful run's winning `Pipeline` — the preprocessing *as fitted*, plus the retrained estimator — is written to an application-owned artifact directory beside a manifest of the feature schema, checksummed and verified on load. Written only after evaluation succeeds; a failed write is a warning, not a failed experiment. |
+| **Prediction** | `POST /api/v1/experiments/{id}/predict` runs new records through that exact stored pipeline. **Nothing is re-fitted**, so a prediction goes through the same transformation the held-out score was measured through. A request carries feature values and never a path. |
 | **Retrieval** | Semantic search over the project's own documentation and its run history, with structure-aware chunking, pre-ranking metadata filters and stable citations. The default embedding provider is stateless — no download, no key, identical vectors everywhere. |
 | **Grounded answers** | Evidence-first generation with validated citations, over any OpenAI-compatible endpoint — hosted, or a model on your laptop via `LLM_BASE_URL`. |
 | **Bounded agent** | Four registered tools, typed arguments, hard budgets, four outcomes all returned as HTTP 200 with a status. No chain-of-thought is ever returned. |
 | **Dashboard** | Upload, profile, ask, run, compare, explain, browse history, search knowledge. Runtime dependencies: Next.js, React, React DOM. No UI kit, no chart library, no state manager. |
-| **Authentication** | Optional shared API key over `Authorization: Bearer`, compared in constant time, on the nine endpoints that cost something. Off by default so the demo needs no secret; enabling it without a key fails at start-up rather than pretending to be protected. The key never reaches the browser, an image, a log or the schema. |
+| **Authentication** | Optional shared API key over `Authorization: Bearer`, compared in constant time, on the eleven endpoints that cost something. Off by default so the demo needs no secret; enabling it without a key fails at start-up rather than pretending to be protected. The key never reaches the browser, an image, a log or the schema. |
 
 ## The five-minute demo
 
@@ -193,6 +195,14 @@ stateless hashing vectorizer, so it matches on terms rather than meaning and a
 question in the documentation's own vocabulary retrieves noticeably better than
 a short paraphrase. That is the trade for needing no download and no key;
 `RAG_EMBEDDING_PROVIDER=sentence_transformer` is the alternative.
+
+**11 · Predict with it.** Open the **Predict** tab on the run's page. The form
+is built from the model's own declared schema, not from anything the page
+already knew — type a row and get a class back with its probabilities. The
+values run through the *same fitted preprocessing* the run produced; nothing is
+re-fitted, which is what makes this prediction comparable to the held-out score
+in step 7. Old runs recorded before this existed say so instead of showing a
+form that could not work.
 
 **From a terminal instead:** `./scripts/demo.sh` walks the same path with
 `curl`, printing each result. It needs no key and no network. On Windows, run it
@@ -271,12 +281,16 @@ point at which [Authentication](#authentication) stops being optional.
 | | Survives `down` | Survives `down -v` |
 | --- | --- | --- |
 | Experiment records | yes | no |
+| Trained model artifacts | yes | no — and the runs then report `model_not_available` |
 | Retrieval index | yes | rebuilt at next start |
 | **Uploaded datasets** | **never stored at all** | — |
 
 An uploaded dataset is parsed in memory for one request and released. There is
 no upload directory, no temporary file, and deliberately no volume that could
-become one.
+become one. The model volume holds fitted `Pipeline` objects — learned
+parameters, and column *names* in their manifests. It holds no dataset rows.
+`MODEL_ARTIFACT_DIR` moves it; `MAX_PREDICTION_RECORDS` caps a prediction
+batch.
 
 ## Local development
 
@@ -463,7 +477,7 @@ built. The first two were verified to *fail* when the mistake is made.
 
 ## API documentation
 
-Fourteen endpoints. The readable reference is **[docs/API.md](docs/API.md)**;
+Sixteen endpoints. The readable reference is **[docs/API.md](docs/API.md)**;
 the running service serves the authoritative interactive schema at
 **`/docs`** and the raw OpenAPI document at `/openapi.json`.
 
@@ -475,6 +489,8 @@ the running service serves the authoritative interactive schema at
 | `GET /api/v1/experiments/{id}` | One run in full |
 | `POST /api/v1/experiments/compare` | Rank several runs, respecting metric direction |
 | `GET /api/v1/experiments/capabilities` | Models, metrics and limits this deployment allows |
+| `GET /api/v1/experiments/{id}/model` | Whether a stored model exists, and the features it expects |
+| `POST /api/v1/experiments/{id}/predict` | Predict with that model — feature values in, never a path |
 | `POST /api/v1/search` | Semantic search with citations — no credential needed |
 | `POST /api/v1/ask` | A grounded answer, or an honest status |
 | `GET /api/v1/knowledge/status` | What the knowledge endpoints can do right now |
@@ -496,7 +512,8 @@ ml-copilot/
 │   └── Dockerfile        Production image, built from the repository root
 ├── frontend/     Next.js dashboard — the presentation layer over the API
 │   └── Dockerfile        Production image, three stages
-├── ml/           Preprocessing, training, selection, explainability, tracking
+├── ml/           Preprocessing, training, selection, explainability, tracking,
+│                 model artifacts and prediction
 ├── rag/          Chunking, embeddings, vector store, retrieval, citations
 ├── llm/          Provider abstraction, prompts, grounding, citation validation
 ├── agent/        Bounded tool-calling agent — registry, planner, orchestrator
@@ -529,8 +546,19 @@ reading.
   by anyone on the path.
 - **Training is synchronous.** A run holds its HTTP request open for its whole
   duration. No queue, no worker, no Celery, no Redis.
-- **No model persistence**, and therefore no prediction or model-serving
-  endpoint. An experiment here is a measurement, not a deployable artefact.
+- **Model persistence is local and single-node.** A winning model is written to
+  a directory on the server (a Docker volume in Compose), not to a registry. No
+  MLflow, no S3, no versioning beyond one artifact per experiment, no rollback,
+  no promotion, and no sharing between replicas. The artifact is a `joblib`
+  file, so it is only loadable by a compatible scikit-learn — and only
+  application-generated artifacts are ever loaded (see
+  [PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md)). **Uploading a model
+  file is not supported**, and no endpoint accepts one.
+- **Prediction is synchronous and modest.** One request, up to 500 records by
+  default, answered inline. No batch jobs, no streaming, no async scoring
+  service.
+- **Runs recorded before persistence existed have no model.** They report
+  `model_not_available` rather than an artifact conjured after the fact.
 - **No hyperparameter optimisation.** Six scikit-learn estimators at their
   defaults. No Optuna, no grid search, no XGBoost or LightGBM.
 - **No database and no vector database.** Records and the index are local
@@ -569,12 +597,15 @@ reading.
 19. ~~Dependency security — Dependabot, `pip-audit` and `npm audit` as gates~~
 20. ~~Production readiness and demo experience — architecture and API docs, the
     demo dataset and script, request correlation and useful logs~~
-21. **Lightweight API authentication** — one shared key on the nine endpoints
-    that cost something, off by default, with the secret kept out of the
-    browser and out of every image, log and schema *(current)*
+21. ~~Lightweight API authentication — one shared key on the endpoints that
+    cost something, off by default, kept out of the browser and out of every
+    image, log and schema~~
+22. **Model persistence and prediction** — the winning `Pipeline` written after
+    a successful run, and a protected prediction endpoint that reuses the
+    preprocessing *as fitted*, never re-fitting and never accepting a path
+    *(current)*
 
-**Next**, in the honest order: **TLS**, then background execution, then model
-persistence. TLS comes first now, and it is a precondition rather than a
-successor — a bearer token sent over plain HTTP is captured once and reused
-forever, so the authentication that now exists is only as good as the transport
-under it.
+**Next**, in the honest order: **TLS**, then background execution. TLS comes
+first, and it is a precondition rather than a successor — a bearer token sent
+over plain HTTP is captured once and reused forever, so the authentication that
+now exists is only as good as the transport under it.

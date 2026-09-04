@@ -43,9 +43,14 @@ from ml.errors import (
     MissingFeatureColumnsError,
     MissingTargetError,
     MLError,
+    ModelArtifactError,
+    ModelArtifactNotFoundError,
+    ModelArtifactUnreadableError,
     ModelError,
     ModelTrainingError,
     NoSuccessfulModelError,
+    PredictionError,
+    PredictionInputError,
     SerializationError,
     TargetLeakageError,
     UnknownColumnError,
@@ -88,6 +93,18 @@ _ERROR_MAPPING: tuple[tuple[type[Exception], str, int], ...] = (
     (EmptyExplanationDataError, "empty_explanation_data", 422),
     (InvalidExplanationRowError, "invalid_explanation_row", 400),
     (ExplainabilityError, "explanation_failed", 500),
+    # Persisted models and prediction.
+    #
+    # `model_not_available` is a 409 rather than a 404 on purpose: the
+    # experiment exists and is perfectly valid, it simply has no model to
+    # predict from — a run recorded before Commit 22, or one whose artifact was
+    # removed. A 404 here would say the run was gone, which is a different
+    # problem with a different fix.
+    (ModelArtifactNotFoundError, "model_not_available", 409),
+    (ModelArtifactUnreadableError, "model_artifact_unreadable", 500),
+    (ModelArtifactError, "model_artifact_error", 500),
+    (PredictionInputError, "invalid_prediction_input", 422),
+    (PredictionError, "prediction_failed", 500),
     # Experiment tracking.
     (InvalidExperimentIdError, "invalid_experiment_id", 400),
     (ExperimentNotFoundError, "experiment_not_found", 404),

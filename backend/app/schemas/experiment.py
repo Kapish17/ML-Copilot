@@ -159,6 +159,29 @@ class ExperimentExplainability(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class ExperimentModelArtifact(BaseModel):
+    """That this run's winning model was persisted, and what it expects.
+
+    A note about what happened when the run finished, not a promise about now.
+    Ask `GET /api/v1/experiments/{id}/model` for whether a prediction can
+    actually be made today — an artifact can be deleted and a volume can be
+    wiped, and this section would still say a model was written.
+
+    Column **names**, kinds and counts only. No cell value and no row: the
+    uploaded dataset is not stored, and neither is any part of it.
+    """
+
+    stored: bool
+    model_name: str
+    task_type: str
+    target_column: str
+    feature_names: list[str] = Field(default_factory=list)
+    feature_count: int = 0
+    class_labels: list[str] = Field(default_factory=list)
+    artifact_schema_version: str = ""
+    created_at: str | None = None
+
+
 class ExperimentEnvironment(BaseModel):
     """What a reproduction attempt would need.
 
@@ -189,6 +212,7 @@ class ExperimentRecord(BaseModel):
     selection: ExperimentSelection
     evaluation: ExperimentEvaluation
     explainability: ExperimentExplainability | None = None
+    model_artifact: ExperimentModelArtifact | None = None
     environment: ExperimentEnvironment
 
 

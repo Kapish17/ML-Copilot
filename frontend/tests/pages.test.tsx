@@ -457,8 +457,12 @@ describe("experiment detail page", () => {
     await userEvent.click(screen.getByRole("tab", { name: /Data & preparation/ }));
 
     expect(screen.getByText(/144 train · 36 test/)).toBeInTheDocument();
+    // The record still holds no data. What changed in Commit 22 is that the
+    // fitted model is now kept — separately, and holding coefficients rather
+    // than rows — so the page says that instead of the old blanket claim.
+    expect(screen.getByText(/contains no dataset rows/i)).toBeInTheDocument();
     expect(
-      screen.getByText(/no dataset rows and no.*fitted model/i),
+      screen.getByText(/learned coefficients, not data/i),
     ).toBeInTheDocument();
   });
 });

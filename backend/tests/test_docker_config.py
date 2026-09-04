@@ -240,14 +240,52 @@ def test_the_frontend_origin_and_the_cors_allowlist_agree() -> None:
 
 
 def test_the_container_writes_its_state_to_the_volumes() -> None:
-    """The two data paths point at the mounts, not at the source tree."""
+    """The three data paths point at the mounts, not at the source tree.
+
+    Three since Commit 22: persisted models are a mount of their own rather
+    than a corner of the experiment store, because they are a different kind of
+    thing — binary pickles rather than readable JSON, and a directory that must
+    be treated as executable.
+    """
     backend = compose_config()["services"]["backend"]
     environment = backend["environment"]
     targets = {mount["target"] for mount in backend["volumes"]}
 
     assert environment["EXPERIMENT_STORE_DIR"] == "/data/experiments"
     assert environment["RAG_INDEX_DIR"] == "/data/rag-index"
-    assert targets == {"/data/experiments", "/data/rag-index"}
+    assert environment["MODEL_ARTIFACT_DIR"] == "/data/models"
+    assert targets == {"/data/experiments", "/data/rag-index", "/data/models"}
+
+
+def test_every_mounted_data_path_is_created_and_owned_in_the_image() -> None:
+    """A volume target the image does not create arrives root-owned.
+
+    Docker seeds a fresh named volume from whatever is at that path in the
+    image — including its ownership. If the path does not exist there, the
+    mount point is created by the daemon as root, and a container running as
+    an unprivileged user cannot write into it. The failure appears only at the
+    first write, in a container, on a clean volume: exactly the situation no
+    unit test normally reaches, which is why this one reads the Dockerfile.
+    """
+    backend = compose_config()["services"]["backend"]
+    targets = {mount["target"] for mount in backend["volumes"]}
+    dockerfile = BACKEND_DOCKERFILE.read_text(encoding="utf-8")
+
+    created = {
+        argument
+        for keyword, arguments in dockerfile_instructions(BACKEND_DOCKERFILE)
+        if keyword == "RUN"
+        for argument in arguments.split()
+        if argument.startswith("/data/")
+    }
+
+    assert targets <= created, (
+        "every volume target must be created in the image before USER drops "
+        f"privileges; missing: {sorted(targets - created)}"
+    )
+    assert re.search(r"chown\s+-R\s+\w+:\w+\s+/data\b", dockerfile), (
+        "the data directories must be handed to the unprivileged user"
+    )
 
 
 def test_no_volume_could_persist_an_uploaded_dataset() -> None:

@@ -103,6 +103,11 @@ data/processed/*
 # Stored experiment records are local history, not source. The code that
 # writes them lives in ml/experiments/ and is tracked.
 ml/experiments/runs/
+# Persisted models. Derived data too — a run can be repeated — and binary
+# pickles besides, which do not belong in a source repository under any
+# circumstances: unpickling executes code, so a committed model would be a
+# committed executable that every checkout trusts.
+ml/experiments/models/
 mlruns/
 mlartifacts/
 

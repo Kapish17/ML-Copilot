@@ -185,6 +185,8 @@ backend/
 | `GET` | `/api/v1/experiments/capabilities` | Models, metrics and limits a request may use |
 | `GET` | `/api/v1/experiments/{experiment_id}` | Fetch one stored experiment |
 | `POST` | `/api/v1/experiments/compare` | Rank several stored experiments |
+| `GET` | `/api/v1/experiments/{experiment_id}/model` | Whether a stored model exists, and the features it expects |
+| `POST` | `/api/v1/experiments/{experiment_id}/predict` | Predict with that model — feature values in, never a path |
 | `POST` | `/api/v1/search` | Search documentation and experiment history |
 | `POST` | `/api/v1/ask` | Answer a question from retrieved evidence, with citations |
 | `GET` | `/api/v1/knowledge/status` | Whether search and answering are available, and their limits |
@@ -276,8 +278,12 @@ No queue, worker or background execution is implemented, but `ExperimentRunner`
 is a plain function of its arguments with no shared state, so moving it onto a
 worker later is a change of caller rather than of runner.
 
-There is **no prediction or model-serving endpoint**, deliberately: experiment
-records do not contain the fitted model, so nothing exists to serve.
+A successful run's winning pipeline is persisted after evaluation, which is
+what `GET .../model` and `POST .../predict` use — see
+[Prediction](#prediction). Persistence happens **only** on success, and a
+failed write is a warning on the run rather than a failed experiment: an
+experiment that produced a valid measurement is a valid experiment whether or
+not it could also be saved.
 
 ### The error contract
 
@@ -331,6 +337,40 @@ the same column.
 Because a dataset is identified by a content fingerprint rather than a
 filename, `?dataset_fingerprint=…` finds every run on the same data however
 the file was named when it was uploaded.
+
+### Prediction
+
+Two endpoints, both protected: `GET /api/v1/experiments/{id}/model` says
+whether this run can be predicted from and what features it expects, and
+`POST /api/v1/experiments/{id}/predict` does it.
+
+```bash
+curl -H 'Content-Type: application/json' \
+     -d '{"records": [{"tenure_months": 30, "monthly_spend": 34.89}]}' \
+     http://127.0.0.1:8000/api/v1/experiments/exp_.../predict
+```
+
+`PredictionService` (in `app/services/experiments/prediction.py`) holds a
+`ModelArtifactStore` and the experiment history, and answers in a fixed order
+so the error a caller gets is the first thing actually wrong: does the
+experiment exist (404), does it have a stored model (409), are the records
+valid for that model's schema (422), then predict.
+
+Three things about it are deliberate:
+
+- **The store is the authority, the record is a note.** `GET .../model` asks
+  the store, so an artifact deleted after the run reports `available: false`
+  while the record still truthfully says a model was written.
+- **`model_not_available` is 409, not 404**, so "no such run" and "this run has
+  no model" stay distinguishable.
+- **Nothing here handles a path.** The service receives an experiment id and a
+  list of records. It has no way to name a file and no field that could carry
+  one; the store validates the id and re-checks the resolved directory against
+  its root. See `ml/artifacts/store.py` for the full trust boundary.
+
+Submitted records are held for one request and released — never written to the
+store, never written to a record, and never logged. The service logs a count
+and the model's name, not a value.
 
 ## Searching and asking
 
@@ -669,6 +709,8 @@ or a network.
 | `MAX_CANDIDATE_MODELS` | `6` | Most models one experiment may try |
 | `MAX_EXPERIMENT_ROWS` | `200000` | Largest dataset an experiment may run on |
 | `EXPLANATION_ROWS` | `500` | Rows SHAP values are computed over |
+| `MODEL_ARTIFACT_DIR` | `ml/experiments/models` | Where trained model artifacts are written |
+| `MAX_PREDICTION_RECORDS` | `500` | Most records one prediction request may carry |
 
 Profiling thresholds, explanation limits, page sizes and the comparison limit
 are fields on `Settings` in `app/core/config.py`, each with a named default

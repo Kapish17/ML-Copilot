@@ -108,6 +108,14 @@ const FRIENDLY_MESSAGES: Record<string, string> = {
   invalid_agent_budget:
     "That limit is higher than the server allows. Lower it and try again.",
 
+  // Prediction and persisted models.
+  model_not_available:
+    "This experiment has no stored model. Runs recorded before model persistence was added — and runs whose model has been removed — cannot be predicted from. Re-run the experiment to create one.",
+  invalid_prediction_input:
+    "Those values do not match what the model expects. Every feature it was trained on must be present, and a feature it was not trained on is refused rather than ignored — a column the model does not know would be dropped, and the prediction would be made without it.",
+  model_artifact_unreadable:
+    "The stored model could not be read. Re-run the experiment to create a new one.",
+
   // Authentication.
   //
   // Both say the same true thing in different words: this dashboard cannot

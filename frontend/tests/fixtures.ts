@@ -17,6 +17,8 @@ import type {
   ExperimentListResponse,
   ExperimentRunResponse,
   KnowledgeStatus,
+  ModelAvailability,
+  PredictionResponse,
   SearchResponse,
   ServiceInfo,
 } from "@/lib/api/types";
@@ -300,6 +302,17 @@ export const CLASSIFICATION_RUN: ExperimentRunResponse = {
     feature_count: 3,
     reason: null,
     warnings: [],
+  },
+  model_artifact: {
+    stored: true,
+    model_name: "random_forest_classifier",
+    task_type: "classification",
+    target_column: "renewed",
+    feature_names: ["income", "tenure_months", "segment"],
+    feature_count: 3,
+    class_labels: ["no", "yes"],
+    artifact_schema_version: "1.0",
+    created_at: "2026-09-02T05:45:17.275714Z",
   },
   environment: {
     python_version: "3.11.9",
@@ -751,3 +764,73 @@ export function jsonFile(name = "customers.json"): File {
     type: "application/json",
   });
 }
+
+/** `GET /api/v1/experiments/{id}/model` for a run that has a stored model. */
+export const MODEL_AVAILABLE: ModelAvailability = {
+  experiment_id: "exp_e36e7bbf5267_20260902T054517Z_503e",
+  available: true,
+  reason: null,
+  max_records: 500,
+  model_name: "logistic_regression",
+  display_name: "Logistic Regression",
+  task_type: "classification",
+  target_column: "renewed",
+  classes: ["no", "yes"],
+  features: [
+    { name: "income", kind: "numeric", dtype: "int64" },
+    { name: "tenure_months", kind: "numeric", dtype: "int64" },
+    { name: "segment", kind: "categorical", dtype: "str" },
+  ],
+  created_at: "2026-09-02T05:45:17.275714Z",
+  train_row_count: 144,
+  primary_metric: "f1",
+  primary_metric_value: 0.9444444444444444,
+};
+
+/** The same endpoint for a run recorded before models were persisted. */
+export const MODEL_UNAVAILABLE: ModelAvailability = {
+  experiment_id: "exp_e36e7bbf5267_20260902T054517Z_503e",
+  available: false,
+  reason:
+    "This experiment has no stored model. Runs recorded before model persistence was added, and runs whose artifact has been removed, cannot be predicted from — re-run the experiment to create one.",
+  max_records: 500,
+  model_name: null,
+  display_name: null,
+  task_type: null,
+  target_column: null,
+  classes: [],
+  features: [],
+  created_at: null,
+  train_row_count: null,
+  primary_metric: null,
+  primary_metric_value: null,
+};
+
+/** `POST /api/v1/experiments/{id}/predict` for one classification record. */
+export const PREDICTION: PredictionResponse = {
+  predictions: [
+    {
+      index: 0,
+      prediction: "yes",
+      probabilities: { no: 0.19, yes: 0.81 },
+    },
+  ],
+  prediction_count: 1,
+  model: {
+    experiment_id: "exp_e36e7bbf5267_20260902T054517Z_503e",
+    created_at: "2026-09-02T05:45:17.275714Z",
+    model_name: "logistic_regression",
+    display_name: "Logistic Regression",
+    task_type: "classification",
+    target_column: "renewed",
+    classes: ["no", "yes"],
+    features: [
+      { name: "income", kind: "numeric", dtype: "int64" },
+      { name: "tenure_months", kind: "numeric", dtype: "int64" },
+      { name: "segment", kind: "categorical", dtype: "str" },
+    ],
+    train_row_count: 144,
+    primary_metric: "f1",
+    primary_metric_value: 0.9444444444444444,
+  },
+};

@@ -58,7 +58,7 @@ FROM python:3.11-slim AS runtime
 # packages, `/app/backend` for `app`. This mirrors `pythonpath = . backend`
 # in pytest.ini, so the container imports exactly what the test suite does.
 #
-# The two data paths are absolute and point at directories the unprivileged
+# The three data paths are absolute and point at directories the unprivileged
 # user owns. The defaults in `.env.example` are repository-relative, which is
 # right for a checkout and wrong for a container.
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -68,6 +68,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     API_HOST=0.0.0.0 \
     API_PORT=8000 \
     EXPERIMENT_STORE_DIR=/data/experiments \
+    MODEL_ARTIFACT_DIR=/data/models \
     RAG_INDEX_DIR=/data/rag-index
 
 COPY --from=builder /opt/venv /opt/venv
@@ -84,12 +85,17 @@ COPY rag/ ./rag/
 COPY llm/ ./llm/
 COPY agent/ ./agent/
 
-# An unprivileged user owning only what it must write: the two data
+# An unprivileged user owning only what it must write: the three data
 # directories. The source tree stays root-owned, so the running process
 # cannot modify its own code.
+#
+# Each is created here even though Compose mounts a volume over it, because a
+# fresh named volume inherits the ownership of the image directory underneath
+# it. Without these lines the model volume would arrive root-owned and the
+# first artifact write would fail as a permission error.
 RUN useradd --create-home --uid 10001 mlcopilot \
     && chmod +x /app/backend/docker-entrypoint.sh \
-    && mkdir -p /data/experiments /data/rag-index \
+    && mkdir -p /data/experiments /data/models /data/rag-index \
     && chown -R mlcopilot:mlcopilot /data
 
 USER mlcopilot

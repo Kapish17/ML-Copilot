@@ -3,6 +3,7 @@
 ``options``  the validated description of one experiment request
 ``runner``   running the pipeline end to end and recording the result
 ``history``  reading, filtering and comparing what has been stored
+``prediction`` predicting from the model a finished run persisted
 
 Nothing in this package imports FastAPI. The API layer is an adapter around
 these services, not the other way round, which is what lets the same
@@ -13,6 +14,7 @@ or background execution is implemented.**
 
 from app.services.experiments.history import ExperimentHistoryService
 from app.services.experiments.options import ExperimentOptions
+from app.services.experiments.prediction import PredictionService
 from app.services.experiments.runner import (
     ExperimentRunner,
     ExperimentArtifacts,
@@ -26,5 +28,6 @@ __all__ = [
     "ExperimentArtifacts",
     "ExperimentRunResult",
     "ExperimentRunner",
+    "PredictionService",
     "run_experiment",
 ]

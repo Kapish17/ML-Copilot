@@ -103,6 +103,11 @@ ml/
 │   ├── builder.py       create_experiment_run: composing existing results
 │   ├── comparison.py    Comparing runs on a metric they share
 │   └── runs/            Stored history (git-ignored, created on first save)
+├── artifacts/
+│   ├── schema.py        The artifact manifest: feature schema, classes, metrics
+│   ├── store.py         ModelArtifactStore protocol; LocalModelArtifactStore
+│   ├── prediction.py    Validating records against a manifest, and predicting
+│   └── models/          Persisted artifacts (git-ignored, created on first save)
 ├── tests/               Synthetic-data tests, including leakage proofs
 └── requirements.txt
 ```
@@ -1091,6 +1096,63 @@ index present, and the index can be rebuilt from the store at any time.
 **No vector database or embedding is implemented here**, and none is needed:
 the retrieval layer owns all of that.
 
+## Model artifacts and prediction
+
+`ml/artifacts/` persists the winner of a run and predicts with it later.
+
+**There is one object to persist, and it already exists.**
+`TrainedModel.pipeline` is a fitted `Pipeline(preprocessing, estimator)` that
+accepts **raw feature rows** — the same object cross-validation scored and the
+same one the held-out measurement was taken through. So persistence is that
+object written out, and prediction is that object called. Nothing is
+reassembled from the record, and **nothing is re-fitted**; a test proves the
+second half by making `ColumnTransformer.fit`, `fit_transform` and
+`Pipeline.fit` raise for the duration of a prediction.
+
+```python
+from ml.artifacts import LocalModelArtifactStore, build_frame, build_metadata, predict
+
+store = LocalModelArtifactStore(Path("ml/experiments/models"))
+store.save(
+    experiment_id,
+    selection.final_model.pipeline,
+    build_metadata(experiment_id=experiment_id, prepared=prepared, selection=selection),
+)
+
+loaded = store.load(experiment_id)                       # -> LoadedModel
+frame = build_frame([{"tenure_months": 30}], loaded.metadata)
+result = predict(loaded, frame)                          # -> PredictionResult
+```
+
+An artifact is a directory named for the experiment holding exactly two files:
+the pipeline, and a manifest. The manifest records the schema version, the
+feature list (name, kind, dtype), the class labels, the target, the row counts,
+the primary metric and its value, the environment, and the model file's
+SHA-256. **No dataset row is written to either file.**
+
+`ModelArtifactStore` is a `Protocol`; `LocalModelArtifactStore` is the
+filesystem implementation. A model is written after `os.replace`, so an
+interrupted save leaves no half-file, and the manifest is written second — an
+artifact without its manifest is unreadable rather than half-trusted.
+
+**Validation is strict in both directions.** Every trained-on feature must be
+present in a record; one the model was *not* trained on is refused rather than
+ignored, because the fitted `ColumnTransformer` uses `remainder="drop"` and
+would silently discard a misspelt column, producing a confident prediction made
+without that value. `None` and `""` are missing values — the imputation was
+fitted for exactly that — and anything else is coerced to the column's trained
+kind or rejected with the feature named.
+
+**Loading executes code, so what may be loaded is the control.** A `joblib`
+file is a pickle. No path ever comes from a caller's input: the store takes an
+experiment id, validates it as an id, re-checks the resolved directory against
+its root, and uses a constant filename that is never read from the manifest.
+The manifest is parsed and its version checked *before* anything is unpickled;
+then the digest is verified, a size ceiling applies, and the result must be a
+`Pipeline`. Only artifacts this application wrote are ever loaded — **there is
+no support for third-party or user-supplied model files**, and nothing in this
+package accepts one.
+
 ## Errors
 
 Plain Python exceptions with no HTTP meaning — the API layer translates them
@@ -1124,6 +1186,11 @@ when the ML layer is eventually exposed over HTTP.
 | `UnsupportedSchemaVersionError` | A record's schema version is missing or unreadable by this code |
 | `InvalidExperimentRecordError` | A record is missing a field, or a field has the wrong type |
 | `IncomparableExperimentsError` | Runs judged by different metrics or tasks were compared |
+| `ModelArtifactNotFoundError` | No model artifact is stored for that experiment |
+| `ModelArtifactUnreadableError` | A stored artifact is missing a file, fails its checksum, exceeds the size ceiling, declares an unknown schema version, or does not deserialise to a `Pipeline` |
+| `ModelArtifactError` | A model could not be written |
+| `PredictionInputError` | A record is missing a feature, carries one the model was not trained on, holds a value that cannot be read as that column's kind, or the batch is empty or too large |
+| `PredictionError` | The fitted pipeline raised while predicting |
 
 An estimator no explainer supports is **not** an error: it produces a
 structured result with a reason.
@@ -1146,17 +1213,21 @@ external dataset or touches the network.
 
 - **No hyperparameter optimisation.** Models run on registry defaults plus any
   hyperparameters a caller supplies. There is no search, no tuning, no Optuna.
-- **No model persistence.** Trained models live in memory for the lifetime of
-  the process. Experiment *records* are written to disk; the fitted pipeline
-  and the SHAP explainer are not, so a stored run describes a model it cannot
-  reconstitute.
+- **Model persistence is one local artifact per experiment.** The winning
+  `Pipeline` is written to an application-owned directory after a successful
+  run, and `ml/artifacts/` loads it again to predict. There is no registry, no
+  versioning beyond one artifact per experiment, no promotion or rollback, and
+  no sharing between processes on different machines. `joblib` means the file
+  is portable only to a compatible scikit-learn.
 
+- **The SHAP explainer is not persisted.** Only the pipeline is, so a stored
+  run can predict but cannot produce a *new* per-row explanation of itself.
   This is what the agent's `explain_experiment` tool reports honestly rather
-  than working around. An experiment run in the current process can still be
-  explained live, because its model has not been collected yet; an older one
-  can only report the importances recorded when it ran, and a per-row
+  than working around: an experiment run in the current process can still be
+  explained live, because its explainer has not been collected yet; an older
+  one can only report the importances recorded when it ran, and a per-row
   explanation of it is answered `unavailable` with
-  `reason: fitted_model_not_persisted`. Nothing writes a model to disk.
+  `reason: fitted_model_not_persisted`.
 
   Over HTTP that surfaces as a `partial` result from
   `POST /api/v1/agent/ask`: the experiment is reported in full and the missing

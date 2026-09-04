@@ -19,7 +19,7 @@ This document is the checklist. Anything unticked is stated as unticked.
 
 | | Control | Where |
 | --- | --- | --- |
-| ⚠️ | **Lightweight API authentication.** One shared key, `Authorization: Bearer <key>`, compared in constant time over SHA-256 digests. Required on the nine endpoints that upload, train, read stored experiments or reach a language model; the five liveness and capability endpoints stay open. **Off by default** so the demo needs no secret, and enabling it without a key is a start-up failure rather than a service that reports itself protected and is not. Marked ⚠️ because it is a key, not identity — see the limitations below. | `backend/app/api/security.py` |
+| ⚠️ | **Lightweight API authentication.** One shared key, `Authorization: Bearer <key>`, compared in constant time over SHA-256 digests. Required on the eleven endpoints that upload, train, read stored experiments, predict, or reach a language model; the five liveness and capability endpoints stay open. **Off by default** so the demo needs no secret, and enabling it without a key is a start-up failure rather than a service that reports itself protected and is not. Marked ⚠️ because it is a key, not identity — see the limitations below. | `backend/app/api/security.py` |
 | ✅ | **The key stays server-side.** Never a `NEXT_PUBLIC_` variable, never a Docker build argument, never passed to the frontend service, never in an image layer, never in the OpenAPI schema, never echoed in a response and never written to a log. A rejected request logs `Authentication failed` and nothing else. A test walks the frontend source, the built bundle, both Dockerfiles, the resolved Compose configuration, `.env.example` and every Markdown file looking for it. | `backend/tests/test_authentication.py` |
 | ✅ | **No browser-shipped API key.** A browser application cannot hold a shared secret — anything in the bundle is readable by every visitor — so the dashboard holds none and says so: its header reads *"API key required — this dashboard cannot hold one"* when the backend reports `authentication_required`. | `frontend/components/layout/SystemStatus.tsx` |
 | ✅ | **Explicit CORS.** An origin list from configuration, never `*`. Credentials off. Empty list installs no cross-origin middleware at all. | `backend/app/main.py` |
@@ -30,7 +30,9 @@ This document is the checklist. Anything unticked is stated as unticked.
 | ✅ | **Prompt-injection defences.** Retrieved passages and tool observations are untrusted data, never instructions. Citations are validated against the passages actually supplied; an answer citing a source it was not given is rejected. | `llm/grounding.py`, `agent/grounding.py` |
 | ✅ | **Bounded agent.** An explicit four-tool registry, typed argument schemas validated before anything runs, and hard budgets a request may only lower. No Python, shell, HTTP or filesystem access. No path or file extension ever reaches it. | `agent/registry.py` |
 | ✅ | **Safe error mapping.** One envelope everywhere. 5xx gets a generic message with details dropped and the cause logged. Path-shaped values are stripped from details; no raw provider exception reaches a client. | `backend/app/api/error_handlers.py` |
-| ✅ | **Path traversal closed.** Experiment identifiers are validated *and* the resolved path is re-checked against the store root. | `ml/experiments/local_store.py` |
+| ✅ | **Path traversal closed.** Experiment identifiers are validated *and* the resolved path is re-checked against the store root. The artifact store applies the same two checks, and its filenames are constants rather than values read from a manifest. | `ml/experiments/local_store.py`, `ml/artifacts/store.py` |
+| ⚠️ | **Deserialisation is bounded to application-generated artifacts.** A stored model is a `joblib` file, and `joblib` is `pickle` underneath — loading one executes code, so **what may be loaded is the control**. Four barriers: no path ever comes from a request; an experiment id is validated as an id before it is used to address anything; the resolved directory is re-checked against the artifact root; and the filename inside it is a constant, never a value read from the manifest. The manifest is parsed and its schema version checked **before** anything is unpickled, the file's SHA-256 is verified against the manifest, a size ceiling applies, and the loaded object must be a scikit-learn `Pipeline`. **No endpoint accepts a model file, and uploading one is not supported.** Marked ⚠️ because the boundary is *provenance*: anyone who can write into the artifact directory can run code as the service — the same trust as the application's own source. | `ml/artifacts/store.py` |
+| ✅ | **Prediction persists nothing.** Records submitted for prediction are held for one request and released. They are never written to the artifact store, the experiment record or a log — only a count is logged. | `backend/app/services/experiments/prediction.py` |
 | ✅ | **Dependency audits as merge gates.** `pip-audit --strict` over the production and development closures; `npm audit --audit-level=high` after `npm ci`. No `\|\| true`, no `continue-on-error`, no lowered threshold. Dependabot watches every manifest weekly with no ignore rules and no auto-merge. | `.github/` |
 | ✅ | **Loopback by default.** Both published ports bind `127.0.0.1`; `BIND_ADDRESS=0.0.0.0` is a deliberate opt-in. A published Docker port bypasses a host firewall, so this default matters. | `docker-compose.yml` |
 | ✅ | **CI needs no secret.** `contents: read`, nothing read from `secrets.`, so it works unchanged on a fork. | `.github/workflows/ci.yml` |
@@ -83,7 +85,12 @@ that looks excellent and means nothing.
 | ✅ | **Reproducibility recorded.** Random state, Python version, platform and package versions are stored with every run, alongside a configuration hash. | A score without its environment is not a result anyone can check. |
 | ✅ | **Class imbalance surfaced.** Detected during profiling and reported as a quality finding; the split is stratified for classification. | Accuracy on an imbalanced target is the classic misleading metric. |
 | ❌ | **Hyperparameter optimisation.** Models run at their defaults. No Optuna, no grid search, no nested cross-validation. | The reported scores are for untuned models and should be read that way. |
-| ❌ | **Model persistence.** No fitted pipeline or explainer is written to disk, so there is no prediction endpoint and no model serving. | An experiment here is a measurement, not a deployable artefact. |
+| ✅ | **Prediction reuses the fitted preprocessing.** What is persisted is the complete `Pipeline` the run produced — preprocessing *as fitted on the training rows*, plus the retrained estimator. A prediction calls that object. **Nothing is re-fitted and nothing is reassembled from the record**, and a test proves it by making `fit` and `fit_transform` raise for the duration of a prediction. | Re-fitting on request data would apply a different transformation from the one the held-out score was measured through, making the reported score a claim about a model that no longer exists. |
+| ✅ | **Persistence happens only after a successful run.** The artifact is written after evaluation completes, so a failed or incomplete run leaves nothing behind that could be predicted from. A failed *write* is a warning, not a failed experiment. | A model saved before it was evaluated is a model no one has measured. |
+| ✅ | **A missing model is reported, not fabricated.** A run recorded before persistence existed, or one whose artifact was removed, answers `model_not_available`. Nothing is reconstructed after the fact. | A retroactively rebuilt artifact would not be the model the record's score describes. |
+| ⚠️ | **The feature schema is enforced, and unexpected columns are refused.** Every trained-on feature must be present; one the model does not know is rejected rather than dropped. Marked ⚠️ because that is *schema* validation, not distribution validation: a value inside the trained dtype but far outside the training range is accepted and predicted on. | The fitted `ColumnTransformer` drops an unknown column, so a misspelt name would otherwise yield a confident prediction made without that value. |
+| ❌ | **Model registry, versioning and rollback.** One artifact per experiment, on a local volume. No MLflow, no registry, no promotion, no rollback, no sharing between replicas. | A model here is reproducible from its record, not managed as a release. |
+| ❌ | **Prediction monitoring.** Nothing records what was predicted, or compares live inputs against the training distribution. | Drift is invisible; see the row below. |
 | ❌ | **Drift, monitoring, fairness analysis.** None. | — |
 
 ---
@@ -94,7 +101,7 @@ Stated plainly, in one place:
 
 - **Authentication is one shared key, and it is off by default.** A stock
   `docker compose up` is open to anyone who can reach the port — which is why
-  the stack binds loopback. With `API_AUTH_ENABLED=true` the nine expensive
+  the stack binds loopback. With `API_AUTH_ENABLED=true` the eleven expensive
   endpoints require a bearer token, but that key is not identity: no users, no
   roles, no expiry, no revocation short of a restart, and no way to tell two
   holders apart in a log. It also cannot be rotated without downtime.
@@ -112,8 +119,19 @@ Stated plainly, in one place:
   decision, not two.
 - **Synchronous training.** A run holds its HTTP request open for its whole
   duration; there is no queue and no worker.
-- **No model serving.** Nothing is persisted that could answer a prediction
-  request.
+- **Model serving is local, single-node and unversioned.** A run's winning
+  pipeline is written to a directory on the server (a Docker volume in
+  Compose), and `POST /api/v1/experiments/{id}/predict` uses it. There is no
+  registry, no promotion or rollback, no versioning beyond one artifact per
+  experiment, and no sharing between replicas — the artifact volume belongs to
+  one container. Prediction is synchronous and capped at
+  `MAX_PREDICTION_RECORDS` (default 500) per request. **Only artifacts this
+  application wrote are ever loaded; uploading a model file is not supported**,
+  and an artifact is `joblib`, so it is portable only to a compatible
+  scikit-learn.
+- **Removing the artifact volume removes the models.** The records survive
+  independently and remain readable; the runs then report
+  `model_not_available` rather than a model rebuilt after the fact.
 - **No horizontal scaling.** One backend container owns the local store and the
   local index.
 - **Local storage.** Experiment records are JSON files on a volume. No
@@ -134,8 +152,8 @@ Stated plainly, in one place:
 
 The honest order, smallest useful step first:
 
-1. ~~**Authentication**~~ — done: one shared API key on the nine endpoints that
-   cost something, off by default so the demo still needs no secret.
+1. ~~**Authentication**~~ — done: one shared API key on the endpoints that cost
+   something, off by default so the demo still needs no secret.
 2. **TLS** — a reverse proxy terminating HTTPS in front of the API. This is now
    the largest remaining gap, and it is a *precondition* rather than a
    successor to the previous step: a bearer token sent over plain HTTP is
@@ -143,10 +161,13 @@ The honest order, smallest useful step first:
    as good as the transport under it.
 3. **Background execution** — move training off the request. This is the change
    that makes every other scaling question answerable.
-4. **Model persistence** — store the fitted pipeline, and a prediction endpoint
-   becomes possible.
-5. **Shared storage** — a database for records and a managed vector store, at
-   which point more than one replica becomes meaningful.
+4. **Shared storage** — a database for records, a managed vector store, and an
+   object store or registry for model artifacts, at which point more than one
+   replica becomes meaningful. The artifact store is already behind a
+   `Protocol`, so this is a second implementation rather than a rewrite.
+5. **Prediction monitoring** — record what was predicted and compare live
+   inputs against the training distribution, which is the first thing a served
+   model needs that this one does not have.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how the current system is put
 together, and [API.md](API.md) for what it exposes.

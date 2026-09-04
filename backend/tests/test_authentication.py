@@ -69,6 +69,8 @@ PROTECTED_ROUTES = {
     ("POST", "/api/v1/experiments/run"),
     ("GET", "/api/v1/experiments"),
     ("GET", "/api/v1/experiments/{experiment_id}"),
+    ("GET", "/api/v1/experiments/{experiment_id}/model"),
+    ("POST", "/api/v1/experiments/{experiment_id}/predict"),
     ("POST", "/api/v1/experiments/compare"),
     ("POST", "/api/v1/search"),
     ("POST", "/api/v1/ask"),
@@ -680,6 +682,15 @@ def test_every_protected_route_actually_calls_the_dependency(
         ),
         ("POST", "/api/v1/experiments/compare"): lambda: secured_client.post(
             "/api/v1/experiments/compare", json={"experiment_ids": ["a", "b"]}
+        ),
+        ("GET", "/api/v1/experiments/{experiment_id}/model"): (
+            lambda: secured_client.get("/api/v1/experiments/exp_whatever/model")
+        ),
+        ("POST", "/api/v1/experiments/{experiment_id}/predict"): (
+            lambda: secured_client.post(
+                "/api/v1/experiments/exp_whatever/predict",
+                json={"records": [{"a": 1}]},
+            )
         ),
         ("POST", "/api/v1/search"): lambda: secured_client.post(
             SEARCH_URL, json={"query": "x"}

@@ -34,7 +34,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -45,9 +45,11 @@ from app.core.errors import DatasetTooLargeError
 from app.services.datasets import DatasetProfilingService
 from app.services.datasets.validation import AsyncReadable
 from app.services.experiments.options import ExperimentOptions
-from ml.errors import ExplainabilityError, MissingTargetError
+from ml.artifacts import ModelArtifactStore, build_metadata
+from ml.errors import ExplainabilityError, MissingTargetError, ModelArtifactError
 from ml.evaluation.metrics import get_metric
 from ml.experiments import ExperimentRun, create_experiment_run
+from ml.experiments.run import ModelArtifactSection
 from ml.experiments.store import ExperimentStore
 from ml.explainability import ExplanationConfig, GlobalExplanation, explain_global
 from ml.features.inference import infer_configuration
@@ -133,6 +135,7 @@ class ExperimentRunner:
         dataset_service: DatasetProfilingService,
         *,
         registry: ModelRegistry | None = None,
+        artifact_store: ModelArtifactStore | None = None,
     ) -> None:
         """Wire the runner to its collaborators.
 
@@ -143,11 +146,19 @@ class ExperimentRunner:
                 only one that exists. **MLflow is not implemented.**
             dataset_service: The ingestion and profiling adapter.
             registry: Model registry to resolve candidates in.
+            artifact_store: Where the winning fitted model is persisted, so it
+                can be predicted from later. Optional: with no store, a run
+                still completes and is recorded exactly as before, and the
+                record simply carries no model section. That is what a caller
+                with nowhere to write — a script, a test of the pipeline
+                itself — gets, and it is also the state every run made before
+                Commit 22 is in.
         """
         self._settings = settings
         self._store = store
         self._datasets = dataset_service
         self._registry = registry or default_registry()
+        self._artifacts = artifact_store
 
     # -- Entry points ------------------------------------------------------
 
@@ -301,6 +312,15 @@ class ExperimentRunner:
             created_at=created_at or datetime.now(timezone.utc),
             max_feature_importances=self._settings.explanation_top_features,
         )
+
+        # Only now, with a complete record in hand, is there a model worth
+        # keeping: every step above succeeded, the winner was chosen on
+        # cross-validated scores and measured once on the untouched test set.
+        # A run that failed anywhere earlier raised long before this line, so
+        # a failed experiment can never leave a usable model behind.
+        record = replace(
+            record, model_artifact=self._persist_model(record, prepared, selection)
+        )
         self._store.save(record)
 
         artifacts = (
@@ -334,6 +354,70 @@ class ExperimentRunner:
         )
 
     # -- Steps -------------------------------------------------------------
+
+    def _persist_model(
+        self,
+        record: ExperimentRun,
+        prepared: PreparedDataset,
+        selection: ModelSelectionResult,
+    ) -> ModelArtifactSection | None:
+        """Save the winning fitted pipeline, and describe it on the record.
+
+        What is written is the **same object the experiment fitted** — the
+        preprocessing that learned its statistics from the training rows, with
+        the winning estimator behind it. Nothing is rebuilt, refitted or
+        reconstructed, which is what makes a prediction made next month
+        comparable to the score this run reported.
+
+        A failure here is not a failure of the experiment. The run happened,
+        the numbers are real, and the record is worth keeping; what is lost is
+        the ability to predict from it later. So the failure is logged and
+        ``None`` is returned, which reads back as "this run has no model" —
+        the same state as every run made before Commit 22.
+
+        Args:
+            record: The finished record, for its experiment id.
+            prepared: The dataset the pipeline was fitted on.
+            selection: The finished selection, carrying the winner.
+
+        Returns:
+            ModelArtifactSection | None: The section to attach, or ``None``
+            when no model was stored.
+        """
+        if self._artifacts is None:
+            return None
+
+        try:
+            metadata = build_metadata(
+                experiment_id=record.experiment_id,
+                prepared=prepared,
+                selection=selection,
+                created_at=record.created_at,
+            )
+            self._artifacts.save(
+                record.experiment_id, selection.final_model.pipeline, metadata
+            )
+        except (ModelArtifactError, OSError) as exc:
+            logger.warning(
+                "Could not persist the model for %s: %s — the experiment is "
+                "recorded without one and cannot be predicted from",
+                record.experiment_id,
+                type(exc).__name__,
+            )
+            return None
+
+        return ModelArtifactSection(
+            stored=True,
+            model_name=metadata.model_name,
+            task_type=metadata.task_type.value,
+            target_column=metadata.target_column,
+            feature_names=metadata.feature_names,
+            class_labels=tuple(
+                str(label) for label in metadata.public_summary()["classes"]
+            ),
+            artifact_schema_version=metadata.schema_version,
+            created_at=metadata.created_at.isoformat(),
+        )
 
     def _check_size(self, frame: pd.DataFrame) -> None:
         """Refuse a dataset too large to run synchronously."""
@@ -491,6 +575,7 @@ def run_experiment(
     settings: Settings,
     store: ExperimentStore,
     dataset_service: DatasetProfilingService,
+    artifact_store: ModelArtifactStore | None = None,
     target_column: str | None = None,
     models: Sequence[str] = (),
     dataset_label: str = "dataset",
@@ -518,7 +603,9 @@ def run_experiment(
     options = ExperimentOptions(
         target_column=target_column, models=tuple(models), **option_fields
     ).validated(settings)
-    runner = ExperimentRunner(settings, store, dataset_service)
+    runner = ExperimentRunner(
+        settings, store, dataset_service, artifact_store=artifact_store
+    )
     return runner.run_frame(
         frame,
         options,

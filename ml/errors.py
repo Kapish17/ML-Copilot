@@ -115,6 +115,43 @@ class InvalidExplanationRowError(ExplainabilityError):
     """A local explanation was asked for something other than a single row."""
 
 
+class ModelArtifactError(MLError):
+    """Base class for failures of the persisted-model store."""
+
+
+class ModelArtifactNotFoundError(ModelArtifactError):
+    """No model has been persisted for this experiment.
+
+    Not the same as "no such experiment". A run recorded before model
+    persistence existed, or one whose artifact has been deleted, is a perfectly
+    valid experiment with no model to predict from — and saying so is much more
+    useful than a 404 that suggests the run is gone.
+    """
+
+
+class ModelArtifactUnreadableError(ModelArtifactError):
+    """An artifact exists but cannot be trusted or loaded.
+
+    A missing file, a manifest that fails validation, a content digest that
+    does not match, or a pickle this interpreter cannot read. All of them are
+    server-side problems, so the client is told the request failed and the real
+    cause goes to the log.
+    """
+
+
+class PredictionError(MLError):
+    """Base class for a prediction that could not be made."""
+
+
+class PredictionInputError(PredictionError):
+    """The submitted records do not match the model's feature schema.
+
+    A missing column, an unexpected one, or a value that cannot be read as the
+    kind of thing the column was trained on. Always the caller's to fix, and
+    always specific about which columns are at fault.
+    """
+
+
 class ExperimentError(MLError):
     """Base class for failures in the experiment-tracking layer."""
 

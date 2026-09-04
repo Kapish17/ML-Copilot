@@ -8,6 +8,9 @@ import type {
   ExperimentOptions,
   ExperimentRecord,
   ExperimentRunResponse,
+  JsonObject,
+  ModelAvailability,
+  PredictionResponse,
 } from "./types";
 
 /** Render experiment options as the multipart fields the backend defines. */
@@ -101,6 +104,45 @@ export function experimentCapabilities(
   return getJson<ExperimentCapabilities>(
     "/api/v1/experiments/capabilities",
     undefined,
+    options,
+  );
+}
+
+/**
+ * Whether an experiment can be predicted from, and with what.
+ *
+ * Read before rendering a prediction form, because the answer comes from the
+ * artifact store rather than from the stored record: a run that reports a
+ * model in its record may no longer have one on disk, and building a form from
+ * the record would produce something that cannot work.
+ */
+export function experimentModel(
+  experimentId: string,
+  options: RequestOptions = {},
+): Promise<ModelAvailability> {
+  return getJson<ModelAvailability>(
+    `/api/v1/experiments/${encodeURIComponent(experimentId)}/model`,
+    undefined,
+    options,
+  );
+}
+
+/**
+ * Predict from the model an experiment produced.
+ *
+ * One record or many take the same shape, and results come back in submission
+ * order with the index of the record that produced each. The prediction runs
+ * through the same fitted preprocessing the experiment used — none of that
+ * happens here; this sends values and reads a result.
+ */
+export function predictFromExperiment(
+  experimentId: string,
+  records: JsonObject[],
+  options: RequestOptions = {},
+): Promise<PredictionResponse> {
+  return postJson<PredictionResponse>(
+    `/api/v1/experiments/${encodeURIComponent(experimentId)}/predict`,
+    { records },
     options,
   );
 }

@@ -550,6 +550,13 @@ real SHAP. Once the request ends that model is gone, and an older experiment
 falls back to the stored summary or reports
 `unavailable: fitted_model_not_persisted`, exactly as before.
 
+The application does persist a run's fitted pipeline now, and the prediction
+endpoint uses it — but this package deliberately does not reach for it.
+Loading an artifact means deserialising a pickle from the filesystem, and the
+whole point of this boundary is that the agent has neither capability. The
+tool reports what it can honestly produce instead of quietly acquiring the
+ability to load code.
+
 A missing key does not stop the application starting and does not affect any
 other endpoint: `POST /api/v1/search` continues to work without one.
 

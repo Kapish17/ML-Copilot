@@ -312,7 +312,98 @@ export interface ExperimentRecord {
   selection: ExperimentSelection;
   evaluation: ExperimentEvaluation;
   explainability: ExperimentExplainability | null;
+  model_artifact: ExperimentModelArtifact | null;
   environment: ExperimentEnvironment;
+}
+
+/**
+ * That this run's winning model was persisted, and what it expects.
+ *
+ * A note about what happened when the run finished, not a promise about now —
+ * an artifact can be deleted. `GET /api/v1/experiments/{id}/model` answers
+ * whether a prediction can actually be made today, and is what the prediction
+ * panel reads.
+ *
+ * `null` on every run recorded before model persistence existed.
+ */
+export interface ExperimentModelArtifact {
+  stored: boolean;
+  model_name: string;
+  task_type: string;
+  target_column: string;
+  feature_names: string[];
+  feature_count: number;
+  class_labels: string[];
+  artifact_schema_version: string;
+  created_at: string | null;
+}
+
+/** One column a stored model expects, and how it is treated. */
+export interface PredictedFeature {
+  name: string;
+  /** `numeric`, `categorical`, `boolean` or `datetime`. */
+  kind: string;
+  dtype: string;
+}
+
+/**
+ * Whether an experiment can be predicted from, and with what.
+ *
+ * Answered from the artifact store rather than from the record, so a deleted
+ * model reports `available: false` with a `reason` rather than a form that
+ * cannot work.
+ */
+export interface ModelAvailability {
+  experiment_id: string;
+  available: boolean;
+  reason: string | null;
+  max_records: number;
+  model_name: string | null;
+  display_name: string | null;
+  task_type: string | null;
+  target_column: string | null;
+  classes: JsonValue[];
+  features: PredictedFeature[];
+  created_at: string | null;
+  train_row_count: number | null;
+  primary_metric: string | null;
+  primary_metric_value: number | null;
+}
+
+/** Which model produced a prediction, and what it was trained on. */
+export interface PredictedModel {
+  experiment_id: string;
+  created_at: string;
+  model_name: string;
+  display_name: string;
+  task_type: string;
+  target_column: string;
+  classes: JsonValue[];
+  features: PredictedFeature[];
+  train_row_count: number;
+  primary_metric: string;
+  /**
+   * The model's score on the **held-out test set** — a measurement of the
+   * model, not a confidence in this prediction. The two are easy to conflate
+   * and the UI keeps them apart.
+   */
+  primary_metric_value: number | null;
+}
+
+/** One record's result. */
+export interface PredictionItem {
+  /** Position of the record in the submitted batch. */
+  index: number;
+  prediction: JsonValue;
+  /** Per-class probability, or `null` for regression. */
+  probabilities: Record<string, number> | null;
+}
+
+/** `POST /api/v1/experiments/{id}/predict`. */
+export interface PredictionResponse {
+  predictions: PredictionItem[];
+  prediction_count: number;
+  model: PredictedModel;
 }
 
 /** A completed run, as `POST /api/v1/experiments/run` returns it. */

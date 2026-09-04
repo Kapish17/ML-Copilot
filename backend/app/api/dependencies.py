@@ -22,13 +22,18 @@ from agent.tools.datasets import InMemoryDatasetSource
 from app.core.config import Settings, get_settings
 from app.services.agent import AgentService
 from app.services.datasets import DatasetProfilingService
-from app.services.experiments import ExperimentHistoryService, ExperimentRunner
+from app.services.experiments import (
+    ExperimentHistoryService,
+    ExperimentRunner,
+    PredictionService,
+)
 from app.services.experiments.runner import run_experiment
 from app.services.knowledge import KnowledgeService
 from app.services.knowledge.filters import KNOWN_SOURCE_TYPES
 from llm.config import LLMConfig, config_from_env as llm_config_from_env
 from llm.providers import LLMProvider, build_llm_provider
 from llm.service import RAGAnswerService
+from ml.artifacts import LocalModelArtifactStore, ModelArtifactStore
 from ml.evaluation.metrics import CLASSIFICATION_METRICS, REGRESSION_METRICS
 from ml.experiments import LocalExperimentStore
 from ml.experiments.store import ExperimentStore
@@ -63,13 +68,31 @@ def get_experiment_store(settings: SettingsDep) -> ExperimentStore:
 ExperimentStoreDep = Annotated[ExperimentStore, Depends(get_experiment_store)]
 
 
+def get_model_artifact_store(settings: SettingsDep) -> ModelArtifactStore:
+    """Provide the store holding the fitted model of each finished run.
+
+    The return type is the storage *interface*, so a future model registry is a
+    change to this one function. **Only the local filesystem store is
+    implemented**, and it loads nothing but files this application wrote — see
+    the trust boundary at the top of ``ml/artifacts/store.py``. Constructing it
+    has no side effect; the directory is created on the first write.
+    """
+    return LocalModelArtifactStore(settings.model_artifact_dir)
+
+
+ModelArtifactStoreDep = Annotated[
+    ModelArtifactStore, Depends(get_model_artifact_store)
+]
+
+
 def get_experiment_runner(
     settings: SettingsDep,
     store: ExperimentStoreDep,
     datasets: DatasetServiceDep,
+    artifacts: ModelArtifactStoreDep,
 ) -> ExperimentRunner:
     """Provide an experiment runner wired to its collaborators."""
-    return ExperimentRunner(settings, store, datasets)
+    return ExperimentRunner(settings, store, datasets, artifact_store=artifacts)
 
 
 ExperimentRunnerDep = Annotated[ExperimentRunner, Depends(get_experiment_runner)]
@@ -85,6 +108,25 @@ def get_experiment_history(
 ExperimentHistoryDep = Annotated[
     ExperimentHistoryService, Depends(get_experiment_history)
 ]
+
+
+def get_prediction_service(
+    settings: SettingsDep,
+    history: ExperimentHistoryDep,
+    artifacts: ModelArtifactStoreDep,
+) -> PredictionService:
+    """Provide the service the prediction routes delegate to.
+
+    Both collaborators are needed and neither is optional: the history says
+    whether the experiment exists at all, and the artifact store says whether
+    it has a model. Answering with only one of them would collapse two
+    different failures — "no such run" and "this run has no model" — into one
+    unhelpful error.
+    """
+    return PredictionService(settings, history, artifacts)
+
+
+PredictionServiceDep = Annotated[PredictionService, Depends(get_prediction_service)]
 
 
 # ---------------------------------------------------------------------------

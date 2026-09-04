@@ -1,6 +1,6 @@
 # ML Copilot — API reference
 
-Fourteen endpoints under `http://localhost:8000`. This is the readable
+Sixteen endpoints under `http://localhost:8000`. This is the readable
 companion to the generated schema; the authoritative, always-current version is
 the interactive documentation the running service serves at **`/docs`**, and
 the raw schema at **`/openapi.json`**.
@@ -29,6 +29,8 @@ Authorization: Bearer <API_AUTH_KEY>
 | `GET /api/v1/experiments/capabilities` | `GET /api/v1/experiments` |
 | `GET /api/v1/knowledge/status` | `GET /api/v1/experiments/{id}` |
 | `GET /api/v1/agent/status` | `POST /api/v1/experiments/compare` |
+| | `GET /api/v1/experiments/{id}/model` |
+| | `POST /api/v1/experiments/{id}/predict` |
 | | `POST /api/v1/search` |
 | | `POST /api/v1/ask` |
 | | `POST /api/v1/agent/ask` |
@@ -194,6 +196,12 @@ and `warnings`. The parts worth knowing:
   set**, the baseline comparison, `test_row_count` and `is_unbiased`.
 - `explainability` — `status`, `method` (`shap` or the permutation fallback)
   and ranked `feature_importances`.
+- `model_artifact` — present when the winning model was persisted: `stored`,
+  `model_name`, `task_type`, `target_column`, `feature_names`, `feature_count`,
+  `class_labels`, `artifact_schema_version` and `created_at`. Column *names*
+  only; no cell and no row. Absent on a run recorded before persistence
+  existed, and absent when persistence failed — a failed write is a warning,
+  never a failed experiment.
 
 > `selection_score` is cross-validated on training rows.
 > `evaluation.primary_metric_value` is the single held-out measurement. They
@@ -253,6 +261,120 @@ display name, task type, whether it supports probabilities and a random state),
 
 The dashboard builds its run form from this, so the form can never offer a
 model the server does not have.
+
+---
+
+## Prediction
+
+An experiment that finished successfully leaves its winning model behind. These
+two endpoints ask what that model expects, and then use it.
+
+**The same fitted objects, not a rebuild.** What is stored is the complete
+sklearn `Pipeline` the experiment produced — the preprocessing *as fitted on
+the training rows*, and the estimator retrained on them. A prediction runs
+`pipeline.predict(...)` on that object. **Nothing is re-fitted on a prediction
+request**, and nothing is re-derived from the record; a prediction made here
+uses exactly the transformation the held-out score was measured through, which
+is what makes the two comparable.
+
+**No path is ever accepted.** A request carries feature values and nothing
+else. The model is addressed by the experiment id in the URL, which is
+validated as an id before it is used to address anything, and the resolved
+location is re-checked against the artifact root. There is no field, anywhere,
+that names a file — see [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) for
+the deserialisation trust boundary.
+
+### `GET /api/v1/experiments/{experiment_id}/model`
+
+Whether this experiment can be predicted from, and with what.
+
+Answered from the **artifact store**, not from the experiment record: the
+record says a model was written when the run finished; this says whether one is
+readable now.
+
+**Returns** `ModelAvailability`:
+
+- `experiment_id`, `available`, `max_records`, and `reason` — why not, when
+  `available` is false.
+- When available: `model_name`, `display_name`, `task_type`, `target_column`,
+  `classes` (empty for regression), `created_at`, `train_row_count`,
+  `primary_metric`, `primary_metric_value`, and `features[]` of
+  `{name, kind, dtype}` — `kind` being which branch of the fitted preprocessing
+  handles the column (`numeric`, `categorical`, `boolean`, `datetime`).
+- When unavailable, every descriptive field is `null` and `features` is empty —
+  deliberately not a placeholder schema, so a client that builds a form from
+  `features` builds nothing rather than a form whose requests cannot succeed.
+
+**`available: false` is a 200.** "This run has no model" is an answer, not a
+failure. A 404 here means the experiment itself does not exist.
+
+**Errors.** `404 experiment_not_found` · `400 invalid_experiment_id`.
+
+### `POST /api/v1/experiments/{experiment_id}/predict`
+
+Predict with the model this experiment produced.
+
+```json
+{ "records": [ { "tenure_months": 30, "monthly_spend": 34.89,
+                 "support_tickets": 2, "satisfaction_score": 6.7 } ] }
+```
+
+One shape for one record and for a batch: `records` is always a list, and the
+response's `predictions` is always a list of the same length in the same order.
+The list must hold at least one record and at most the server's
+`max_records` (default 500; the schema itself refuses more than 1000 before a
+list that size is ever built).
+
+**Every key is a feature name.** Every feature the model was trained on must be
+present. `null` is a valid value for a missing one — the model's imputation was
+fitted for exactly that. **A feature the model was not trained on is refused
+rather than ignored**, because the fitted `ColumnTransformer` drops an unknown
+column rather than using it, so a misspelt name would otherwise produce a
+confident prediction made without that value.
+
+**Returns** `PredictionResponse`:
+
+- `predictions[]` — `index` (position in the submitted batch), `prediction`
+  (the class label, or the number), and `probabilities` — one entry per class
+  label for a classifier whose estimator provides them, `null` for regression
+  and for a classifier that does not.
+- `prediction_count`.
+- `model` — `experiment_id`, `created_at`, `model_name`, `display_name`,
+  `task_type`, `target_column`, `classes`, `features[]`, `train_row_count`,
+  `primary_metric` and `primary_metric_value`.
+
+> `model.primary_metric_value` is the winner's score on the **held-out test
+> set**. It says how much to trust the model. It is not a confidence in this
+> prediction.
+
+**Errors.**
+
+| Situation | Status | `code` |
+| --- | --- | --- |
+| No such experiment | 404 | `experiment_not_found` |
+| A malformed experiment id | 400 | `invalid_experiment_id` |
+| The run has no stored model | 409 | `model_not_available` |
+| A missing, unexpected or uncoercible feature; an empty or oversized batch; a record that is not an object | 422 | `invalid_prediction_input` |
+| Malformed JSON, or a body that is not a `records` list | 422 | `invalid_request` |
+| A stored artifact that cannot be read or verified | 500 | `model_artifact_unreadable` |
+| The model raised while predicting | 500 | `prediction_failed` |
+
+`model_not_available` is a **409, not a 404**, so "no such run" and "this run
+has no model" stay distinguishable — a run from before persistence existed, or
+one whose artifact was deleted, is reported rather than fabricated.
+
+An `invalid_prediction_input` failure carries the reason in `details`: the
+`index` of the offending record, and then `missing_features` /
+`unexpected_features` with `expected_features` alongside them, or `feature` and
+the `expected` kind when a value could not be read as the type that column was
+trained as. A client can point at the box that is wrong.
+
+```bash
+curl -H 'Content-Type: application/json' \
+     -d '{"records": [{"tenure_months": 30, "monthly_spend": 34.89,
+                       "support_tickets": 2, "satisfaction_score": 6.7}]}' \
+     http://localhost:8000/api/v1/experiments/exp_.../predict
+```
 
 ---
 

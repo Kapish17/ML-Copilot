@@ -69,6 +69,13 @@ DEFAULT_IMBALANCE_RATIO = 0.80
 #: Where experiment records are stored. Local JSON files; MLflow and any
 #: database are not implemented.
 DEFAULT_EXPERIMENT_STORE_DIR = PROJECT_ROOT / "ml" / "experiments" / "runs"
+#: Where the winning fitted model of each run is written, so it can be
+#: predicted from later. Separate from the run records because it holds a
+#: different kind of thing: binary pickles rather than readable JSON, larger,
+#: and — because unpickling executes code — a directory that must be treated as
+#: executable and written to by nothing but this application. See the trust
+#: boundary at the top of `ml/artifacts/store.py`.
+DEFAULT_MODEL_ARTIFACT_DIR = PROJECT_ROOT / "ml" / "experiments" / "models"
 #: Experiment execution is synchronous in this commit, so every limit below
 #: exists to keep one HTTP request from running unboundedly long.
 DEFAULT_MIN_CV_FOLDS = 2
@@ -82,6 +89,10 @@ DEFAULT_MAX_EXPERIMENT_TAGS = 10
 DEFAULT_EXPLANATION_REFERENCE_ROWS = 200
 DEFAULT_EXPLANATION_ROWS = 500
 DEFAULT_EXPLANATION_TOP_FEATURES = 50
+#: Most records one prediction request may carry. Prediction is far cheaper
+#: than training, but it is still synchronous and still holds a worker, so it
+#: is bounded like every other path that does real work.
+DEFAULT_MAX_PREDICTION_RECORDS = 500
 #: History listing.
 DEFAULT_EXPERIMENT_PAGE_LIMIT = 50
 DEFAULT_MAX_EXPERIMENT_PAGE_LIMIT = 200
@@ -214,6 +225,8 @@ class Settings:
 
     # Experiment execution
     experiment_store_dir: Path = DEFAULT_EXPERIMENT_STORE_DIR
+    model_artifact_dir: Path = DEFAULT_MODEL_ARTIFACT_DIR
+    max_prediction_records: int = DEFAULT_MAX_PREDICTION_RECORDS
     min_cv_folds: int = DEFAULT_MIN_CV_FOLDS
     max_cv_folds: int = DEFAULT_MAX_CV_FOLDS
     default_cv_folds: int = DEFAULT_CV_FOLDS
@@ -282,6 +295,7 @@ def get_settings() -> Settings:
         falling back to development-friendly defaults.
     """
     store_dir = os.getenv("EXPERIMENT_STORE_DIR", "").strip()
+    artifact_dir = os.getenv("MODEL_ARTIFACT_DIR", "").strip()
     return Settings(
         app_env=os.getenv("APP_ENV", "development"),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -298,6 +312,12 @@ def get_settings() -> Settings:
         max_dataset_columns=_env_int("MAX_DATASET_COLUMNS", DEFAULT_MAX_DATASET_COLUMNS),
         experiment_store_dir=(
             Path(store_dir) if store_dir else DEFAULT_EXPERIMENT_STORE_DIR
+        ),
+        model_artifact_dir=(
+            Path(artifact_dir) if artifact_dir else DEFAULT_MODEL_ARTIFACT_DIR
+        ),
+        max_prediction_records=_env_int(
+            "MAX_PREDICTION_RECORDS", DEFAULT_MAX_PREDICTION_RECORDS
         ),
         max_cv_folds=_env_int("MAX_CV_FOLDS", DEFAULT_MAX_CV_FOLDS, minimum=2),
         max_candidate_models=_env_int(

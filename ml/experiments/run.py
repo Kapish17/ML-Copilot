@@ -349,6 +349,67 @@ class ExplainabilitySection:
 
 
 @dataclass(frozen=True)
+class ModelArtifactSection:
+    """That a fitted model was persisted for this run, and what it expects.
+
+    **A note about the past, not a promise about the present.** It records what
+    happened when the run finished. Whether a model can be predicted from
+    *now* is a question for the artifact store, which is what the API asks —
+    an artifact can be deleted, a volume can be wiped, and a record claiming a
+    model that is no longer there would be worse than no record at all.
+
+    Absent on every run made before model persistence existed, and on any run
+    whose model could not be written. Both are read back as ``None``, which is
+    exactly what they mean: no model.
+
+    Carries column **names**, kinds and counts. No cell value and no row.
+    """
+
+    stored: bool
+    model_name: str
+    task_type: str
+    target_column: str
+    feature_names: tuple[str, ...] = ()
+    class_labels: tuple[str, ...] = ()
+    artifact_schema_version: str = ""
+    created_at: str | None = None
+
+    @property
+    def feature_count(self) -> int:
+        """How many raw columns a prediction must supply."""
+        return len(self.feature_names)
+
+    def as_dict(self) -> dict[str, Any]:
+        """Render the section as plain, JSON-friendly values."""
+        return {
+            "stored": self.stored,
+            "model_name": self.model_name,
+            "task_type": self.task_type,
+            "target_column": self.target_column,
+            "feature_names": list(self.feature_names),
+            "feature_count": self.feature_count,
+            "class_labels": list(self.class_labels),
+            "artifact_schema_version": self.artifact_schema_version,
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> ModelArtifactSection:
+        """Rebuild the section from a stored record."""
+        where = "model_artifact"
+        return cls(
+            stored=bool(payload.get("stored", False)),
+            model_name=str(_typed(payload, "model_name", str, where=where)),
+            task_type=str(_typed(payload, "task_type", str, where=where)),
+            target_column=str(_typed(payload, "target_column", str, where=where)),
+            feature_names=_strings(payload.get("feature_names")),
+            class_labels=_strings(payload.get("class_labels")),
+            artifact_schema_version=str(payload.get("artifact_schema_version") or ""),
+            created_at=payload.get("created_at"),
+        )
+
+
+@dataclass(frozen=True)
 class EnvironmentSection:
     """What it took to produce this result, for anyone reproducing it.
 
@@ -433,6 +494,11 @@ class ExperimentRun:
     evaluation: EvaluationSection
     environment: EnvironmentSection
     explainability: ExplainabilitySection | None = None
+    #: Present when a fitted model was persisted for this run. Optional in the
+    #: same way `explainability` is, which is what keeps records written before
+    #: model persistence existed readable without a schema-version bump: a
+    #: missing section reads back as `None`, and `None` means "no model".
+    model_artifact: ModelArtifactSection | None = None
     description: str | None = None
     tags: tuple[str, ...] = ()
     schema_version: str = EXPERIMENT_SCHEMA_VERSION
@@ -485,6 +551,9 @@ class ExperimentRun:
             "explainability": (
                 self.explainability.as_dict() if self.explainability else None
             ),
+            "model_artifact": (
+                self.model_artifact.as_dict() if self.model_artifact else None
+            ),
             "environment": self.environment.as_dict(),
         }
         return to_jsonable(payload)
@@ -535,6 +604,7 @@ class ExperimentRun:
             created_at = created_at.replace(tzinfo=timezone.utc)
 
         explainability = payload.get("explainability")
+        artifact = payload.get("model_artifact")
         return cls(
             experiment_id=str(_typed(payload, "experiment_id", str, where=where)),
             configuration_hash=str(
@@ -558,6 +628,11 @@ class ExperimentRun:
             explainability=(
                 ExplainabilitySection.from_dict(explainability)
                 if isinstance(explainability, Mapping)
+                else None
+            ),
+            model_artifact=(
+                ModelArtifactSection.from_dict(artifact)
+                if isinstance(artifact, Mapping)
                 else None
             ),
             description=payload.get("description"),
