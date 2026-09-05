@@ -90,9 +90,32 @@ def decide(tool: str | None = None, **arguments: Any) -> str:
 FINISH = decide()
 
 
+#: What a provider says when it is not being asked for a plan.
+#:
+#: The orchestrator asks for a whole workflow before it asks for anything else.
+#: A response that is not a plan sends the run down the one-decision-at-a-time
+#: path, which is what the scripts in this module describe — they were written
+#: as sequences of decisions and they still mean exactly that.
+#:
+#: Prepended by :func:`provider_for` rather than written into forty scripts, so
+#: each test still reads as the plan it is about. The tests that *are* about
+#: planning script a real workflow as their first response instead.
+NO_PLAN = "This question is better answered one step at a time."
+
+
 def provider_for(*responses: str) -> FakeLLMProvider:
-    """A provider that returns these decisions, then this answer, in order."""
-    return FakeLLMProvider(responses=list(responses))
+    """A provider that declines to plan, then returns these decisions in order."""
+    return FakeLLMProvider(responses=[NO_PLAN, *responses])
+
+
+def planning_provider_for(workflow: dict, *responses: str) -> FakeLLMProvider:
+    """A provider that returns a whole plan, then the answer.
+
+    The counterpart to :func:`provider_for`: this one exercises the planned
+    path, where the workflow is decided once and executed without asking the
+    model what to do next.
+    """
+    return FakeLLMProvider(responses=[json.dumps(workflow), *responses])
 
 
 # ---------------------------------------------------------------------------
@@ -1097,10 +1120,20 @@ def test_search_still_works(knowledge_client: TestClient) -> None:
 
 
 def test_ask_still_works(build_client) -> None:
-    """Commit 11's other endpoint, with its own grounded answer."""
+    """Commit 11's other endpoint, with its own grounded answer.
+
+    Scripted with the raw provider rather than through :func:`provider_for`:
+    ``/api/v1/ask`` is the knowledge endpoint and never asks for a plan, so the
+    "decline to plan" response that every agent script starts with would be
+    consumed here as the answer.
+    """
     client = build_client()
     citation = real_citation(client, CV_QUESTION)
-    client = build_client(f"Cross-validation selects the model [{citation}].")
+    client = build_client(
+        provider=FakeLLMProvider(
+            responses=[f"Cross-validation selects the model [{citation}]."]
+        )
+    )
 
     response = client.post("/api/v1/ask", json={"question": CV_QUESTION})
 
@@ -1253,3 +1286,171 @@ def test_there_is_exactly_one_agent_package() -> None:
         path.name for path in obsolete.rglob("*.py")
     )
     assert (REPOSITORY_ROOT / "agent" / "orchestrator.py").is_file()
+
+
+# ---------------------------------------------------------------------------
+# Planned workflows, over HTTP
+#
+# The agent could already call several tools; what it could not do was decide
+# the whole sequence up front and report it. These tests are about what a
+# *client* now sees: the plan, how far it got, and — for the cases that matter
+# most — that none of the new surface leaks anything the old one refused to.
+# ---------------------------------------------------------------------------
+
+
+SEARCH_PLAN = {
+    "goal": "Explain how this project uses cross-validation",
+    "objective": "Answer from the project's own documentation, with citations",
+    "steps": [
+        {
+            "tool": "search_knowledge",
+            "purpose": "Search the project documentation",
+            "arguments": {"query": CV_QUESTION},
+        }
+    ],
+}
+
+
+def test_a_planned_run_reports_its_plan_and_its_progress(build_client) -> None:
+    """The whole of what a client learns about planning, in one response."""
+    client = build_client()
+    citation = real_citation(client, CV_QUESTION)
+    client = build_client(
+        provider=planning_provider_for(
+            SEARCH_PLAN,
+            f"Models are selected by cross-validation on the training rows [{citation}].",
+        )
+    )
+
+    payload = client.post(ASK_URL, json={"question": CV_QUESTION}).json()
+
+    assert payload["status"] == "completed"
+    workflow = payload["workflow"]
+    assert workflow["goal"] == SEARCH_PLAN["goal"]
+    assert workflow["summary"] == ["1. Search the project documentation"]
+    assert workflow["planned_step_count"] == 1
+    assert workflow["completed_step_count"] == 1
+    assert workflow["is_complete"] is True
+    assert workflow["steps"][0]["status"] == "ok"
+
+    summary = payload["execution_summary"]
+    assert summary["planned"] is True
+    assert summary["partial"] is False
+    assert summary["tools_used"] == ["search_knowledge"]
+
+
+def test_an_unplanned_run_reports_no_workflow(build_client) -> None:
+    """A client written before plans existed sees exactly what it always did."""
+    client = build_client()
+    citation = real_citation(client, CV_QUESTION)
+    client = build_client(
+        decide("search_knowledge", query=CV_QUESTION),
+        FINISH,
+        f"Cross-validation selects the model [{citation}].",
+    )
+
+    payload = client.post(ASK_URL, json={"question": CV_QUESTION}).json()
+
+    assert payload["status"] == "completed"
+    assert payload["workflow"] is None
+    assert payload["execution_summary"]["planned"] is False
+
+
+def test_a_plan_naming_an_unregistered_tool_runs_nothing(build_client) -> None:
+    """Refused as a plan, and the run continues without it.
+
+    The important half is what is *absent*: no call was made, and the name the
+    plan invented appears nowhere in the response.
+    """
+    client = build_client(
+        provider=planning_provider_for(
+            {
+                "goal": "Run a shell command",
+                "steps": [
+                    {"tool": "run_shell", "arguments": {"command": "cat /etc/passwd"}}
+                ],
+            },
+            FINISH,
+            "Nothing was observed for this question.",
+        )
+    )
+
+    payload = client.post(ASK_URL, json={"question": "list the files"}).json()
+
+    assert payload["workflow"] is None
+    assert payload["tool_calls"] == []
+    assert "run_shell" not in json.dumps(payload)
+    assert "/etc/passwd" not in json.dumps(payload)
+
+
+def test_a_planned_response_carries_no_step_arguments(build_client) -> None:
+    """The plan is a list of labels, not a record of what was passed.
+
+    Arguments are the one place a planner could put text of its own choosing
+    into something a person reads. What a call actually received is already
+    reported, summarised, beside the call.
+    """
+    client = build_client(
+        provider=planning_provider_for(SEARCH_PLAN, "An answer without citations.")
+    )
+
+    workflow = client.post(ASK_URL, json={"question": CV_QUESTION}).json()["workflow"]
+
+    assert "arguments" not in json.dumps(workflow)
+    for step in workflow["steps"]:
+        assert set(step) == {"step", "tool", "purpose", "status", "depends_on", "reason"}
+
+
+def test_a_planned_response_still_carries_no_reasoning(build_client) -> None:
+    """The rule that has held since the agent existed, applied to plans."""
+    client = build_client(
+        provider=planning_provider_for(SEARCH_PLAN, "An answer.")
+    )
+
+    rendered = json.dumps(
+        client.post(ASK_URL, json={"question": CV_QUESTION}).json()
+    ).lower()
+
+    for forbidden in ("chain_of_thought", "reasoning", "scratchpad", "system_prompt"):
+        assert forbidden not in rendered
+
+
+def test_the_status_endpoint_reports_every_planning_limit(
+    knowledge_client: TestClient,
+) -> None:
+    """A limit nobody can read is one nobody can check."""
+    payload = knowledge_client.get("/api/v1/agent/status").json()
+
+    assert payload["max_workflow_steps"] >= 1
+    assert payload["max_tool_repeats"] >= 1
+    assert payload["max_run_seconds"] > 0
+
+
+def test_the_openapi_schema_documents_the_plan(knowledge_client: TestClient) -> None:
+    """Including that a step's arguments are not part of it."""
+    schema = knowledge_client.get("/openapi.json").json()
+    step = schema["components"]["schemas"]["AgentWorkflowStep"]["properties"]
+
+    assert set(step) == {"step", "tool", "purpose", "status", "depends_on", "reason"}
+    assert "AgentWorkflow" in schema["components"]["schemas"]
+
+
+def test_the_plan_is_not_written_to_the_log(
+    build_client, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A goal and a step label are a model's words about a caller's words.
+
+    What is logged is the shape of the run — planned or not, how many steps
+    completed — and never the text of either.
+    """
+    client = build_client(
+        provider=planning_provider_for(SEARCH_PLAN, "An answer.")
+    )
+
+    with caplog.at_level(logging.INFO):
+        client.post(ASK_URL, json={"question": CV_QUESTION})
+
+    assert SEARCH_PLAN["goal"] not in caplog.text
+    assert SEARCH_PLAN["objective"] not in caplog.text
+    assert CV_QUESTION not in caplog.text
+    assert "planned=True" in caplog.text

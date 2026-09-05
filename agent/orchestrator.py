@@ -1,6 +1,17 @@
-"""The loop. Bounded, explicit, and the only thing that executes anything.
+"""The two ways a run happens, and the only thing that executes anything.
 
-::
+**Planned.** Ask the planner for a whole workflow, validate it against the
+registry and the limits, then run it in one pass::
+
+    plan = planner.plan_workflow(...)      # validated before anything runs
+    for step in plan.steps:                # in order, once each
+        budget spent?                      yes -> stop, report what was done
+        can its references be resolved?    no  -> skip it, say why
+        run it, record what came back
+    write the answer, check its grounding, return
+
+**Adaptive.** No plan available, so decide one step at a time — the loop this
+agent has always had::
 
     while the budget holds:
         ask the planner for a decision
@@ -14,13 +25,19 @@
 
     budget spent -> a partial result saying which limit stopped it
 
-Everything about this loop is meant to be readable in one sitting, because
-every safety property of the agent is a property of these forty lines.
+Everything here is meant to be readable in one sitting, because every safety
+property of the agent is a property of these few dozen lines.
 
-**It always terminates.** Every path through the body either records an
-observation, which costs tool budget, or returns. There is no branch that
-retries without spending, and no branch that continues after a budget check
-fails. A planner stuck asking for the same broken tool runs out and stops.
+**Both always terminate.** The planned path is a `for` over a validated,
+length-capped list whose dependencies point only backwards, so there is no
+branch that revisits a step and no way to write a plan that loops. The
+adaptive path spends tool budget on every observation it records, so a planner
+stuck asking for the same broken tool runs out and stops. Neither has a branch
+that retries without spending, or that continues after a budget check fails.
+
+**Planning is the only thing that is optional.** A planner without
+``plan_workflow``, or one that cannot produce a valid plan, gets the adaptive
+loop unchanged — which is what every planner got before plans existed.
 
 **Rejection is cheap and visible.** An unknown tool and an invalid argument
 set do not raise out of the run — they become observations with
@@ -74,9 +91,11 @@ from agent.observations import (
     ensure_json_safe,
     summarise_arguments,
 )
+from agent.plans import ACTION_TOOL, PlanStep
 from agent.registry import ToolRegistry
-from agent.results import AgentResult, AgentStatus
+from agent.results import AgentResult, AgentStatus, WorkflowReport, WorkflowStepReport
 from agent.state import ExecutionState
+from agent.workflow import resolve_arguments
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +115,19 @@ BUDGET_MESSAGES: dict[str, str] = {
         "question may accumulate and stopped. The result below covers what "
         "it had already found."
     ),
+    "max_run_seconds": (
+        "The agent reached its time limit for one question and stopped. The "
+        "result below covers what it had already found."
+    ),
 }
+
+#: How a planned step that never ran is recorded. Not a tool status — no call
+#: was made — so it is its own word, and a caller can tell "this was refused"
+#: from "this was never attempted".
+STEP_SKIPPED = "skipped"
+
+#: Said of every step still ahead when a budget ends the run.
+BUDGET_SKIP_REASON = "The run reached a limit before this step."
 
 
 class AgentOrchestrator:
@@ -259,13 +290,172 @@ class AgentOrchestrator:
 
     # -- The run -----------------------------------------------------------
 
+    # -- Planned execution -------------------------------------------------
+
+    def _plan(
+        self, state: ExecutionState, definitions: list[dict[str, Any]]
+    ) -> Any | None:
+        """Ask the planner for a whole workflow, or return ``None``.
+
+        ``None`` is not a failure. A planner that has no ``plan_workflow``, or
+        one that could not produce a valid plan, simply sends the run down the
+        one-decision-at-a-time loop that has always been there — which is the
+        same path every planner took before workflows existed.
+
+        A provider that is unreachable is the exception, and it is re-raised:
+        falling back would spend a second call to fail in the same way.
+        """
+        plan_workflow = getattr(self._planner, "plan_workflow", None)
+        if not callable(plan_workflow):
+            return None
+
+        try:
+            workflow = plan_workflow(
+                state.question,
+                tool_definitions=definitions,
+                # The plan's own limit, not the call budget. The two bound
+                # different things: this one caps how much may be *planned*,
+                # and `max_tool_calls` caps how much may be *done*. Letting the
+                # second bind during execution is what turns "you asked for
+                # four things and I could afford one" into a partial result
+                # that says so, rather than a plan silently refused up front.
+                max_steps=self._config.max_workflow_steps,
+                max_tool_repeats=self._config.max_tool_repeats,
+                context=dict(self._context),
+            )
+        except (PlannerUnavailableError, PlannerProviderError):
+            raise
+        except AgentError as exc:
+            # A malformed plan, or a planner with nothing to offer. Logged at
+            # info because it is ordinary, and it costs the run nothing but the
+            # planning turn it already spent.
+            logger.info("No usable workflow was planned: %s", exc.message)
+            return None
+
+        if workflow is None or not getattr(workflow, "steps", ()):
+            return None
+
+        # Charged only for a plan that shaped the run. A planning attempt that
+        # produced nothing leaves the run exactly as it was — same budget, same
+        # loop, same accounting as before workflows existed — which is what
+        # makes the fallback invisible to a caller rather than a silent tax on
+        # every question.
+        state.begin_iteration()
+        logger.info(
+            "Planned a %d-step workflow using %s",
+            len(workflow.steps),
+            ", ".join(workflow.tools),
+        )
+        return workflow
+
+    def _run_workflow(
+        self, state: ExecutionState, workflow: Any, started: float
+    ) -> AgentResult:
+        """Execute a plan, one pass, first step to last.
+
+        The plan was validated before it got here: every tool is registered,
+        every dependency points backwards, and the length is within the limit.
+        So this method has three jobs and no discretion — check the budget,
+        resolve the step's references, and hand it to the same
+        :meth:`_execute` the loop uses.
+
+        **A failed step does not end the run.** Steps that depended on it are
+        skipped with a stated reason, and steps that did not are executed. That
+        is what makes "the experiment worked and the explanation did not" a
+        result worth returning rather than a failure: the useful half is kept,
+        and the answer is told which half is missing.
+        """
+        state.workflow = workflow
+
+        for step in workflow.steps:
+            exhausted = state.exhausted_budget()
+            if exhausted is not None:
+                # Everything not yet run is recorded as not run, so the plan a
+                # caller sees always accounts for all of its steps.
+                self._skip_remaining(state, workflow, step, BUDGET_SKIP_REASON)
+                state.warn(BUDGET_MESSAGES[exhausted])
+                return self._finalise(
+                    state, started, stopped_by=exhausted, allow_answer=True
+                )
+
+            resolution = resolve_arguments(step, state.step_outputs)
+            if not resolution.ok:
+                state.step_outcomes[step.step_id] = STEP_SKIPPED
+                state.step_reasons[step.step_id] = resolution.blocked_reason or ""
+                state.warn(
+                    f"Step {step.step_id} ({step.purpose}) was not run: "
+                    f"{resolution.blocked_reason}"
+                )
+                logger.info(
+                    "Skipped %s (%s): %s",
+                    step.step_id,
+                    step.tool,
+                    resolution.blocked_code,
+                )
+                continue
+
+            observation = self._execute(
+                state,
+                PlanStep(
+                    action=ACTION_TOOL, tool=step.tool, arguments=resolution.arguments
+                ),
+            )
+            state.step_outcomes[step.step_id] = observation.status.value
+            if observation.status is ObservationStatus.OK:
+                # Only a successful step's output may be referred to. A
+                # rejected, failed or unavailable one leaves nothing behind,
+                # which is what makes a later reference to it block rather than
+                # read something half-formed.
+                state.step_outputs[step.step_id] = dict(observation.output)
+            else:
+                state.step_reasons[step.step_id] = (
+                    observation.error or "The step did not produce a result."
+                )
+
+        return self._finalise(state, started, stopped_by=None, allow_answer=True)
+
+    @staticmethod
+    def _skip_remaining(
+        state: ExecutionState, workflow: Any, current: Any, reason: str
+    ) -> None:
+        """Record every step from ``current`` onwards as not run."""
+        reached = False
+        for step in workflow.steps:
+            if step.step_id == current.step_id:
+                reached = True
+            if reached and step.step_id not in state.step_outcomes:
+                state.step_outcomes[step.step_id] = STEP_SKIPPED
+                state.step_reasons[step.step_id] = reason
+
+    # -- The run -----------------------------------------------------------
+
     def run(self, question: str) -> AgentResult:
-        """Answer one question, or explain why it could not be answered."""
+        """Answer one question, or explain why it could not be answered.
+
+        Two shapes, and which one is used depends only on whether the planner
+        can produce a plan:
+
+        **Planned.** The whole workflow is decided first, validated against the
+        registry and the limits, then executed in one pass. Deterministic, and
+        the shape a multi-step request gets.
+
+        **Adaptive.** One decision, executed, then the next — the loop this
+        agent has always had. Used when there is no plan, and unchanged.
+
+        Both end in the same place: the answer is written from the
+        observations and checked against them.
+        """
         state = ExecutionState(question=question, config=self._config)
         started = time.perf_counter()
         definitions = self._registry.definitions()
 
         try:
+            try:
+                workflow = self._plan(state, definitions)
+            except (PlannerUnavailableError, PlannerProviderError) as exc:
+                return self._failed(state, started, exc)
+            if workflow is not None:
+                return self._run_workflow(state, workflow, started)
             return self._loop(state, definitions, started)
         finally:
             # Nothing a run put in memory outlives it. A fitted model held to
@@ -344,11 +534,17 @@ class AgentOrchestrator:
                 state, started, status=AgentStatus.PARTIAL, answer="", error_code=stopped_by
             )
 
+        plan = self._workflow_report(state)
         try:
             text = self._planner.write_answer(
                 state.question,
                 observations=render_observations_for_answer(state.observations),
                 allowed_citations=list(allowed),
+                # What was *carried out*, not what was planned. A step that was
+                # skipped says so, so the answer cannot describe work that did
+                # not happen.
+                plan_summary=plan.executed_lines() if plan else [],
+                objective=plan.objective if plan else "",
             )
         except (PlannerUnavailableError, PlannerProviderError) as exc:
             return self._failed(state, started, exc)
@@ -420,7 +616,11 @@ class AgentOrchestrator:
             in {ObservationStatus.REJECTED, ObservationStatus.FAILED}
             for observation in state.observations
         )
-        partial = bool(stopped_by) or unavailable or rejected_or_failed
+        # A plan whose steps did not all complete is a partial answer even when
+        # every call that *was* made succeeded: the question asked for four
+        # things and got three.
+        incomplete_plan = plan is not None and not plan.is_complete
+        partial = bool(stopped_by) or unavailable or rejected_or_failed or incomplete_plan
 
         return self._build(
             state,
@@ -431,6 +631,33 @@ class AgentOrchestrator:
             citation_ids=report.valid,
             context=context,
             error_code=stopped_by,
+        )
+
+    def _workflow_report(self, state: ExecutionState) -> WorkflowReport | None:
+        """Describe the plan beside what happened to each of its steps.
+
+        Built from the state rather than from the plan alone, so a step's
+        status is what the executor recorded — never what the planner intended.
+        A step with no recorded outcome never ran at all, which is what a
+        caller sees when a limit ended the run early.
+        """
+        workflow = state.workflow
+        if workflow is None:
+            return None
+        return WorkflowReport(
+            goal=workflow.goal,
+            objective=workflow.objective,
+            steps=tuple(
+                WorkflowStepReport(
+                    step=step.step_id,
+                    tool=step.tool,
+                    purpose=step.purpose,
+                    status=state.step_outcomes.get(step.step_id, STEP_SKIPPED),
+                    depends_on=step.requires,
+                    reason=state.step_reasons.get(step.step_id),
+                )
+                for step in workflow.steps
+            ),
         )
 
     def _build(
@@ -470,7 +697,13 @@ class AgentOrchestrator:
             started_at=state.started_at,
             completed_at=completed_at,
             duration_ms=round((time.perf_counter() - started) * 1000, 2),
+            workflow=self._workflow_report(state),
         )
 
 
-__all__ = ["BUDGET_MESSAGES", "AgentOrchestrator"]
+__all__ = [
+    "BUDGET_MESSAGES",
+    "BUDGET_SKIP_REASON",
+    "STEP_SKIPPED",
+    "AgentOrchestrator",
+]

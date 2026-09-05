@@ -23,6 +23,8 @@ import {
   AGENT_INSUFFICIENT,
   AGENT_LOCAL_EXPLANATION,
   AGENT_PARTIAL,
+  AGENT_PLANNED,
+  AGENT_PLANNED_PARTIAL,
   AGENT_REJECTED_TOOL,
 } from "./fixtures";
 
@@ -291,5 +293,65 @@ describe("asking a question", () => {
       />,
     );
     expect(screen.getByText(/no question asked yet/i)).toBeInTheDocument();
+  });
+});
+
+describe("the planned workflow", () => {
+  it("shows what the agent was going to do, in order", () => {
+    render(<AgentAnswerCard answer={AGENT_PLANNED} />);
+
+    const plan = screen.getByRole("region", { name: /planned workflow/i });
+    const items = within(plan).getAllByRole("listitem");
+
+    expect(items.map((item) => item.textContent)).toEqual([
+      expect.stringContaining("Profile the uploaded dataset"),
+      expect.stringContaining("Compare models"),
+      expect.stringContaining("Explain the winning model"),
+    ]);
+  });
+
+  it("says how far a completed plan got", () => {
+    render(<AgentAnswerCard answer={AGENT_PLANNED} />);
+
+    expect(screen.getByText("3 of 3 steps")).toBeInTheDocument();
+  });
+
+  it("says how far a half-finished plan got, and why it stopped", () => {
+    // The point of showing a plan at all: an answer covering less ground than
+    // the question asked for should say so before anyone reads the prose.
+    render(<AgentAnswerCard answer={AGENT_PLANNED_PARTIAL} />);
+
+    expect(screen.getByText("1 of 3 steps")).toBeInTheDocument();
+    expect(screen.getByText(/not run/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/needed the result of step-2/i),
+    ).toBeInTheDocument();
+  });
+
+  it("shows nothing about planning when the run was not planned", () => {
+    // Every run looked like this before plans existed, and a client that meets
+    // one must not render an empty plan.
+    render(<AgentAnswerCard answer={AGENT_COMPLETED} />);
+
+    expect(screen.queryByText(/planned workflow/i)).toBeNull();
+  });
+
+  it("renders no step arguments and no reasoning", () => {
+    // The API does not send a step's arguments, and this asserts the card does
+    // not find them somewhere else either. `uploaded_dataset` appears in the
+    // tool trace's argument *names* — the plan section must not carry values.
+    render(<AgentAnswerCard answer={AGENT_PLANNED} />);
+    const plan = screen.getByRole("region", { name: /planned workflow/i });
+
+    expect(plan.textContent).not.toMatch(/renewed/);
+    expect(plan.textContent).not.toMatch(/chain of thought|reasoning|because/i);
+  });
+
+  it("counts planned steps rather than planning turns on the run tab", async () => {
+    render(<AgentAnswerCard answer={AGENT_PLANNED} />);
+
+    await userEvent.click(screen.getByRole("tab", { name: /run/i }));
+
+    expect(screen.getByText(/3 of 3 planned steps/i)).toBeInTheDocument();
   });
 });

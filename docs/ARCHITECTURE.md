@@ -412,6 +412,66 @@ Four outcomes are all HTTP 200 with a status: `completed`, `partial`,
 `insufficient_evidence`, `grounding_failed`. Only a provider failure is 502 or
 503.
 
+### Two shapes a run can take
+
+```
+                 can the planner produce a plan?
+                         │
+          ┌──────────────┴──────────────┐
+         yes                            no
+          │                             │
+   plan the whole run            decide one step
+   validate it                   execute it
+   run it, one pass              ask again
+          └──────────────┬──────────────┘
+                         ▼
+              write the answer from the
+              observations, check its grounding
+```
+
+**Planned** is the shape a multi-step request gets. The planner is asked once,
+before anything has run, for a goal, an ordered list of steps and the
+dependencies between them. That plan is validated against the registry and the
+limits, and then executed in a single pass.
+
+**Adaptive** is the loop this agent has always had, and it is what runs when a
+planner cannot produce a valid plan — including any planner written against the
+older contract, since `plan_workflow` is an optional method the orchestrator
+asks for and carries on without.
+
+Both end identically, and neither can reach a tool except through the registry
+and the tool's own schema.
+
+### What keeps a plan bounded
+
+- **Validated before it runs.** A step naming an unregistered tool makes the
+  whole plan invalid, so an invented capability is refused before step one
+  rather than at step four with three calls already spent. The step count and
+  the per-tool repeat count are capped the same way.
+- **It cannot loop.** `depends_on` may only name an earlier step. Not a cycle
+  check — the absence of a way to write a cycle, which is why execution needs
+  no scheduler.
+- **It cannot grow.** There is no re-planning: a plan is made once, and the run
+  is over when its steps are.
+- **The clock bounds it too.** `AGENT_MAX_RUN_SECONDS` is checked between
+  steps. It cannot interrupt a tool already executing, and the documentation
+  says so rather than claiming a cancellation this architecture cannot perform.
+
+### Values between steps
+
+`run_experiment` → `explain_experiment` needs an experiment id, and the obvious
+way to get one is to ask the model to copy it across. That is the way that goes
+wrong: it puts tool output through a language model and back out again, where
+it can be mistyped or invented.
+
+So a step's argument may instead be a closed reference —
+`{"from_step": "step-2", "field": "experiment_id"}` — which the executor
+resolves from the observation that step actually produced. Three rules keep it
+from becoming a query language: only an allowlisted field name (six of them, no
+paths and no expressions), only a short scalar, and only from a step that
+succeeded. An unresolvable reference skips its step with a stated reason rather
+than filling the gap.
+
 Details: [agent/README.md](../agent/README.md).
 
 ---

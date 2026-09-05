@@ -84,6 +84,15 @@ def decide(tool: str | None = None, **arguments: Any) -> str:
 
 FINISH = decide()
 
+#: What a provider says when it is not being asked for a plan.
+#:
+#: The orchestrator asks for a whole workflow before anything else. A response
+#: that is not a plan sends the run down the one-decision-at-a-time path, which
+#: is what the scripts in this module describe. Prepended by the client fixture
+#: rather than written into every script, so each test still reads as the plan
+#: it is about.
+NO_PLAN = "This question is better answered one step at a time."
+
 PROFILE = decide(
     "dataset_profile", dataset=UPLOADED_DATASET_NAME, target_column="renewed"
 )
@@ -158,13 +167,21 @@ def build_client(agent_index: RagConfig, store_dir: Path):
         agent_config: AgentConfig | None = None,
         settings: Settings | None = None,
     ) -> TestClient:
-        """Return a client for an application wired to the given script."""
+        """Return a client for an application wired to the given script.
+
+        Positional responses are prefixed with :data:`NO_PLAN`, because the
+        orchestrator asks for a whole workflow first and these scripts are
+        written as sequences of one-step decisions. Passing ``provider``
+        explicitly bypasses that, which is how the tests that *are* about
+        planning script a real plan.
+        """
         return TestClient(
             create_app(
                 settings or Settings(experiment_store_dir=store_dir),
                 rag_config=agent_index,
                 llm_config=LLMConfig(provider="fake"),
-                llm_provider=provider or FakeLLMProvider(responses=list(responses)),
+                llm_provider=provider
+                or FakeLLMProvider(responses=[NO_PLAN, *responses]),
                 agent_config=agent_config,
             )
         )
@@ -568,9 +585,31 @@ def test_concurrent_requests_keep_separate_datasets(build_client) -> None:
     """
     from concurrent.futures import ThreadPoolExecutor
 
-    client = build_client(
-        *([PROFILE, FINISH, "One."] * 6),
-    )
+    # Answered by *what was asked* rather than by position in a list. Two
+    # requests interleaving through one provider consume a scripted sequence in
+    # an order neither of them controls, and a test whose outcome depends on
+    # that ordering is testing the scheduler. This responder is order-free: a
+    # planning request always gets the plan, an answering request always gets
+    # the answer, and the runs can interleave however they like.
+    def respond(request: Any) -> str:
+        """Return the plan, or the answer, depending on which was asked for."""
+        prompt = request.messages[-1].content
+        if "Plan at most" in prompt:
+            return json.dumps(
+                {
+                    "goal": "Profile the uploaded dataset",
+                    "steps": [
+                        {
+                            "tool": "dataset_profile",
+                            "purpose": "Profile the uploaded dataset",
+                            "arguments": {"dataset": UPLOADED_DATASET_NAME},
+                        }
+                    ],
+                }
+            )
+        return "One."
+
+    client = build_client(provider=FakeLLMProvider(responder=respond))
 
     def ask(content: bytes, name: str) -> dict[str, Any]:
         """Run one request."""
@@ -1347,3 +1386,204 @@ def test_the_dataset_service_holds_no_reference_after_a_request(
 
     assert payload["tools_available"] == ["search_knowledge", "explain_experiment"]
     assert payload.get("dataset") is None
+
+
+# ---------------------------------------------------------------------------
+# Planned workflows over an uploaded dataset
+#
+# The request this whole commit is written around: "analyse this dataset, find
+# the best model, and explain why". Three tools, planned once, with the
+# experiment id travelling between two of them — over a real upload, a real
+# runner and a real SHAP layer.
+# ---------------------------------------------------------------------------
+
+
+def analysis_plan() -> dict[str, Any]:
+    """The plan a model produces for "analyse this and explain the winner"."""
+    return {
+        "goal": "Find and explain the best model for this dataset",
+        "objective": "Name the winning model and say why it was selected",
+        "steps": [
+            {
+                "tool": "dataset_profile",
+                "purpose": "Profile the uploaded dataset",
+                "arguments": {
+                    "dataset": UPLOADED_DATASET_NAME,
+                    "target_column": "renewed",
+                },
+            },
+            {
+                "tool": "run_experiment",
+                "purpose": "Compare models",
+                "arguments": {
+                    "dataset": UPLOADED_DATASET_NAME,
+                    "target_column": "renewed",
+                    "models": ["logistic_regression"],
+                    "folds": 3,
+                },
+            },
+            {
+                "tool": "explain_experiment",
+                "purpose": "Explain the winning model",
+                "depends_on": ["step-2"],
+                "arguments": {
+                    "experiment_id": {"from_step": "step-2", "field": "experiment_id"}
+                },
+            },
+        ],
+    }
+
+
+def planning_provider(workflow: dict[str, Any], answer: str) -> FakeLLMProvider:
+    """A provider that returns a plan, then an answer."""
+    return FakeLLMProvider(responses=[json.dumps(workflow), answer])
+
+
+@pytest.mark.slow
+def test_a_planned_workflow_runs_end_to_end_over_an_upload(build_client) -> None:
+    """Profile, experiment, explanation — one plan, three real tools.
+
+    Everything below the planner is genuine here: the ingestion path, the
+    experiment runner with real scikit-learn models, and the real SHAP layer.
+    """
+    client = build_client(
+        provider=planning_provider(
+            analysis_plan(), "Logistic regression won on the held-out test set."
+        )
+    )
+
+    payload = client.post(
+        DATASET_URL, files=upload(classification_csv()), data={"question": ANALYSE}
+    ).json()
+
+    workflow = payload["workflow"]
+    assert workflow["is_complete"] is True
+    assert workflow["summary"] == [
+        "1. Profile the uploaded dataset",
+        "2. Compare models",
+        "3. Explain the winning model",
+    ]
+    assert [step["tool"] for step in workflow["steps"]] == [
+        "dataset_profile",
+        "run_experiment",
+        "explain_experiment",
+    ]
+    assert payload["execution_summary"]["steps_completed"] == 3
+
+
+@pytest.mark.slow
+def test_the_experiment_id_reaches_the_explanation_without_the_model(
+    build_client,
+) -> None:
+    """The dependency mechanism, over HTTP, on a real run.
+
+    `explain_experiment` is called with the id `run_experiment` produced.
+    Nothing asked a language model to read it out of one tool's output and type
+    it into another's arguments — which is what made the same chain unreliable
+    before this commit.
+    """
+    client = build_client(
+        provider=planning_provider(analysis_plan(), "The winner was explained.")
+    )
+
+    payload = client.post(
+        DATASET_URL, files=upload(classification_csv()), data={"question": ANALYSE}
+    ).json()
+
+    calls = {call["tool_name"]: call for call in payload["tool_calls"]}
+    experiment_id = payload["experiment_ids"][0]
+    assert calls["explain_experiment"]["arguments"]["experiment_id"] == experiment_id
+    assert calls["explain_experiment"]["status"] == "ok"
+
+
+@pytest.mark.slow
+def test_a_planned_workflow_persists_no_part_of_the_upload(
+    build_client, store_dir: Path
+) -> None:
+    """The loan is still a loan when the run is planned.
+
+    A plan runs more of the system in one request than a single decision does,
+    so the guarantee is re-checked against it: no cell of the upload reaches
+    the response, the stored experiment record, or anything on disk.
+    """
+    columns = learnable_classification_rows()
+    marker = "PLANNED-SECRET-CELL-VALUE"
+    # An extra column whose every cell is the marker, so it is present in the
+    # data the run actually sees rather than only in the header.
+    columns["note"] = [marker] * len(next(iter(columns.values())))
+    content = pd.DataFrame(columns).to_csv(index=False).encode()
+
+    client = build_client(
+        provider=planning_provider(analysis_plan(), "The winner was explained.")
+    )
+
+    response = client.post(
+        DATASET_URL, files=upload(content), data={"question": ANALYSE}
+    )
+    payload = response.json()
+
+    assert payload["dataset"]["persisted"] is False
+    assert marker not in json.dumps(payload)
+    for path in store_dir.rglob("*"):
+        if path.is_file():
+            assert marker not in path.read_text(encoding="utf-8", errors="ignore")
+
+
+def test_a_planned_workflow_keeps_the_safe_dataset_name(build_client) -> None:
+    """A client's filename never becomes an identifier, planned or not."""
+    client = build_client(
+        provider=planning_provider(
+            {
+                "goal": "Profile the upload",
+                "steps": [
+                    {
+                        "tool": "dataset_profile",
+                        "purpose": "Profile the uploaded dataset",
+                        "arguments": {"dataset": UPLOADED_DATASET_NAME},
+                    }
+                ],
+            },
+            "Profiled.",
+        )
+    )
+
+    payload = client.post(
+        DATASET_URL,
+        files=upload(classification_csv(), "../../etc/passwd.csv"),
+        data={"question": ANALYSE},
+    ).json()
+
+    assert payload["dataset"]["name"] == UPLOADED_DATASET_NAME
+    assert payload["tool_calls"][0]["arguments"]["dataset"] == UPLOADED_DATASET_NAME
+    assert "/etc/passwd" not in json.dumps(payload["workflow"])
+
+
+def test_a_plan_cannot_name_a_dataset_that_was_not_uploaded(build_client) -> None:
+    """The allowed values are the session's own dataset names.
+
+    So a plan naming somewhere else is refused by the schema before the tool
+    runs — the same refusal a single decision gets, on the same path.
+    """
+    client = build_client(
+        provider=planning_provider(
+            {
+                "goal": "Read something else",
+                "steps": [
+                    {
+                        "tool": "dataset_profile",
+                        "purpose": "Profile a different dataset",
+                        "arguments": {"dataset": "/etc/passwd"},
+                    }
+                ],
+            },
+            "Nothing was observed.",
+        )
+    )
+
+    payload = client.post(
+        DATASET_URL, files=upload(classification_csv()), data={"question": ANALYSE}
+    ).json()
+
+    assert payload["workflow"]["steps"][0]["status"] == "rejected"
+    assert payload["tool_calls"][0]["status"] == "rejected"
+    assert "/etc/passwd" not in json.dumps(payload)

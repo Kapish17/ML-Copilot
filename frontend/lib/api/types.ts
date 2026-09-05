@@ -573,6 +573,54 @@ export interface AgentDatasetInfo {
   persisted?: boolean;
 }
 
+/** One planned step, and what became of it. */
+export interface AgentWorkflowStep {
+  step: string;
+  tool: string;
+  /** A short label for the step — what it was for, never why it was chosen. */
+  purpose: string;
+  /** `ok`, `unavailable`, `rejected`, `failed`, or `skipped` — never called. */
+  status: string;
+  depends_on: string[];
+  /** Why it did not run or did not work. An authored sentence. */
+  reason: string | null;
+}
+
+/**
+ * The plan a run executed, beside what happened to each step.
+ *
+ * `null` on a run answered one decision at a time, which is what every run
+ * looked like before planning existed — so anything reading this must handle
+ * its absence rather than assume it.
+ *
+ * There is no field for a step's arguments, deliberately: they are the one
+ * place a planner could put text of its own choosing into something a person
+ * reads, and what a call actually received is already in the tool trace.
+ */
+export interface AgentWorkflow {
+  goal: string;
+  objective: string;
+  steps: AgentWorkflowStep[];
+  /** The plan as a person reads it, one numbered line per step. */
+  summary: string[];
+  planned_step_count: number;
+  completed_step_count: number;
+  is_complete: boolean;
+}
+
+/** The shape of a run, without reading its observations. */
+export interface AgentExecutionSummary {
+  planned: boolean;
+  steps_planned: number;
+  steps_completed: number;
+  workflow_complete: boolean;
+  tools_used: string[];
+  tool_call_count: number;
+  /** True whenever the answer covers less than the question asked for. */
+  partial: boolean;
+  stopped_by: string | null;
+}
+
 export interface AgentAnswer {
   question: string;
   status: AgentStatus | string;
@@ -586,6 +634,9 @@ export interface AgentAnswer {
   allowed_citations: string[];
   experiment_ids: string[];
   warnings: string[];
+  /** The plan this run executed, when it had one. */
+  workflow?: AgentWorkflow | null;
+  execution_summary?: AgentExecutionSummary | null;
   iterations: number;
   tool_call_count: number;
   tools_available: string[];

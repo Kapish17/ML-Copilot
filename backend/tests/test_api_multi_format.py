@@ -95,6 +95,14 @@ def decide(tool: str | None = None, **arguments: Any) -> str:
 
 
 FINISH = decide()
+
+#: What a provider says when it is not being asked for a plan.
+#:
+#: The orchestrator asks for a whole workflow before anything else. A response
+#: that is not a plan sends the run down the one-decision-at-a-time path, which
+#: is what the scripts here describe — these tests are about a dataset's
+#: *format* surviving the round trip, not about how the run was planned.
+NO_PLAN = "This question is better answered one step at a time."
 PROFILE_RENEWED = decide(
     "dataset_profile", dataset=UPLOADED_DATASET_NAME, target_column="renewed"
 )
@@ -153,13 +161,18 @@ def build_agent_client(format_index: RagConfig, store_dir: Path):
     def factory(
         *responses: str, provider: FakeLLMProvider | None = None
     ) -> TestClient:
-        """Return a client for an application wired to the given script."""
+        """Return a client for an application wired to the given script.
+
+        Positional responses are prefixed with :data:`NO_PLAN`, so a script
+        written as a sequence of decisions still means that.
+        """
         return TestClient(
             create_app(
                 Settings(experiment_store_dir=store_dir),
                 rag_config=format_index,
                 llm_config=LLMConfig(provider="fake"),
-                llm_provider=provider or FakeLLMProvider(responses=list(responses)),
+                llm_provider=provider
+                or FakeLLMProvider(responses=[NO_PLAN, *responses]),
             )
         )
 

@@ -4,6 +4,7 @@ import { Card } from "@/components/common/Card";
 import { Tabs } from "@/components/common/Tabs";
 import { CitationList } from "./CitationList";
 import { ToolTrace } from "./ToolTrace";
+import { WorkflowSteps } from "./WorkflowSteps";
 import { GlobalImportance } from "@/components/explainability/GlobalImportance";
 import {
   LocalExplanation,
@@ -30,6 +31,11 @@ import { formatBadge, formatCount, humanise } from "@/lib/format";
  * Nothing here renders a system prompt, a provider name, a model name, a
  * credential or any reasoning: the backend does not return them, and this
  * card reads only the fields it names.
+ *
+ * When a run was planned, the plan is shown above the answer — what was going
+ * to be done, in order, and how far it got. That is a list of short labels and
+ * their outcomes, and deliberately not the arguments each step was called
+ * with: those are in the tool trace, already reduced to names.
  */
 const STATUS_META: Record<
   string,
@@ -195,6 +201,8 @@ export function AgentAnswerCard({ answer }: { answer: AgentAnswer }) {
         </p>
       </div>
 
+      {answer.workflow && <WorkflowSteps workflow={answer.workflow} />}
+
       {answer.warnings.length > 0 && (
         <ul className="mt-3 list-disc space-y-1 pl-5 text-xs text-amber-800">
           {answer.warnings.map((warning) => (
@@ -282,8 +290,10 @@ export function AgentAnswerCard({ answer }: { answer: AgentAnswer }) {
                   <div>
                     <dt className="font-semibold text-ink-600">Steps</dt>
                     <dd className="mt-0.5 text-ink-800">
-                      {answer.iterations} planning steps ·{" "}
-                      {answer.tool_call_count} tool calls
+                      {answer.workflow
+                        ? `${answer.workflow.completed_step_count} of ${answer.workflow.planned_step_count} planned steps`
+                        : `${answer.iterations} planning steps`}{" "}
+                      · {answer.tool_call_count} tool calls
                     </dd>
                   </div>
                   {answer.dataset && (

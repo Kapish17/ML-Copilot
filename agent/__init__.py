@@ -8,6 +8,7 @@ tools it cannot add to, over evidence it cannot invent.
 ``errors``        the refusals and breakdowns of orchestration itself
 ``schemas``       typed argument declarations, and the validation of a call
 ``plans``         the two decisions a planner may make, and parsing one
+``workflow``      a whole plan, its validation, and passing values between steps
 ``prompts``       what the planner and the answerer are told to distrust
 ``planner``       asking a model what to do, through the provider abstraction
 ``planners``      a deterministic scripted planner, for tests
@@ -58,13 +59,27 @@ from agent.errors import (
 )
 from agent.observations import Observation, ObservationStatus, ensure_json_safe
 from agent.orchestrator import AgentOrchestrator
-from agent.planner import LLMPlanner, Planner
+from agent.planner import LLMPlanner, Planner, WorkflowPlanner
 from agent.planners.fake import FakePlanner
 from agent.plans import PlanStep, parse_plan
 from agent.registry import ToolRegistry
-from agent.results import AgentCitation, AgentResult, AgentStatus
+from agent.results import (
+    AgentCitation,
+    AgentResult,
+    AgentStatus,
+    WorkflowReport,
+    WorkflowStepReport,
+)
 from agent.schemas import ArgumentField, ArgumentSchema
 from agent.state import ExecutionState
+from agent.workflow import (
+    REFERENCEABLE_FIELDS,
+    MalformedWorkflowError,
+    Workflow,
+    WorkflowStep,
+    parse_workflow,
+    resolve_arguments,
+)
 from agent.tools import (
     DatasetProfileTool,
     ExperimentArtifactCache,
@@ -87,6 +102,7 @@ __all__ = [
     "AgentStatus",
     "ArgumentField",
     "ArgumentSchema",
+    "REFERENCEABLE_FIELDS",
     "BudgetExhaustedError",
     "DatasetProfileTool",
     "DuplicateToolError",
@@ -97,6 +113,7 @@ __all__ = [
     "InMemoryDatasetSource",
     "LLMPlanner",
     "MalformedPlanError",
+    "MalformedWorkflowError",
     "Observation",
     "ObservationStatus",
     "PlanStep",
@@ -113,8 +130,15 @@ __all__ = [
     "ToolResult",
     "ToolValidationError",
     "UnknownToolError",
+    "Workflow",
+    "WorkflowPlanner",
+    "WorkflowReport",
+    "WorkflowStep",
+    "WorkflowStepReport",
     "build_default_registry",
     "config_from_env",
     "ensure_json_safe",
     "parse_plan",
+    "parse_workflow",
+    "resolve_arguments",
 ]

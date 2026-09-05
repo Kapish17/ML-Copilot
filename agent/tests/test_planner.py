@@ -41,6 +41,21 @@ DECISION = json.dumps(
     {"action": "tool", "tool": "search_knowledge", "arguments": {"query": "leakage"}}
 )
 FINISH = '{"action": "final"}'
+#: A whole plan, as a model would return one. One step, because one step is a
+#: complete plan when one step answers the question.
+WORKFLOW = json.dumps(
+    {
+        "goal": "Explain how leakage is prevented",
+        "objective": "Answer from the project's own documentation",
+        "steps": [
+            {
+                "tool": "search_knowledge",
+                "purpose": "Search the project documentation",
+                "arguments": {"query": "leakage"},
+            }
+        ],
+    }
+)
 
 
 def test_the_planner_satisfies_the_planner_protocol() -> None:
@@ -194,9 +209,41 @@ def test_the_answer_step_uses_its_own_timeout() -> None:
 
 
 def test_the_real_planner_drives_the_orchestrator(registry) -> None:
-    """End to end with a provider, not a scripted planner."""
+    """End to end with a provider, not a scripted planner.
+
+    The orchestrator asks for a plan first, so the provider's first response is
+    one. The rest is unchanged: the planned step runs, the answer is written
+    from what it observed, and the citation is checked against it.
+    """
     provider = FakeLLMProvider(
         responses=[
+            WORKFLOW,
+            "Leakage is prevented on the training split "
+            "[docs:ml-readme#cross-validation].",
+        ]
+    )
+    agent = AgentOrchestrator(LLMPlanner(provider), registry)
+
+    result = agent.run("How is leakage prevented?")
+
+    assert result.status is AgentStatus.COMPLETED
+    assert result.tool_call_count == 1
+    assert result.citation_ids == ("docs:ml-readme#cross-validation",)
+    assert result.workflow is not None
+    assert result.workflow.is_complete
+
+
+def test_a_provider_that_cannot_plan_falls_back_to_the_loop(registry) -> None:
+    """The path that keeps every planner written before plans existed working.
+
+    The first response is not a plan, so planning produces nothing and the run
+    continues exactly as it did before: one decision, executed, then the
+    answer. Nothing about the accounting changes either — the wasted planning
+    attempt costs no iteration, because it shaped no part of the run.
+    """
+    provider = FakeLLMProvider(
+        responses=[
+            "I would start by loading the data.",  # not a plan
             DECISION,
             FINISH,
             "Leakage is prevented on the training split "
@@ -209,7 +256,8 @@ def test_the_real_planner_drives_the_orchestrator(registry) -> None:
 
     assert result.status is AgentStatus.COMPLETED
     assert result.tool_call_count == 1
-    assert result.citation_ids == ("docs:ml-readme#cross-validation",)
+    assert result.workflow is None
+    assert result.execution_summary()["planned"] is False
 
 
 # ---------------------------------------------------------------------------

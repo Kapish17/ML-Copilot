@@ -89,6 +89,99 @@ class AgentCitation:
 
 
 @dataclass(frozen=True)
+class WorkflowStepReport:
+    """One planned step, and what became of it."""
+
+    step: str
+    tool: str
+    #: The short label from the plan — what this step was *for*. A label, not
+    #: reasoning: it says "Explain the winning model", never why the planner
+    #: thought that was next.
+    purpose: str
+    #: ``ok``, ``unavailable``, ``rejected``, ``failed`` — or ``skipped``, when
+    #: no call was made at all because the step it needed produced nothing, or
+    #: a limit ended the run first.
+    status: str
+    depends_on: tuple[str, ...] = ()
+    #: Why it did not run or did not work. An authored sentence.
+    reason: str | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        """Whether this step produced a usable result."""
+        return self.status == "ok"
+
+    def as_dict(self) -> dict[str, Any]:
+        """Render the step as plain JSON-safe values."""
+        return {
+            "step": self.step,
+            "tool": self.tool,
+            "purpose": self.purpose,
+            "status": self.status,
+            "depends_on": list(self.depends_on),
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class WorkflowReport:
+    """The plan a run executed, beside what actually happened to it.
+
+    This is the *whole* of what a caller learns about planning. It says what
+    was going to be done, in what order, and how each part turned out. It does
+    not say how the planner arrived at any of it, because that is not returned,
+    stored or logged — see the note at the top of this module.
+    """
+
+    goal: str
+    objective: str
+    steps: tuple[WorkflowStepReport, ...] = ()
+
+    @property
+    def completed_step_count(self) -> int:
+        """How many planned steps produced a result."""
+        return sum(1 for step in self.steps if step.succeeded)
+
+    @property
+    def is_complete(self) -> bool:
+        """Whether every planned step produced a result."""
+        return bool(self.steps) and self.completed_step_count == len(self.steps)
+
+    def summary_lines(self) -> list[str]:
+        """The plan as a person reads it, one numbered line per step."""
+        return [
+            f"{index}. {step.purpose}"
+            for index, step in enumerate(self.steps, start=1)
+        ]
+
+    def executed_lines(self) -> list[str]:
+        """What was actually carried out, for the answer prompt.
+
+        Not the same list as :meth:`summary_lines`: a step that was skipped is
+        described as skipped. The distinction is the point — an answer written
+        from the plan rather than from the execution is how "and then I
+        explained the model" gets written about a step that never ran.
+        """
+        lines: list[str] = []
+        for index, step in enumerate(self.steps, start=1):
+            suffix = "" if step.succeeded else f" — NOT DONE ({step.status})"
+            lines.append(f"{index}. {step.purpose}{suffix}")
+        return lines
+
+    def as_dict(self) -> dict[str, Any]:
+        """Render the report as plain JSON-safe values."""
+        return {
+            "goal": self.goal,
+            "objective": self.objective,
+            "steps": [step.as_dict() for step in self.steps],
+            "summary": self.summary_lines(),
+            "planned_step_count": len(self.steps),
+            "completed_step_count": self.completed_step_count,
+            "is_complete": self.is_complete,
+        }
+
+
+@dataclass(frozen=True)
 class AgentResult:
     """One complete agent run, as the caller receives it."""
 
@@ -113,6 +206,43 @@ class AgentResult:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     duration_ms: float | None = None
+    #: The plan this run executed, when it had one. ``None`` for a run that
+    #: took the one-decision-at-a-time path, which is why every field of it is
+    #: optional in the API schema: a client written before plans existed sees
+    #: the same response it always did.
+    workflow: WorkflowReport | None = None
+
+    @property
+    def tools_used(self) -> tuple[str, ...]:
+        """Every tool this run called, in order of first use."""
+        seen: list[str] = []
+        for call in self.tool_calls:
+            name = str(call.get("tool_name", ""))
+            if name and name not in seen:
+                seen.append(name)
+        return tuple(seen)
+
+    def execution_summary(self) -> dict[str, Any]:
+        """A short, honest account of the run's shape.
+
+        Enough for a client to say "3 of 4 steps completed" without reading the
+        observations, and deliberately not enough to reconstruct anything the
+        planner thought. ``partial`` is the field worth reading: it is true
+        whenever the answer covers less than the question asked for, whatever
+        the reason.
+        """
+        return {
+            "planned": self.workflow is not None,
+            "steps_planned": len(self.workflow.steps) if self.workflow else 0,
+            "steps_completed": (
+                self.workflow.completed_step_count if self.workflow else 0
+            ),
+            "workflow_complete": bool(self.workflow and self.workflow.is_complete),
+            "tools_used": list(self.tools_used),
+            "tool_call_count": self.tool_call_count,
+            "partial": self.status is AgentStatus.PARTIAL,
+            "stopped_by": self.error_code,
+        }
 
     @property
     def is_answer(self) -> bool:
@@ -142,6 +272,8 @@ class AgentResult:
             "iterations": self.iterations,
             "tool_call_count": self.tool_call_count,
             "error_code": self.error_code,
+            "workflow": self.workflow.as_dict() if self.workflow else None,
+            "execution_summary": self.execution_summary(),
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": (
                 self.completed_at.isoformat() if self.completed_at else None
@@ -150,4 +282,10 @@ class AgentResult:
         }
 
 
-__all__ = ["AgentCitation", "AgentResult", "AgentStatus"]
+__all__ = [
+    "AgentCitation",
+    "AgentResult",
+    "AgentStatus",
+    "WorkflowReport",
+    "WorkflowStepReport",
+]

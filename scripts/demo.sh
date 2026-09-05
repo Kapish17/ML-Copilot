@@ -152,6 +152,15 @@ read_json "$WORK_DIR/agent.json" '
 "  " + (data.get("final_answer") or data.get("error", {}).get("message", ""))'
 read_json "$WORK_DIR/agent.json" '
 "  tools run: " + (", ".join(c["tool_name"] for c in data.get("tool_calls", [])) or "none")'
+# When the run was planned, the plan is part of the answer: what it was going
+# to do, in order, and how far it got. A label per step — never why any of it
+# was chosen.
+read_json "$WORK_DIR/agent.json" '
+(lambda w: "  planned workflow (%d of %d steps done):\n" % (
+    w["completed_step_count"], w["planned_step_count"])
+ + "\n".join("    %s  [%s]" % (line, s["status"])
+              for line, s in zip(w["summary"], w["steps"]))
+ if w else "  (answered without planning a workflow)")(data.get("workflow"))'
 note "no chain-of-thought is returned — the trace is which tools ran, not why"
 
 # ---------------------------------------------------------------------------

@@ -1,8 +1,9 @@
-"""Asking a model what to do next, through the provider abstraction.
+"""Asking a model what to do, through the provider abstraction.
 
 The planner is a thin thing on purpose. It builds a prompt from the registry
 and the observations, asks the provider for one short response, and hands the
-text to :func:`agent.plans.parse_plan`. It does not decide whether the chosen
+text to a parser — :func:`agent.workflow.parse_workflow` for a whole plan, or
+:func:`agent.plans.parse_plan` for one next decision. It does not decide whether the chosen
 tool exists, whether the arguments are valid, or whether the budget allows the
 call — those are the orchestrator's and the registry's, and keeping them out
 of here means a planner cannot be the thing that authorises a call.
@@ -29,11 +30,14 @@ from agent.plans import PlanStep, parse_plan
 from agent.prompts import (
     ANSWER_SYSTEM_PROMPT,
     PLANNER_SYSTEM_PROMPT,
+    WORKFLOW_SYSTEM_PROMPT,
     build_answer_prompt,
     build_planner_prompt,
+    build_workflow_prompt,
     render_observations,
     render_tool_catalogue,
 )
+from agent.workflow import Workflow, parse_workflow
 from llm.errors import (
     LLMConfigurationError,
     LLMDependencyError,
@@ -102,6 +106,8 @@ class Planner(Protocol):
         *,
         observations: list[dict[str, Any]],
         allowed_citations: list[str],
+        plan_summary: list[str] | None = None,
+        objective: str = "",
     ) -> str:
         """Write the final answer from the observations."""
         ...  # pragma: no cover - protocol
@@ -109,6 +115,37 @@ class Planner(Protocol):
     @property
     def is_ready(self) -> bool:
         """Whether the planner could be asked right now."""
+        ...  # pragma: no cover - protocol
+
+
+@runtime_checkable
+class WorkflowPlanner(Protocol):
+    """A planner that can also plan a whole workflow before anything runs.
+
+    Deliberately a **separate** protocol, and deliberately optional. The
+    orchestrator asks for this method and carries on without it, which means a
+    planner written against the older contract — including any a caller wrote
+    themselves — keeps working exactly as it did: it simply gets the one
+    decision at a time loop rather than the planned one.
+    """
+
+    def plan_workflow(
+        self,
+        question: str,
+        *,
+        tool_definitions: list[dict[str, Any]],
+        max_steps: int,
+        max_tool_repeats: int,
+        context: dict[str, Any] | None = None,
+    ) -> Workflow:
+        """Plan the whole run.
+
+        Raises:
+            MalformedWorkflowError: If the response is not a valid plan. The
+                caller treats this as "no plan available" and falls back.
+            PlannerUnavailableError: If the planner is not configured.
+            PlannerProviderError: If the provider failed.
+        """
         ...  # pragma: no cover - protocol
 
 
@@ -185,6 +222,46 @@ class LLMPlanner:
 
         return getattr(result, "text", "") or ""
 
+    def plan_workflow(
+        self,
+        question: str,
+        *,
+        tool_definitions: list[dict[str, Any]],
+        max_steps: int,
+        max_tool_repeats: int,
+        context: dict[str, Any] | None = None,
+    ) -> Workflow:
+        """Plan the whole run in one call.
+
+        The validation is not done here and could not be: this method asks the
+        provider for text and hands it to :func:`~agent.workflow.parse_workflow`
+        along with the registered tool names and the limits. Whether a plan is
+        acceptable is decided by that function against the registry, so a
+        planner cannot be the thing that authorises its own plan — the same
+        separation :meth:`decide` has always had.
+        """
+        prompt = build_workflow_prompt(
+            question,
+            tool_catalogue=render_tool_catalogue(tool_definitions),
+            max_steps=max_steps,
+            context=context,
+        )
+        text = self._generate(
+            WORKFLOW_SYSTEM_PROMPT,
+            prompt,
+            timeout=self._config.planner_timeout_seconds,
+            # A plan is several steps rather than one decision, so it needs
+            # more room than `decide` — still small enough that a model writing
+            # an essay is cut off rather than paid for.
+            max_tokens=max(self._config.planner_max_output_tokens, 700),
+        )
+        return parse_workflow(
+            text,
+            known_tools=[str(item.get("name", "")) for item in tool_definitions],
+            max_steps=max_steps,
+            max_tool_repeats=max_tool_repeats,
+        )
+
     def decide(
         self,
         question: str,
@@ -218,6 +295,8 @@ class LLMPlanner:
         *,
         observations: list[dict[str, Any]],
         allowed_citations: list[str],
+        plan_summary: list[str] | None = None,
+        objective: str = "",
     ) -> str:
         """Write the final answer from the observations."""
         prompt = build_answer_prompt(
@@ -226,6 +305,8 @@ class LLMPlanner:
                 observations, limit=self._config.max_context_chars
             ),
             allowed_citations=allowed_citations,
+            plan_summary=plan_summary or (),
+            objective=objective,
         )
         return self._generate(
             ANSWER_SYSTEM_PROMPT,
@@ -235,4 +316,4 @@ class LLMPlanner:
         )
 
 
-__all__ = ["LLMPlanner", "Planner"]
+__all__ = ["LLMPlanner", "Planner", "WorkflowPlanner"]

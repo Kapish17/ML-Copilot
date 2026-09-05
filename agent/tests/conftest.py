@@ -111,21 +111,35 @@ def build_agent(registry: ToolRegistry, artifacts: ExperimentArtifactCache):
     def factory(
         steps: Sequence[Any] = (),
         *,
+        workflow: Any = None,
+        workflow_error: Exception | None = None,
         answer: str | Sequence[str] | None = None,
         error: Exception | None = None,
         answer_error: Exception | None = None,
         config: AgentConfig | None = None,
         tools: ToolRegistry | None = None,
+        context: dict[str, Any] | None = None,
     ) -> tuple[AgentOrchestrator, FakePlanner]:
-        """Return an orchestrator and the planner driving it."""
+        """Return an orchestrator and the planner driving it.
+
+        With no ``workflow``, the planner declines to plan and the run takes
+        the one-decision-at-a-time path — which is what every test written
+        before plans existed asks for, and gets unchanged.
+        """
         planner = FakePlanner(
-            steps, answer=answer, error=error, answer_error=answer_error
+            steps,
+            workflow=workflow,
+            workflow_error=workflow_error,
+            answer=answer,
+            error=error,
+            answer_error=answer_error,
         )
         orchestrator = AgentOrchestrator(
             planner,
             tools if tools is not None else registry,
             config=config or AgentConfig(),
             artifacts=artifacts,
+            context=context,
         )
         return orchestrator, planner
 

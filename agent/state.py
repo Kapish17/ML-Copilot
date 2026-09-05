@@ -20,6 +20,7 @@ truth about what is left.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -49,6 +50,21 @@ class ExecutionState:
     started_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
+    #: The plan this run is executing, when it has one. Recorded so the result
+    #: can report what was planned beside what happened.
+    workflow: Any = None
+    #: Per planned step: how it turned out. Keyed by step id.
+    step_outcomes: dict[str, str] = field(default_factory=dict)
+    #: Per planned step: why it did not run, when it did not.
+    step_reasons: dict[str, str] = field(default_factory=dict)
+    #: Structured output per completed step, for resolving later steps'
+    #: references. **Tool output, not model text** — it is put here by the
+    #: executor from the observation, so a value carried between steps is the
+    #: one the tool actually produced.
+    step_outputs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: A monotonic reading taken when the run begins, so the wall-clock budget
+    #: is immune to the system clock being changed underneath it.
+    _monotonic_start: float = field(default_factory=time.monotonic)
 
     # -- Counters ----------------------------------------------------------
 
@@ -93,11 +109,22 @@ class ExecutionState:
             and self.remaining_context_chars > 0
         )
 
+    @property
+    def elapsed_seconds(self) -> float:
+        """Wall-clock seconds since this run began."""
+        return max(0.0, time.monotonic() - self._monotonic_start)
+
     def exhausted_budget(self) -> str | None:
         """Name the budget that has run out, or ``None`` while all remain.
 
         Reported so a partial result can say *which* limit stopped it — "it
         stopped" is much less useful than "it used all six tool calls".
+
+        The clock is checked here alongside the counters, which means it is
+        checked *between* steps and not during one. A tool already executing is
+        not interrupted; the run stops after it. See
+        :data:`~agent.config.DEFAULT_MAX_RUN_SECONDS` on why that is stated
+        rather than dressed up as a cancellation.
         """
         if self.remaining_tool_calls <= 0:
             return "max_tool_calls"
@@ -105,6 +132,8 @@ class ExecutionState:
             return "max_iterations"
         if self.remaining_context_chars <= 0:
             return "max_context_chars"
+        if self.elapsed_seconds >= self.config.max_run_seconds:
+            return "max_run_seconds"
         return None
 
     # -- Recording ---------------------------------------------------------

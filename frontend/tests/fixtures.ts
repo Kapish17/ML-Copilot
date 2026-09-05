@@ -608,6 +608,124 @@ export const AGENT_PARTIAL: AgentAnswer = {
   experiment_ids: [],
 };
 
+/**
+ * A run the agent planned as a whole, and carried out completely.
+ *
+ * Captured in the shape the endpoint returns: the plan, its per-step outcomes,
+ * and the execution summary beside them. Note what is absent — no step carries
+ * the arguments it was called with, because the API does not send them.
+ */
+export const AGENT_PLANNED: AgentAnswer = {
+  ...AGENT_COMPLETED,
+  workflow: {
+    goal: "Find and explain the best model for renewals",
+    objective: "Name the winning model and say why it was selected",
+    steps: [
+      {
+        step: "step-1",
+        tool: "dataset_profile",
+        purpose: "Profile the uploaded dataset",
+        status: "ok",
+        depends_on: [],
+        reason: null,
+      },
+      {
+        step: "step-2",
+        tool: "run_experiment",
+        purpose: "Compare models",
+        status: "ok",
+        depends_on: [],
+        reason: null,
+      },
+      {
+        step: "step-3",
+        tool: "explain_experiment",
+        purpose: "Explain the winning model",
+        status: "ok",
+        depends_on: ["step-2"],
+        reason: null,
+      },
+    ],
+    summary: [
+      "1. Profile the uploaded dataset",
+      "2. Compare models",
+      "3. Explain the winning model",
+    ],
+    planned_step_count: 3,
+    completed_step_count: 3,
+    is_complete: true,
+  },
+  execution_summary: {
+    planned: true,
+    steps_planned: 3,
+    steps_completed: 3,
+    workflow_complete: true,
+    tools_used: ["dataset_profile", "run_experiment", "explain_experiment"],
+    tool_call_count: 3,
+    partial: false,
+    stopped_by: null,
+  },
+};
+
+/**
+ * The same plan, half-finished.
+ *
+ * The experiment could not run and the explanation that needed it never
+ * started. This is the fixture that proves the dashboard says so rather than
+ * describing work that did not happen.
+ */
+export const AGENT_PLANNED_PARTIAL: AgentAnswer = {
+  ...AGENT_PARTIAL,
+  workflow: {
+    goal: "Find and explain the best model for renewals",
+    objective: "Name the winning model and say why it was selected",
+    steps: [
+      {
+        step: "step-1",
+        tool: "dataset_profile",
+        purpose: "Profile the uploaded dataset",
+        status: "ok",
+        depends_on: [],
+        reason: null,
+      },
+      {
+        step: "step-2",
+        tool: "run_experiment",
+        purpose: "Compare models",
+        status: "rejected",
+        depends_on: [],
+        reason: "No dataset named 'sales' is available to this session.",
+      },
+      {
+        step: "step-3",
+        tool: "explain_experiment",
+        purpose: "Explain the winning model",
+        status: "skipped",
+        depends_on: ["step-2"],
+        reason: "This step needed the result of step-2, which did not produce one.",
+      },
+    ],
+    summary: [
+      "1. Profile the uploaded dataset",
+      "2. Compare models",
+      "3. Explain the winning model",
+    ],
+    planned_step_count: 3,
+    completed_step_count: 1,
+    is_complete: false,
+  },
+  execution_summary: {
+    planned: true,
+    steps_planned: 3,
+    steps_completed: 1,
+    workflow_complete: false,
+    tools_used: ["dataset_profile", "run_experiment"],
+    tool_call_count: 2,
+    partial: true,
+    stopped_by: null,
+  },
+};
+
 export const AGENT_INSUFFICIENT: AgentAnswer = {
   ...AGENT_COMPLETED,
   status: "insufficient_evidence",

@@ -128,6 +128,8 @@ Full detail, including the ingestion adapters, storage and deployment:
 | **Retrieval** | Semantic search over the project's own documentation and its run history, with structure-aware chunking, pre-ranking metadata filters and stable citations. The default embedding provider is stateless — no download, no key, identical vectors everywhere. |
 | **Grounded answers** | Evidence-first generation with validated citations, over any OpenAI-compatible endpoint — hosted, or a model on your laptop via `LLM_BASE_URL`. |
 | **Bounded agent** | Four registered tools, typed arguments, hard budgets, four outcomes all returned as HTTP 200 with a status. No chain-of-thought is ever returned. |
+| **Planned workflows** | The agent plans the whole run up front — goal, ordered steps, one tool each, dependencies — and the plan is validated against the registry *before a step of it runs*. A step naming an unregistered tool makes the plan invalid; dependencies may only point backwards, so a plan cannot loop. What a caller sees is the numbered list and how far it got, never how it was decided. |
+| **Values between steps** | `run_experiment` → `explain_experiment` passes the experiment id through a closed reference the executor resolves from the observation — an allowlist of six scalar fields, no paths and no expressions. Nothing asks a language model to copy tool output into a tool argument. |
 | **Dashboard** | Upload, profile, ask, run, compare, explain, browse history, search knowledge. Runtime dependencies: Next.js, React, React DOM. No UI kit, no chart library, no state manager. |
 | **Authentication** | Optional shared API key over `Authorization: Bearer`, compared in constant time, on the eleven endpoints that cost something. Off by default so the demo needs no secret; enabling it without a key fails at start-up rather than pretending to be protected. The key never reaches the browser, an image, a log or the schema. |
 
@@ -624,10 +626,13 @@ reading.
 22. ~~Model persistence and prediction — the winning `Pipeline` written after a
     successful run, and a protected prediction endpoint that reuses the
     preprocessing *as fitted*, never re-fitting and never accepting a path~~
-23. **Model lifecycle and prediction polish** — three artifact states decided
-    in one place, a model endpoint worth building a client on, typed inputs
-    from the persisted schema, and a body ceiling to go with the record one
-    *(current)*
+23. ~~Model lifecycle and prediction polish — three artifact states decided in
+    one place, a model endpoint worth building a client on, typed inputs from
+    the persisted schema, and a body ceiling to go with the record one~~
+24. **Agent workflow planning** — a whole plan decided up front and validated
+    against the registry, values passed between steps without the model, a
+    partial result when half of it works, and two more limits on what may be
+    planned *(current)*
 
 **Next**, in the honest order: **TLS**, then background execution. TLS comes
 first, and it is a precondition rather than a successor — a bearer token sent

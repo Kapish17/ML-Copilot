@@ -244,12 +244,23 @@ class AgentService:
         # response body.
         #
         # The question is not logged, and neither is the answer.
+        # The shape of the run, in one line. A planned run says how much of its
+        # plan it got through, because "completed 2 of 4 steps" is the thing an
+        # operator wants to see without opening a response body.
+        #
+        # The question is not logged, the answer is not logged, and neither is
+        # the plan's own text: a goal and a step label are written by a model
+        # from a caller's words, and a log line is not the place for either.
+        plan = result.workflow
         logger.info(
             "Agent run %s after %d tool call(s) in %d iteration(s) "
-            "(with_dataset=%s)",
+            "(planned=%s, steps=%d/%d, with_dataset=%s)",
             result.status.value,
             result.tool_call_count,
             result.iterations,
+            plan is not None,
+            plan.completed_step_count if plan else 0,
+            len(plan.steps) if plan else 0,
             dataset is not None,
         )
         return result
@@ -271,6 +282,9 @@ class AgentService:
             "supported_dataset_formats": list(self._dataset_formats),
             "max_tool_calls": self._config.max_tool_calls,
             "max_iterations": self._config.max_iterations,
+            "max_workflow_steps": self._config.max_workflow_steps,
+            "max_tool_repeats": self._config.max_tool_repeats,
+            "max_run_seconds": self._config.max_run_seconds,
             "max_context_chars": self._config.max_context_chars,
             "max_answer_length": self._config.max_answer_length,
         }

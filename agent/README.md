@@ -66,7 +66,32 @@ answer a definition question is wasting a minute of someone's time, so the
 prompt asks for the shortest sequence that answers the question — and the
 budget makes the cost of getting that wrong finite either way.
 
-## The bounded loop
+## Two shapes a run can take
+
+A run is either **planned** or **adaptive**, and which one depends only on
+whether the planner can produce a plan.
+
+### Planned
+
+```
+plan = planner.plan_workflow(...)     ← asked once, before anything runs
+validate it against the registry      ← unknown tool → the PLAN is refused
+for step in plan.steps:               ← in order, once each
+    budget spent?                     yes → stop, report how far it got
+    references resolvable?            no  → skip it, say why
+    run it, record what came back
+write the answer, check its grounding, return
+```
+
+This is the shape a multi-step request gets — *"analyse this dataset, tell me
+which model performed best, and explain why"* becomes profile → experiment →
+explain, decided once.
+
+It always terminates, and for a stronger reason than the loop below: it is a
+`for` over a validated, length-capped list whose dependencies point only
+backwards. There is no branch that revisits a step, and no re-planning.
+
+### Adaptive
 
 ```
 while the budget holds:
@@ -81,9 +106,17 @@ while the budget holds:
 budget spent → a partial result naming the limit that stopped it
 ```
 
-It always terminates. Every path through the body either records an
+The loop this agent has always had, unchanged. It runs when there is no plan —
+including for any planner written against the older contract, because
+`plan_workflow` is an **optional** method the orchestrator asks for and carries
+on without.
+
+It always terminates too. Every path through the body either records an
 observation — which costs tool budget — or returns. There is no branch that
 retries without spending and none that continues after a budget check fails.
+
+A planning attempt that produces nothing costs no iteration, so falling back is
+invisible in a run's accounting rather than a silent tax on every question.
 
 A rejection is cheap and visible rather than fatal: it becomes an observation
 the planner sees on its next turn, so a planner that mistypes a tool name can
@@ -195,6 +228,22 @@ output.
 | `max_context_chars` | 24000 | observed text one run may accumulate |
 | `max_answer_length` | 4000 | how long the answer may be |
 | `max_observation_chars` | 6000 | any single observation, so one tool cannot spend the whole budget |
+| `max_workflow_steps` | 5 | how long a **plan** may be, checked before a step of it runs |
+| `max_tool_repeats` | 2 | how often one tool may appear in a plan |
+| `max_run_seconds` | 180 | one whole run on the wall clock, checked between steps |
+
+The last three are different in kind from the first four. `max_tool_calls`
+bounds a run **while** it happens; `max_workflow_steps` and `max_tool_repeats`
+bound a *plan* **before** it happens, so a plan of forty searches is refused as
+a plan rather than discovered at call seven. And `max_run_seconds` bounds
+something none of the others do: six calls are six calls whether they take a
+second or a minute each.
+
+**What the clock does and does not do.** It is checked between steps, so it
+stops a run from continuing once the budget is spent. It cannot interrupt a
+tool that is already executing — nothing here runs tools in a thread it could
+abandon — so one very slow experiment overruns it and the run stops after that
+step. Said plainly rather than dressed up as a cancellation.
 
 Reaching any of them ends the run with a **partial** result naming the limit
 that stopped it, and the work already done is kept. A rejected or failed call
@@ -203,6 +252,76 @@ call for ever without paying for it.
 
 None of these can be raised by a request, by a planner, or by anything a tool
 observed. A limit a model can talk its way past is not a limit.
+
+## Planning a workflow
+
+A plan is a JSON object with a goal, an ordered list of steps and, optionally,
+what the final answer should accomplish:
+
+```json
+{"goal": "Find and explain the best model for renewals",
+ "objective": "Name the winning model and say why it was selected",
+ "steps": [
+   {"tool": "dataset_profile", "purpose": "Profile the uploaded dataset",
+    "arguments": {"dataset": "uploaded_dataset"}},
+   {"tool": "run_experiment", "purpose": "Compare models",
+    "arguments": {"dataset": "uploaded_dataset", "target_column": "renewed"}},
+   {"tool": "explain_experiment", "purpose": "Explain the winner",
+    "depends_on": ["step-2"],
+    "arguments": {"experiment_id": {"from_step": "step-2",
+                                    "field": "experiment_id"}}}]}
+```
+
+`agent/workflow.py` parses and validates it; nothing there executes anything.
+Five refusals happen before a single step runs:
+
+| The plan… | is refused because |
+| --- | --- |
+| names a tool nobody registered | the registry is passed in and checked at parse time |
+| has more steps than the limit | a plan of forty searches is not a plan |
+| uses one tool more than twice | that is the shape a runaway plan takes |
+| depends on a *later* step | dependencies point backwards; a cycle is unwritable |
+| reads a field outside the allowlist | see below |
+
+Step ids are assigned **here**, from position, and never read from the response.
+An identifier a model chooses is one that can be made to collide, look like a
+path, or carry text into a log line.
+
+### Values between steps
+
+`run_experiment` produces an experiment id and `explain_experiment` needs one.
+The obvious way to bridge them is to ask the model to copy the value across,
+and that is the way that goes wrong: tool output goes through a language model
+and back out, where it can be mistyped, invented, or — for anything larger than
+an id — spend the whole context budget.
+
+So an argument may be a reference, `{"from_step": ..., "field": ...}`, which
+the executor resolves from the observation the earlier step actually produced.
+Three rules keep it from becoming a query language:
+
+1. **Only an allowlisted field.** `experiment_id`, `dataset`, `target_column`,
+   `task_type`, `selected_model`, `primary_metric` — and nothing else. No
+   dotted path, no index, no wildcard, no expression.
+2. **Only a short scalar.** A list or an object cannot be carried into a tool
+   argument this way.
+3. **Only from a step that succeeded.** An unresolvable reference makes its
+   step unrunnable, and it is skipped with a stated reason — never a default,
+   never an empty string, never the literal text of the reference.
+
+### When half of it works
+
+A failed step does not end the run. The steps that needed it are skipped with a
+reason; the steps that did not are executed. That is what makes "the experiment
+worked and the explanation did not" a result worth returning: the useful half is
+kept, the status is `partial`, and the **answer prompt is told which steps did
+not happen** — so an answer cannot describe work that was not done.
+
+### The one prompt with no untrusted text in it
+
+Planning happens before anything has run, so there is nothing observed to show
+the planner. A plan therefore cannot be steered by a retrieved document or a
+dataset cell: the prompt contains the question, the run's own flags, and the
+tool catalogue this codebase wrote.
 
 ## Datasets, and why there is no path anywhere
 

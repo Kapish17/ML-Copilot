@@ -22,6 +22,13 @@ Two things are deliberately absent from the response as well. There is no
 ``chain_of_thought`` field and no prompt: what comes back is which tool was
 chosen, the validated arguments, what the tool returned, and the answer. How
 the planner decided is not returned, not stored and not logged.
+
+That holds for the plan a run executes, too. ``workflow`` reports what was
+going to be done, in what order, and how each part turned out — a numbered list
+of short labels. It does not report why any of it was chosen, and it carries no
+step's arguments: those are the one place a planner could put text of its own
+choosing into something a person reads, and what a call actually received is
+already reported, summarised, beside the call.
 """
 
 from __future__ import annotations
@@ -248,6 +255,96 @@ class AgentDatasetInfo(BaseModel):
     )
 
 
+class AgentWorkflowStep(BaseModel):
+    """One planned step, and what became of it.
+
+    A label and an outcome. **Not reasoning:** ``purpose`` says what the step
+    was for — "Explain the winning model" — never why the planner thought that
+    was next, and no field here carries the arguments the step was called with.
+    """
+
+    step: str = Field(..., description="Position in the plan, e.g. 'step-2'.")
+    tool: str
+    purpose: str = Field(
+        ..., description="A short label for the step, written to be read."
+    )
+    status: str = Field(
+        ...,
+        description=(
+            "'ok', 'unavailable', 'rejected' or 'failed' as for any tool call "
+            "— or 'skipped', which means no call was made at all: the step it "
+            "needed produced nothing, or a limit ended the run first."
+        ),
+        examples=["ok"],
+    )
+    depends_on: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Earlier steps this one needed. Always earlier: a plan's "
+            "dependencies point backwards, which is why a plan cannot loop."
+        ),
+    )
+    reason: str | None = Field(
+        None,
+        description=(
+            "Why it did not run, or did not work. An authored sentence — never "
+            "a stack trace or a path."
+        ),
+    )
+
+
+class AgentWorkflow(BaseModel):
+    """The plan a run executed, beside what happened to each step.
+
+    Present only when the run was planned. A question answered one decision at
+    a time reports ``null`` here, which is what a client written before plans
+    existed sees for every run.
+    """
+
+    goal: str = Field("", description="What the run was for, in one line.")
+    objective: str = Field(
+        "", description="What the final answer was meant to accomplish."
+    )
+    steps: list[AgentWorkflowStep] = Field(default_factory=list)
+    summary: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The plan as a person reads it: 'Planned workflow: 1. Profile the "
+            "dataset, 2. Compare models…'. This is the whole of what a caller "
+            "learns about planning."
+        ),
+    )
+    planned_step_count: int = 0
+    completed_step_count: int = 0
+    is_complete: bool = Field(
+        False, description="Whether every planned step produced a result."
+    )
+
+
+class AgentExecutionSummary(BaseModel):
+    """The shape of a run, without reading its observations."""
+
+    planned: bool = Field(
+        ..., description="Whether the run executed a plan or decided step by step."
+    )
+    steps_planned: int = 0
+    steps_completed: int = 0
+    workflow_complete: bool = False
+    tools_used: list[str] = Field(default_factory=list)
+    tool_call_count: int = 0
+    partial: bool = Field(
+        ...,
+        description=(
+            "True whenever the answer covers less than the question asked for, "
+            "whatever the reason — a step that could not run, a tool that was "
+            "unavailable, or a limit that ended the run."
+        ),
+    )
+    stopped_by: str | None = Field(
+        None, description="The limit that ended the run, when one did."
+    )
+
+
 class AgentAskResponse(BaseModel):
     """One agent run, as the caller receives it.
 
@@ -303,6 +400,23 @@ class AgentAskResponse(BaseModel):
         description="Experiments this run created or read, in order.",
     )
     warnings: list[str] = Field(default_factory=list)
+    workflow: AgentWorkflow | None = Field(
+        None,
+        description=(
+            "The plan this run executed, when it had one, beside what happened "
+            "to each step. Null for a question answered one decision at a "
+            "time — which is what every run looked like before plans existed, "
+            "so a client that ignores this field still sees a complete "
+            "response."
+        ),
+    )
+    execution_summary: AgentExecutionSummary | None = Field(
+        None,
+        description=(
+            "The run's shape, for a client that wants to say '3 of 4 steps' "
+            "without reading the observations."
+        ),
+    )
     iterations: int = Field(..., description="Planning steps taken.")
     tool_call_count: int = Field(..., description="Tool calls made, including failures.")
     tools_available: list[str] = Field(
@@ -358,6 +472,19 @@ class AgentStatusResponse(BaseModel):
     )
     max_tool_calls: int
     max_iterations: int
+    max_workflow_steps: int = Field(
+        0, description="Most steps one planned workflow may contain."
+    )
+    max_tool_repeats: int = Field(
+        0, description="Most times one tool may appear in a single plan."
+    )
+    max_run_seconds: float = Field(
+        0.0,
+        description=(
+            "Wall-clock budget for one run, checked between steps. A tool "
+            "already executing is not interrupted."
+        ),
+    )
     max_context_chars: int
     max_answer_length: int
 
@@ -368,7 +495,10 @@ __all__ = [
     "AgentAskResponse",
     "AgentCitationModel",
     "AgentDatasetInfo",
+    "AgentExecutionSummary",
     "AgentObservation",
     "AgentStatusResponse",
     "AgentToolCall",
+    "AgentWorkflow",
+    "AgentWorkflowStep",
 ]

@@ -113,6 +113,8 @@ hit are configuration, not constants in a route, and
 | `MAX_DATASET_ROWS` / `MAX_DATASET_COLUMNS` | 1 000 000 / 1 000 | A parsed dataset |
 | `MAX_EXPERIMENT_ROWS`, `MAX_CV_FOLDS`, `MAX_CANDIDATE_MODELS` | 200 000, 10, 6 | What one experiment may do |
 | `AGENT_MAX_TOOL_CALLS`, `AGENT_MAX_ITERATIONS`, `AGENT_MAX_CONTEXT_CHARS` | see `/api/v1/agent/status` | One agent run; a request may lower these and never raise them |
+| `AGENT_MAX_WORKFLOW_STEPS`, `AGENT_MAX_TOOL_REPEATS` | 5, 2 | One agent **plan**, checked before a step of it runs |
+| `AGENT_MAX_RUN_SECONDS` | 180 | One agent run on the wall clock, checked between steps |
 
 The first three are worth reading together. A dataset upload and a JSON body
 are bounded separately because they are read by different code and a multipart
@@ -579,13 +581,64 @@ returned.
   whether it succeeded, how long it took, an `input_summary` and the
   observation's result.
 - `iterations`, `tool_call_count`, `tools_available`, `duration_ms`.
+- `workflow` — the plan, when the run had one. See below.
+- `execution_summary` — `planned`, `steps_planned`, `steps_completed`,
+  `workflow_complete`, `tools_used`, `tool_call_count`, `partial`,
+  `stopped_by`. Enough to say "3 of 4 steps" without reading the observations.
+
+**Planned workflows.** A request that naturally needs several tools —
+*"analyse this dataset, tell me which model performed best, and explain why"* —
+is planned as a whole before any of it runs, and `workflow` reports the plan:
+
+```json
+{ "goal": "Find and explain the best model for renewals",
+  "objective": "Name the winning model and say why it was selected",
+  "summary": ["1. Profile the uploaded dataset",
+              "2. Compare models",
+              "3. Explain the winning model"],
+  "steps": [{ "step": "step-3", "tool": "explain_experiment",
+              "purpose": "Explain the winning model", "status": "ok",
+              "depends_on": ["step-2"], "reason": null }],
+  "planned_step_count": 3, "completed_step_count": 3, "is_complete": true }
+```
+
+Four properties are worth knowing, because they are what keep a plan bounded:
+
+1. **A plan is validated before a step of it runs.** Every step must name a
+   registered tool; a plan naming anything else is refused as a plan, and no
+   call is made. The step count and the number of times one tool may appear
+   are capped the same way.
+2. **A plan cannot loop.** `depends_on` may only name an *earlier* step. That
+   is not a cycle check — it is the absence of a way to express a cycle, so
+   execution is one pass from first to last.
+3. **Values pass between steps without the model.** A step may declare an
+   argument as `{"from_step": "step-2", "field": "experiment_id"}` and the
+   server fills it from what that step actually produced. The readable fields
+   are `experiment_id`, `dataset`, `target_column`, `task_type`,
+   `selected_model` and `primary_metric` — no paths, no expressions, no nested
+   traversal. An unresolvable reference **skips** its step with a stated
+   reason; it is never guessed at.
+4. **Half a workflow is reported as half a workflow.** A step that failed
+   leaves the steps that needed it `skipped` with a reason, while independent
+   steps still run. The status is then `partial`, and the answer is told which
+   steps did not happen so it cannot describe work that was not done.
+
+`workflow` is `null` when a run was answered one decision at a time, which is
+how every run behaved before planning existed — so a client that ignores the
+field still receives a complete response.
+
+**A step's arguments are not part of the plan**, deliberately. They are the one
+place a planner could put text of its own choosing into something a person
+reads; what each call actually received is already in `tool_calls`, summarised.
 
 **What is never returned:** chain-of-thought, hidden reasoning, the system
-prompt, provider internals, credentials, or raw dataset rows.
+prompt, provider internals, credentials, or raw dataset rows. `purpose` is a
+label — *what* a step was for, never *why* it was chosen.
 
 **What the agent cannot do:** execute Python, run a shell command, make an HTTP
 request, or touch the filesystem. It can call exactly four registered tools;
-anything else becomes a rejected observation it may correct from.
+anything else becomes a rejected observation it may correct from, or — in a
+plan — a refused plan.
 
 **Errors.** `400 invalid_agent_budget` (a budget above the server's ceiling) ·
 `503 agent_unavailable` (no credential) · `502 agent_provider_error` /
