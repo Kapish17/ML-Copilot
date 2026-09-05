@@ -768,7 +768,9 @@ export function jsonFile(name = "customers.json"): File {
 /** `GET /api/v1/experiments/{id}/model` for a run that has a stored model. */
 export const MODEL_AVAILABLE: ModelAvailability = {
   experiment_id: "exp_e36e7bbf5267_20260902T054517Z_503e",
+  status: "available",
   available: true,
+  reason_code: null,
   reason: null,
   max_records: 500,
   model_name: "logistic_regression",
@@ -783,14 +785,35 @@ export const MODEL_AVAILABLE: ModelAvailability = {
   ],
   created_at: "2026-09-02T05:45:17.275714Z",
   train_row_count: 144,
+  test_row_count: 36,
   primary_metric: "f1",
   primary_metric_value: 0.9444444444444444,
+  supports_probabilities: true,
+  artifact_schema_version: "1.0",
+};
+
+/**
+ * The same endpoint for a model with a boolean feature.
+ *
+ * Separate from the fixture above rather than folded into it, because a
+ * boolean renders as a `<select>` and every existing test types into every
+ * box. One schema per shape keeps each test saying one thing.
+ */
+export const MODEL_WITH_BOOLEAN: ModelAvailability = {
+  ...MODEL_AVAILABLE,
+  features: [
+    { name: "income", kind: "numeric", dtype: "int64" },
+    { name: "auto_renew", kind: "boolean", dtype: "bool" },
+    { name: "signed_on", kind: "datetime", dtype: "datetime64[ns]" },
+  ],
 };
 
 /** The same endpoint for a run recorded before models were persisted. */
 export const MODEL_UNAVAILABLE: ModelAvailability = {
   experiment_id: "exp_e36e7bbf5267_20260902T054517Z_503e",
+  status: "not_available",
   available: false,
+  reason_code: "no_artifact",
   reason:
     "This experiment has no stored model. Runs recorded before model persistence was added, and runs whose artifact has been removed, cannot be predicted from — re-run the experiment to create one.",
   max_records: 500,
@@ -802,8 +825,27 @@ export const MODEL_UNAVAILABLE: ModelAvailability = {
   features: [],
   created_at: null,
   train_row_count: null,
+  test_row_count: null,
   primary_metric: null,
   primary_metric_value: null,
+  supports_probabilities: false,
+  artifact_schema_version: null,
+};
+
+/**
+ * The same endpoint for a run whose artifact is stored and does not check out.
+ *
+ * A different state from the one above and a different fix, which is the whole
+ * reason the backend reports three states rather than a boolean: nobody should
+ * be told to re-run an experiment when the answer is that the service needs
+ * upgrading, or the other way round.
+ */
+export const MODEL_CORRUPTED: ModelAvailability = {
+  ...MODEL_UNAVAILABLE,
+  status: "corrupted",
+  reason_code: "model_file_truncated",
+  reason:
+    "This experiment's model file does not match the size recorded when it was written, so it is not safe to use. Re-run the experiment to create a new one.",
 };
 
 /** `POST /api/v1/experiments/{id}/predict` for one classification record. */
@@ -830,7 +872,10 @@ export const PREDICTION: PredictionResponse = {
       { name: "segment", kind: "categorical", dtype: "str" },
     ],
     train_row_count: 144,
+    test_row_count: 36,
     primary_metric: "f1",
     primary_metric_value: 0.9444444444444444,
+    supports_probabilities: true,
+    artifact_schema_version: "1.0",
   },
 };

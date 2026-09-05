@@ -105,8 +105,14 @@ Its jobs, and only these:
   `{"error": {"code", "message", "details"}}`. A 5xx gets a generic message
   and its details dropped, with the real cause logged. Path-shaped values are
   stripped from details before they leave the process.
-- **Bounds.** Upload size, row and column ceilings, agent budgets a request may
-  lower and never raise.
+- **Bounds.** Upload size, JSON body size, row and column ceilings, prediction
+  batch size, agent budgets a request may lower and never raise. The body
+  ceiling is enforced in middleware rather than in a dependency, because
+  FastAPI parses a body *before* it solves the dependencies a route declares —
+  by the time route code could object, the megabytes are already dictionaries.
+  Multipart uploads pass through it untouched; they have their own larger limit
+  and their own streaming reader. **None of these is a rate limit**, and none
+  is claimed to be.
 - **Authentication.** Optional and off by default. When
   `API_AUTH_ENABLED=true`, a dependency on eleven routes checks
   `Authorization: Bearer <key>` against the configured key in constant time.
@@ -251,6 +257,42 @@ leaves nothing behind; a failed write is a warning on the run, not a failed
 experiment. A run recorded before this existed answers `model_not_available`
 rather than having an artifact conjured for it. And **no dataset row is written
 at any point** — the manifest holds column names, kinds and dtypes.
+
+### Three states, decided once
+
+A stored model is `available`, `not_available` or `corrupted`, and a single
+function in `ml/artifacts/store.py` decides which. Everything else reads that
+one answer: `exists()` is a reading of it, `GET .../model` reports it, and
+`POST .../predict` refuses on it before it opens anything. Two callers cannot
+reach different conclusions about the same directory, and asking twice cannot
+produce a form built from a model that had already gone.
+
+```
+experiment created ─▶ model trained ─▶ evaluated ─▶ artifact written
+                                                          │
+                              status(experiment_id) ───────┤
+                                                          ▼
+   available          not_available              corrupted
+   predict            re-run the experiment      depends on reason_code
+```
+
+The check is **cheap and shallow on purpose**: the manifest is parsed and
+validated and the model file is checked for presence and for the size recorded
+at save time. Nothing is unpickled, so a dashboard may ask on every page load.
+The **deep** checks — the SHA-256 digest, and that the object really is a
+`Pipeline` — need the file itself and belong to `load`.
+
+The two unusable states are kept apart because their fixes differ, and a
+person told to re-run an experiment when the real answer is "upgrade the
+service" has been sent to do the wrong thing. `reason_code` carries the
+distinction as a stable string; the sentence a person reads is composed in the
+backend service, which is the layer that knows it is talking to one.
+
+The **status codes follow the same split**. No artifact is a `409` — the run is
+fine and re-running it is the fix. A corrupted artifact is a `500`, because
+nothing the caller changes will help and the broken file is this service's own;
+like every 5xx here it answers generically, with the specific reason in the log
+and in the model endpoint's `reason_code`.
 
 ---
 

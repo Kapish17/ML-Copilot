@@ -31,6 +31,7 @@ different boundary.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -47,11 +48,32 @@ from ml.features.types import FeatureType, TaskType
 #: other expensive path in this project.
 DEFAULT_MAX_RECORDS = 500
 
-#: Values treated as "absent" in a submitted record. `None` is what JSON null
-#: parses to; the empty string is what an HTML form sends for a blank field,
-#: and reading it as the *string* "" would make a numeric column fail with a
-#: type error instead of being imputed the way training handled missing values.
-_MISSING = (None, "")
+
+def _is_missing(value: Any) -> bool:
+    """Whether a submitted value means "not supplied".
+
+    Three spellings, and each is here for a reason. ``None`` is what JSON null
+    parses to. The empty string is what an HTML form sends for a blank field,
+    and reading it as the *string* ``""`` would make a numeric column fail with
+    a type error instead of being imputed the way training handled a missing
+    value. ``NaN`` is what a caller inside the process may pass.
+
+    Written as explicit type checks rather than ``value in (None, "")``, which
+    compares with ``==`` and therefore does something surprising for a value
+    that overrides it — a NumPy array answers elementwise and raises
+    "truth value is ambiguous", turning a bad input into a 500. Nothing
+    reaching this function from an HTTP request can be an array today; the
+    function is public API of ``ml`` and should not depend on that.
+    """
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip() == ""
+    if isinstance(value, float):
+        return math.isnan(value)
+    if isinstance(value, np.floating):
+        return bool(np.isnan(value))
+    return False
 
 
 @dataclass(frozen=True)
@@ -111,10 +133,21 @@ def _coerce(value: Any, feature_name: str, kind: FeatureType) -> Any:
     Raises:
         PredictionInputError: If the value cannot be read as that kind.
     """
-    if value in _MISSING or (isinstance(value, float) and np.isnan(value)):
+    if _is_missing(value):
         # Missing is legitimate: the pipeline's imputers were fitted for it,
         # and refusing here would be stricter than training was.
         return np.nan
+
+    # Refused once, here, for every kind. A feature value is a scalar: JSON
+    # nests, and a list or an object reaching a coercion written for scalars
+    # produces something unhelpful rather than an error — `pd.to_datetime` on a
+    # list returns an index whose truthiness raises, which would turn a
+    # malformed record into a 500 instead of the 422 it is.
+    if isinstance(value, (Mapping, list, tuple, set)):
+        raise PredictionInputError(
+            f"'{feature_name}' expects a single value, not a list or an object.",
+            details={"feature": feature_name, "expected": "a single value"},
+        )
 
     if kind is FeatureType.NUMERIC:
         if isinstance(value, bool):
@@ -159,11 +192,6 @@ def _coerce(value: Any, feature_name: str, kind: FeatureType) -> Any:
     # Categorical. A number is accepted and rendered as text, because a
     # category that looked numeric in the source data was encoded as its string
     # form and refusing `3` for a column trained on "3" would be pedantry.
-    if isinstance(value, (Mapping, list, tuple, set)):
-        raise PredictionInputError(
-            f"'{feature_name}' expects a single value, not a collection.",
-            details={"feature": feature_name, "expected": "text"},
-        )
     return value if isinstance(value, str) else str(value)
 
 

@@ -346,16 +346,31 @@ export interface PredictedFeature {
   dtype: string;
 }
 
+/** The lifecycle state of an experiment's stored model. */
+export type ModelStatus = "available" | "not_available" | "corrupted";
+
 /**
  * Whether an experiment can be predicted from, and with what.
  *
- * Answered from the artifact store rather than from the record, so a deleted
- * model reports `available: false` with a `reason` rather than a form that
- * cannot work.
+ * Answered from the artifact store rather than from the record, so a model
+ * deleted after the run that made it reports `not_available` rather than a
+ * form that cannot work. All three states arrive as a 200 — whether a run can
+ * be predicted from is an answer, not a failure — so this interface is what
+ * the panel branches on, and an `ApiError` means something else went wrong.
  */
 export interface ModelAvailability {
   experiment_id: string;
+  /**
+   * `available` — there is a usable model. `not_available` — this run has no
+   * artifact, which is normal for one recorded before model persistence
+   * existed. `corrupted` — an artifact is stored and does not check out.
+   */
+  status: ModelStatus;
+  /** `status === "available"`, for a caller that only needs to branch. */
   available: boolean;
+  /** A stable code for *why* there is no usable model, or `null`. */
+  reason_code: string | null;
+  /** The same thing as a sentence, ending in what to do about it. */
   reason: string | null;
   max_records: number;
   model_name: string | null;
@@ -366,8 +381,13 @@ export interface ModelAvailability {
   features: PredictedFeature[];
   created_at: string | null;
   train_row_count: number | null;
+  /** How many held-out rows `primary_metric_value` was measured on. */
+  test_row_count: number | null;
   primary_metric: string | null;
   primary_metric_value: number | null;
+  /** Whether a prediction from this model can carry class probabilities. */
+  supports_probabilities: boolean;
+  artifact_schema_version: string | null;
 }
 
 /** Which model produced a prediction, and what it was trained on. */
@@ -381,13 +401,18 @@ export interface PredictedModel {
   classes: JsonValue[];
   features: PredictedFeature[];
   train_row_count: number;
+  /** How many held-out rows the metric below was measured on. */
+  test_row_count: number | null;
   primary_metric: string;
   /**
    * The model's score on the **held-out test set** — a measurement of the
-   * model, not a confidence in this prediction. The two are easy to conflate
-   * and the UI keeps them apart.
+   * model over many rows, not a confidence in this prediction. The two are
+   * easy to conflate and the UI keeps them apart.
    */
   primary_metric_value: number | null;
+  /** Whether this model reports a probability per class. */
+  supports_probabilities: boolean;
+  artifact_schema_version: string | null;
 }
 
 /** One record's result. */

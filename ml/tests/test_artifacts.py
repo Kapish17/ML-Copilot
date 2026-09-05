@@ -36,7 +36,19 @@ from ml.artifacts import (
     build_metadata,
     predict,
 )
-from ml.artifacts.store import MANIFEST_FILENAME, MODEL_FILENAME
+from ml.artifacts.store import (
+    MANIFEST_FILENAME,
+    MODEL_FILENAME,
+    REASON_MANIFEST_INVALID,
+    REASON_MANIFEST_UNREADABLE,
+    REASON_MODEL_FILE_MISSING,
+    REASON_MODEL_FILE_TRUNCATED,
+    REASON_NO_ARTIFACT,
+    REASON_UNSUPPORTED_SCHEMA_VERSION,
+    STATE_AVAILABLE,
+    STATE_CORRUPTED,
+    STATE_NOT_AVAILABLE,
+)
 from ml.errors import (
     InvalidExperimentIdError,
     ModelArtifactNotFoundError,
@@ -323,6 +335,167 @@ def test_deleting_removes_the_artifact(saved) -> None:
     assert saved.delete(EXPERIMENT_ID) is True
     assert saved.exists(EXPERIMENT_ID) is False
     assert saved.delete(EXPERIMENT_ID) is False
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle status
+#
+# `exists` used to be "are both files present?", which answered yes for an
+# artifact whose manifest was unreadable — and the failure then surfaced as a
+# 500 from a prediction the dashboard had already offered to make. `status`
+# replaces it with three states decided in one place, and these tests pin each
+# way an artifact can fail to be one of them.
+# ---------------------------------------------------------------------------
+
+
+def test_a_stored_model_reports_available_with_its_manifest(saved) -> None:
+    """The happy state carries the manifest it read on the way."""
+    status = saved.status(EXPERIMENT_ID)
+
+    assert status.state == STATE_AVAILABLE
+    assert status.is_available is True
+    assert status.reason_code is None
+    # Read once, not twice: a caller that wants the schema after asking the
+    # state should not have to go back to disk for it.
+    assert status.metadata is not None
+    assert status.metadata.feature_names
+
+
+def test_no_artifact_is_not_available_rather_than_corrupted(store) -> None:
+    """The normal state for every run recorded before persistence existed.
+
+    Kept distinct from `corrupted` because the two have different fixes, and a
+    person told to re-run an experiment when the real answer is "upgrade the
+    service" has been sent to do the wrong thing.
+    """
+    status = store.status("exp_nothing_here")
+
+    assert status.state == STATE_NOT_AVAILABLE
+    assert status.reason_code == REASON_NO_ARTIFACT
+    assert status.metadata is None
+
+
+def test_an_unusable_identifier_reports_no_artifact_without_raising(store) -> None:
+    """A status call answers about the model, whatever it is asked with.
+
+    The endpoints that must reject a malformed id do so before they get here;
+    this one is asked "can I predict?" and answers it.
+    """
+    for hostile in ("../escape", "a/b", "", "with space"):
+        status = store.status(hostile)
+        assert status.state == STATE_NOT_AVAILABLE
+        assert status.reason_code == REASON_NO_ARTIFACT
+
+
+def test_a_manifest_that_is_not_json_is_corrupted(saved) -> None:
+    """Something wrote over it, or a write was interrupted."""
+    manifest = saved.directory_for(EXPERIMENT_ID) / MANIFEST_FILENAME
+    manifest.write_text("{ this is not json", encoding="utf-8")
+
+    status = saved.status(EXPERIMENT_ID)
+
+    assert status.state == STATE_CORRUPTED
+    assert status.reason_code == REASON_MANIFEST_UNREADABLE
+    assert saved.exists(EXPERIMENT_ID) is False
+
+
+def test_a_manifest_of_an_unknown_version_is_corrupted_and_says_which(saved) -> None:
+    """An artifact from a newer ML Copilot, distinguished from a broken one.
+
+    Separate codes because separate advice: this one is fixed by upgrading the
+    service, and a damaged manifest is fixed by re-running the experiment.
+    """
+    manifest = saved.directory_for(EXPERIMENT_ID) / MANIFEST_FILENAME
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["schema_version"] = "99.0"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    status = saved.status(EXPERIMENT_ID)
+
+    assert status.state == STATE_CORRUPTED
+    assert status.reason_code == REASON_UNSUPPORTED_SCHEMA_VERSION
+
+
+def test_a_manifest_missing_a_required_field_is_corrupted(saved) -> None:
+    """A readable file that is not a manifest is not a usable artifact."""
+    manifest = saved.directory_for(EXPERIMENT_ID) / MANIFEST_FILENAME
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    del payload["features"]
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    status = saved.status(EXPERIMENT_ID)
+
+    assert status.state == STATE_CORRUPTED
+    assert status.reason_code == REASON_MANIFEST_INVALID
+
+
+def test_a_missing_model_file_beside_a_good_manifest_is_corrupted(saved) -> None:
+    """Not "no artifact": the manifest is written second, so this is damage.
+
+    A save interrupted between the two halves leaves a model and no manifest,
+    which reports `not_available`. The reverse can only be something removing
+    a file, and reporting that as "never had one" would hide it.
+    """
+    (saved.directory_for(EXPERIMENT_ID) / MODEL_FILENAME).unlink()
+
+    status = saved.status(EXPERIMENT_ID)
+
+    assert status.state == STATE_CORRUPTED
+    assert status.reason_code == REASON_MODEL_FILE_MISSING
+    # The schema is still true, and is carried, even though nothing can use it.
+    assert status.metadata is not None
+
+
+def test_a_truncated_model_file_is_corrupted_without_reading_it(saved) -> None:
+    """The cheap half of the integrity check, and the one worth doing often.
+
+    A `stat` against the size the manifest recorded catches the common
+    corruption for the price of a syscall, which is what makes it affordable
+    on every page load. The digest is the thorough half and belongs to `load`.
+    """
+    model = saved.directory_for(EXPERIMENT_ID) / MODEL_FILENAME
+    model.write_bytes(model.read_bytes()[:64])
+
+    status = saved.status(EXPERIMENT_ID)
+
+    assert status.state == STATE_CORRUPTED
+    assert status.reason_code == REASON_MODEL_FILE_TRUNCATED
+
+
+def test_exists_is_a_reading_of_status_and_not_a_second_opinion(saved) -> None:
+    """One definition of "usable", so two callers cannot disagree."""
+    assert saved.exists(EXPERIMENT_ID) is saved.status(EXPERIMENT_ID).is_available
+
+    (saved.directory_for(EXPERIMENT_ID) / MANIFEST_FILENAME).write_text("{", "utf-8")
+
+    assert saved.exists(EXPERIMENT_ID) is False
+    assert saved.status(EXPERIMENT_ID).state == STATE_CORRUPTED
+
+
+def test_an_artifact_that_is_not_a_pipeline_is_refused_at_load(saved) -> None:
+    """The check the shallow status cannot make, made where it can be.
+
+    Whether the pickle holds a `Pipeline` is unknowable without unpickling it,
+    which is exactly what the status call refuses to do. So it is checked in
+    `load`, after the digest — and the object is still never used.
+    """
+    import joblib
+
+    directory = saved.directory_for(EXPERIMENT_ID)
+    joblib.dump({"not": "a pipeline"}, directory / MODEL_FILENAME)
+
+    # Rewrite the manifest's record of the file so the cheap checks pass and
+    # this test reaches the one it is about.
+    manifest = directory / MANIFEST_FILENAME
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["model_file"]["bytes"] = (directory / MODEL_FILENAME).stat().st_size
+    payload["model_file"].pop("sha256", None)
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert saved.status(EXPERIMENT_ID).state == STATE_AVAILABLE
+
+    with pytest.raises(ModelArtifactUnreadableError, match="not a model pipeline"):
+        saved.load(EXPERIMENT_ID)
 
 
 # ---------------------------------------------------------------------------

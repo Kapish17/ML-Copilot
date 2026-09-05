@@ -21,7 +21,6 @@ records it only so a human reading the directory can see what should be there.
 from __future__ import annotations
 
 import platform
-import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Mapping
@@ -171,7 +170,15 @@ class ModelArtifactMetadata:
         Deliberately narrower than :meth:`as_dict`: **no filesystem location
         appears in either**, but this one also drops the environment, which
         names interpreter and library versions that a caller has no use for and
-        that describe the host rather than the model.
+        that describe the host rather than the model. It also drops the random
+        seed, which belongs to reproducing the run rather than to using it.
+
+        What is kept is what a caller needs to *act*: what the model predicts,
+        what it wants to be given, how well it did on data it never saw, and
+        how large the two halves of that measurement were. ``test_row_count``
+        earns its place beside the metric because "0.87 f1" and "0.87 f1 on 60
+        rows" are different claims, and a client showing the first without the
+        second is overstating what it knows.
         """
         return {
             "experiment_id": self.experiment_id,
@@ -183,8 +190,17 @@ class ModelArtifactMetadata:
             "classes": [_jsonable(value) for value in self.classes],
             "features": [feature.as_dict() for feature in self.features],
             "train_row_count": self.train_row_count,
+            "test_row_count": self.test_row_count,
             "primary_metric": self.primary_metric,
             "primary_metric_value": self.primary_metric_value,
+            # Whether a probability breakdown is worth rendering, answered
+            # before a prediction is made rather than discovered from a null
+            # afterwards. See the property: it is the task-and-classes half of
+            # the question, and the estimator answers the rest at predict time.
+            "supports_probabilities": self.supports_probabilities,
+            # Which manifest shape this is. A client that meets an artifact
+            # from a newer ML Copilot should say "upgrade", not "re-run".
+            "artifact_schema_version": self.schema_version,
         }
 
     @classmethod

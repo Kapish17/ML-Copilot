@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { Badge } from "@/components/common/Badge";
 import { Bar } from "@/components/common/Bar";
 import { Button } from "@/components/common/Button";
@@ -8,13 +8,14 @@ import { EmptyState } from "@/components/common/EmptyState";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { Loading } from "@/components/common/Spinner";
 import { experimentModel, predictFromExperiment } from "@/lib/api/experiments";
+import { ApiError } from "@/lib/api/errors";
 import type {
   JsonObject,
   ModelAvailability,
   PredictedFeature,
   PredictionResponse,
 } from "@/lib/api/types";
-import { formatMetric } from "@/lib/format";
+import { formatCount, formatMetric, metricLabel } from "@/lib/format";
 
 /**
  * Predicting from the model an experiment produced.
@@ -23,12 +24,16 @@ import { formatMetric } from "@/lib/format";
  * `GET /api/v1/experiments/{id}/model` rather than inferred from the record.
  * That matters twice over: the backend refuses a feature the model was not
  * trained on, so a form assembled from anything else would produce requests
- * that are rejected; and a model can be deleted after the run that made it, in
- * which case there is nothing to render a form for and this says so.
+ * that are rejected; and a model can be deleted or damaged after the run that
+ * made it, in which case there is nothing to render a form for and this says
+ * so — differently in each case, because the fix differs.
  *
  * One record at a time here. The endpoint takes a batch and the API client
- * sends one — a form for a thousand rows would be a spreadsheet, and that is
- * not what a dashboard is for.
+ * sends one — a form for five hundred rows would be a spreadsheet, and a
+ * dashboard is not one. There is deliberately **no raw-JSON box**: it would
+ * duplicate the form for the single-record case this screen exists to serve,
+ * and anyone sending a real batch is doing it from a script against the
+ * documented endpoint, not by pasting into a browser.
  *
  * **This component holds no credential.** Like the rest of the dashboard it
  * calls the API from the browser; if the backend requires a key, the request
@@ -70,6 +75,35 @@ function inputTypeFor(kind: string): string {
   if (kind === "numeric") return "number";
   if (kind === "datetime") return "date";
   return "text";
+}
+
+/** What to tell someone a box wants, in two words rather than a dtype. */
+function hintFor(kind: string): string {
+  if (kind === "numeric") return "number";
+  if (kind === "datetime") return "date";
+  if (kind === "boolean") return "true / false";
+  return "text";
+}
+
+/**
+ * The feature names a validation failure blamed, if it named any.
+ *
+ * The backend puts them in `details` as `missing_features` and
+ * `unexpected_features`. Read out deliberately here rather than rendered as
+ * prose by the error mapper: these are the only two fields worth showing, and
+ * knowing which box is wrong is the difference between fixing it and guessing.
+ */
+function blamedFeatures(error: unknown): string[] {
+  if (!(error instanceof ApiError)) return [];
+  const named = [
+    ...(Array.isArray(error.details.missing_features)
+      ? error.details.missing_features
+      : []),
+    ...(Array.isArray(error.details.unexpected_features)
+      ? error.details.unexpected_features
+      : []),
+  ];
+  return named.filter((name): name is string => typeof name === "string");
 }
 
 export function PredictionPanel({ experimentId }: PredictionPanelProps) {
@@ -114,6 +148,8 @@ export function PredictionPanel({ experimentId }: PredictionPanelProps) {
     [experimentId, values],
   );
 
+  const blamed = useMemo(() => blamedFeatures(predictError), [predictError]);
+
   if (loading) return <Loading label="Checking for a stored model…" />;
 
   if (loadError != null) {
@@ -126,10 +162,19 @@ export function PredictionPanel({ experimentId }: PredictionPanelProps) {
     );
   }
 
-  if (!model?.available) {
+  // The two unusable states are separated because what a person does next
+  // differs: a run from before model persistence needs re-running, and a
+  // damaged artifact is the server's own broken file. The backend's `reason`
+  // already says which and what to do, so it is shown rather than reworded.
+  if (!model || model.status !== "available") {
+    const damaged = model?.status === "corrupted";
     return (
       <EmptyState
-        title="No model is stored for this experiment"
+        title={
+          damaged
+            ? "This experiment's stored model cannot be used"
+            : "No model is stored for this experiment"
+        }
         hint={
           model?.reason ??
           "Runs recorded before model persistence was added cannot be predicted from."
@@ -140,6 +185,7 @@ export function PredictionPanel({ experimentId }: PredictionPanelProps) {
 
   const prediction = result?.predictions[0];
   const probabilities = prediction?.probabilities ?? null;
+  const scored = result?.model ?? model;
 
   return (
     <div className="space-y-5">
@@ -157,40 +203,77 @@ export function PredictionPanel({ experimentId }: PredictionPanelProps) {
       <p className="text-xs text-ink-500">
         Values run through the same fitted preprocessing this experiment
         produced — nothing is re-fitted, which is what makes a prediction here
-        comparable to the held-out score above. Leave a box empty for a missing
-        value; the model&apos;s imputation was fitted for exactly that.
+        comparable to the held-out score above. Every box is optional: leave one
+        empty for a missing value, and the model&apos;s imputation handles it
+        exactly as it was fitted to.
       </p>
 
       <form onSubmit={submit} className="space-y-4">
         <fieldset className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <legend className="sr-only">Feature values</legend>
-          {model.features.map((feature) => (
-            <div key={feature.name}>
-              <label
-                htmlFor={`${formId}-${feature.name}`}
-                className="block text-xs font-medium text-ink-700"
-              >
-                {feature.name}
-                <span className="ml-1 font-normal text-ink-400">
-                  {feature.kind}
-                </span>
-              </label>
-              <input
-                id={`${formId}-${feature.name}`}
-                name={feature.name}
-                type={inputTypeFor(feature.kind)}
-                step={feature.kind === "numeric" ? "any" : undefined}
-                value={values[feature.name] ?? ""}
-                onChange={(event) =>
-                  setValues((current) => ({
-                    ...current,
-                    [feature.name]: event.target.value,
-                  }))
-                }
-                className="mt-1 w-full rounded-md border border-ink-300 px-2 py-1.5 text-sm focus:border-accent-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-400"
-              />
-            </div>
-          ))}
+          {model.features.map((feature) => {
+            const inputId = `${formId}-${feature.name}`;
+            const wrong = blamed.includes(feature.name);
+            // A box the backend named is outlined and announced, so a
+            // rejected record points at itself instead of making someone
+            // re-read the whole form against the message.
+            const frame = wrong
+              ? "border-rose-400 focus:border-rose-500 focus-visible:ring-rose-400"
+              : "border-ink-300 focus:border-accent-500 focus-visible:ring-accent-400";
+            const classes = `mt-1 w-full rounded-md border px-2 py-1.5 text-sm focus:outline-none focus-visible:ring-2 ${frame}`;
+            return (
+              <div key={feature.name}>
+                <label
+                  htmlFor={inputId}
+                  className="block text-xs font-medium text-ink-700"
+                >
+                  {feature.name}
+                  <span className="ml-1 font-normal text-ink-400">
+                    {hintFor(feature.kind)}
+                  </span>
+                </label>
+                {feature.kind === "boolean" ? (
+                  // A column the model treats as true/false gets the two
+                  // values it accepts and nothing else. Typing "yes" would
+                  // work and typing "yep" would not, and a form should not
+                  // make anyone find that out from a 422.
+                  <select
+                    id={inputId}
+                    name={feature.name}
+                    aria-invalid={wrong || undefined}
+                    value={values[feature.name] ?? ""}
+                    onChange={(event) =>
+                      setValues((current) => ({
+                        ...current,
+                        [feature.name]: event.target.value,
+                      }))
+                    }
+                    className={classes}
+                  >
+                    <option value="">— not supplied —</option>
+                    <option value="true">true</option>
+                    <option value="false">false</option>
+                  </select>
+                ) : (
+                  <input
+                    id={inputId}
+                    name={feature.name}
+                    type={inputTypeFor(feature.kind)}
+                    step={feature.kind === "numeric" ? "any" : undefined}
+                    aria-invalid={wrong || undefined}
+                    value={values[feature.name] ?? ""}
+                    onChange={(event) =>
+                      setValues((current) => ({
+                        ...current,
+                        [feature.name]: event.target.value,
+                      }))
+                    }
+                    className={classes}
+                  />
+                )}
+              </div>
+            );
+          })}
         </fieldset>
 
         <div className="flex items-center gap-3">
@@ -221,9 +304,9 @@ export function PredictionPanel({ experimentId }: PredictionPanelProps) {
       {prediction && !predicting && (
         <div className="rounded-md border border-ink-200 bg-white p-4">
           <h4 className="text-xs font-medium uppercase tracking-widest text-ink-500">
-            Predicted {result?.model.target_column}
+            Predicted {scored.target_column}
           </h4>
-          <p className="mt-1 text-2xl font-semibold tabular-nums text-ink-900">
+          <p className="mt-1 text-3xl font-semibold tabular-nums text-ink-900">
             {typeof prediction.prediction === "number"
               ? formatMetric(prediction.prediction)
               : String(prediction.prediction)}
@@ -231,9 +314,17 @@ export function PredictionPanel({ experimentId }: PredictionPanelProps) {
 
           {probabilities && (
             <div className="mt-4">
-              <h5 className="mb-2 text-xs font-medium uppercase tracking-widest text-ink-500">
+              <h5 className="mb-1 text-xs font-medium uppercase tracking-widest text-ink-500">
                 Class probability
               </h5>
+              {/* Said once, next to the numbers it qualifies. A probability
+                  here is what this estimator reports for this row — useful for
+                  seeing how close the decision was, and not a calibrated claim
+                  about how often the model is right. */}
+              <p className="mb-2 text-xs text-ink-500">
+                The model&apos;s own output for this record, not a measured
+                real-world certainty.
+              </p>
               <ul className="space-y-1.5">
                 {Object.entries(probabilities)
                   .sort(([, a], [, b]) => b - a)
@@ -255,14 +346,23 @@ export function PredictionPanel({ experimentId }: PredictionPanelProps) {
             </div>
           )}
 
-          {result && (
-            <p className="mt-4 text-xs text-ink-500">
-              Produced by {result.model.display_name}, which scored{" "}
-              {formatMetric(result.model.primary_metric_value)}{" "}
-              {result.model.primary_metric} on the held-out test set. That is a
-              measurement of the model, not a confidence in this prediction.
-            </p>
-          )}
+          {/* The model's score and this prediction are two different things,
+              and this is the sentence that keeps them apart. The score is a
+              measurement over held-out rows; nothing here scores this answer,
+              and a UI that put a percentage beside a single prediction without
+              saying so would be inviting exactly that misreading. */}
+          <p className="mt-4 border-t border-ink-100 pt-3 text-xs text-ink-500">
+            Produced by{" "}
+            <span className="font-medium text-ink-700">
+              {scored.display_name}
+            </span>
+            , which scored {formatMetric(scored.primary_metric_value)}{" "}
+            {metricLabel(scored.primary_metric ?? "")}
+            {scored.test_row_count
+              ? ` on ${formatCount(scored.test_row_count)} held-out rows`
+              : " on the held-out test set"}
+            . That measures the model, not this prediction.
+          </p>
         </div>
       )}
     </div>

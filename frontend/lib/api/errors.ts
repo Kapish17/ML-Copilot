@@ -114,7 +114,9 @@ const FRIENDLY_MESSAGES: Record<string, string> = {
   invalid_prediction_input:
     "Those values do not match what the model expects. Every feature it was trained on must be present, and a feature it was not trained on is refused rather than ignored — a column the model does not know would be dropped, and the prediction would be made without it.",
   model_artifact_unreadable:
-    "The stored model could not be read. Re-run the experiment to create a new one.",
+    "This experiment's stored model could not be used. That is a problem with the saved file rather than with anything you entered — re-run the experiment to create a new one.",
+  request_body_too_large:
+    "That request is larger than the backend accepts. Send fewer records at a time.",
 
   // Authentication.
   //

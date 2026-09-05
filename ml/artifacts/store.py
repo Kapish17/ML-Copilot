@@ -40,6 +40,25 @@ can also replace the application's own code. The boundary is the directory: it
 must be treated as executable code, and nothing but this application may write
 to it. **Third-party model files are not supported** and there is no endpoint,
 argument or configuration that would load one.
+
+---------------------------------------------------------------------------
+Three states, and one function that decides between them
+---------------------------------------------------------------------------
+An artifact is `available`, `not_available`, or `corrupted`, and
+:meth:`LocalModelArtifactStore.status` is the only code that decides which.
+Everything else — :meth:`exists`, the model endpoint, the reason a dashboard
+shows — reads that one answer, so "can this be predicted from?" cannot be
+answered two different ways by two callers.
+
+The check is deliberately **cheap and shallow**: the manifest is parsed and
+validated, and the model file is checked for presence and for the size the
+manifest recorded. Nothing is unpickled, so asking costs a small JSON read and
+a ``stat`` and can be done on every page load. The **deep** checks — the
+SHA-256 digest, and that the object really is a ``Pipeline`` — need the file
+itself and therefore happen in :meth:`load`. An artifact that passes the
+shallow check and fails the deep one is possible, rare, and reported honestly
+by the endpoint that meets it rather than papered over by a status call that
+pretends to have looked.
 """
 
 from __future__ import annotations
@@ -52,7 +71,7 @@ import secrets
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Mapping, Protocol, runtime_checkable
 
 from sklearn.pipeline import Pipeline
 
@@ -72,6 +91,50 @@ MANIFEST_FILENAME = "artifact.json"
 #: substituted file exhausting memory before anything has had a chance to check
 #: it. Generous: a six-model forest on a wide dataset is a few tens of MB.
 MAX_MODEL_BYTES = 512 * 1024 * 1024
+
+
+#: The three states an experiment's model can be in, as far as predicting from
+#: it is concerned. Stable strings: they are part of the API contract and a
+#: client branches on them.
+STATE_AVAILABLE = "available"
+STATE_NOT_AVAILABLE = "not_available"
+STATE_CORRUPTED = "corrupted"
+
+#: Why an artifact is not usable. Stable codes, so a client can distinguish
+#: "this run never had a model" from "this run's model is broken" without
+#: reading a sentence written for a human.
+REASON_NO_ARTIFACT = "no_artifact"
+REASON_MANIFEST_UNREADABLE = "manifest_unreadable"
+REASON_MANIFEST_INVALID = "manifest_invalid"
+REASON_UNSUPPORTED_SCHEMA_VERSION = "unsupported_schema_version"
+REASON_MODEL_FILE_MISSING = "model_file_missing"
+REASON_MODEL_FILE_TRUNCATED = "model_file_truncated"
+REASON_MODEL_TOO_LARGE = "model_too_large"
+
+
+@dataclass(frozen=True)
+class ArtifactStatus:
+    """Whether one experiment's model can be predicted from, and why not.
+
+    The metadata is carried along when there is any, so a caller that asks the
+    status and then wants the feature schema does not read the manifest twice.
+    """
+
+    experiment_id: str
+    #: One of :data:`STATE_AVAILABLE`, :data:`STATE_NOT_AVAILABLE`,
+    #: :data:`STATE_CORRUPTED`.
+    state: str
+    #: A stable ``REASON_*`` code when the state is not ``available``.
+    reason_code: str | None = None
+    #: The manifest, when it could be read. Present for ``available``, and for
+    #: a ``corrupted`` artifact whose manifest parsed but whose model file did
+    #: not check out — the schema is still true even when the model is gone.
+    metadata: ModelArtifactMetadata | None = None
+
+    @property
+    def is_available(self) -> bool:
+        """Whether a prediction could be attempted."""
+        return self.state == STATE_AVAILABLE
 
 
 @dataclass(frozen=True)
@@ -98,6 +161,9 @@ class ModelArtifactStore(Protocol):
         self, experiment_id: str, pipeline: Pipeline, metadata: ModelArtifactMetadata
     ) -> ModelArtifactMetadata:
         """Persist one fitted pipeline and its manifest."""
+
+    def status(self, experiment_id: str) -> ArtifactStatus:
+        """Report whether this experiment's model is usable, and why not."""
 
     def exists(self, experiment_id: str) -> bool:
         """Whether a usable artifact is stored for this experiment."""
@@ -224,20 +290,104 @@ class LocalModelArtifactStore:
 
     # -- Reading -----------------------------------------------------------
 
-    def exists(self, experiment_id: str) -> bool:
-        """Whether both halves of a usable artifact are present.
+    def status(self, experiment_id: str) -> ArtifactStatus:
+        """Report whether this experiment's model can be predicted from.
 
-        An unsafe identifier is not an error here — it is simply an experiment
-        with no model, which is what a caller asking "can I predict?" needs to
-        know.
+        The one place that decides between the three states, so no caller has
+        to reimplement "is there a usable model here" and no two callers can
+        reach different conclusions. Nothing is unpickled: the manifest is read
+        and validated, and the model file is checked for presence and for the
+        size the manifest recorded. See the module docstring on why the digest
+        and the type check belong to :meth:`load` instead.
+
+        This **never raises**. A caller asking about a model wants an answer
+        about the model, and "the id is malformed" is, from here, just another
+        way of having no artifact — the endpoints that must reject a bad id do
+        so before they get this far.
+
+        Args:
+            experiment_id: The run to ask about.
+
+        Returns:
+            ArtifactStatus: The state, a stable reason code when it is not
+            ``available``, and the manifest when one could be read.
         """
         try:
             directory = self.directory_for(experiment_id)
         except Exception:  # noqa: BLE001 - an unusable id has no artifact
-            return False
-        return (directory / MANIFEST_FILENAME).is_file() and (
-            directory / MODEL_FILENAME
-        ).is_file()
+            return ArtifactStatus(
+                experiment_id, STATE_NOT_AVAILABLE, REASON_NO_ARTIFACT
+            )
+
+        manifest = directory / MANIFEST_FILENAME
+        if not manifest.is_file():
+            # Nothing was ever written here, or the whole directory is gone.
+            # Not a fault: it is the state every run recorded before model
+            # persistence existed is in.
+            return ArtifactStatus(
+                experiment_id, STATE_NOT_AVAILABLE, REASON_NO_ARTIFACT
+            )
+
+        try:
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return ArtifactStatus(
+                experiment_id, STATE_CORRUPTED, REASON_MANIFEST_UNREADABLE
+            )
+
+        try:
+            metadata = ModelArtifactMetadata.from_dict(payload)
+        except ModelArtifactUnreadableError as exc:
+            # An artifact written by a future version is a different problem
+            # from one written by a broken one, and a client that wants to say
+            # "upgrade" rather than "re-run" needs to tell them apart.
+            unsupported = "supported" in exc.details
+            return ArtifactStatus(
+                experiment_id,
+                STATE_CORRUPTED,
+                (
+                    REASON_UNSUPPORTED_SCHEMA_VERSION
+                    if unsupported
+                    else REASON_MANIFEST_INVALID
+                ),
+            )
+
+        model_path = directory / MODEL_FILENAME
+        if not model_path.is_file():
+            # The manifest is written second, so this is a directory somebody
+            # emptied rather than a half-finished save.
+            return ArtifactStatus(
+                experiment_id,
+                STATE_CORRUPTED,
+                REASON_MODEL_FILE_MISSING,
+                metadata,
+            )
+
+        size = model_path.stat().st_size
+        recorded = _recorded_size(payload)
+        if recorded is not None and size != recorded:
+            return ArtifactStatus(
+                experiment_id,
+                STATE_CORRUPTED,
+                REASON_MODEL_FILE_TRUNCATED,
+                metadata,
+            )
+        if size > MAX_MODEL_BYTES:
+            return ArtifactStatus(
+                experiment_id, STATE_CORRUPTED, REASON_MODEL_TOO_LARGE, metadata
+            )
+
+        return ArtifactStatus(experiment_id, STATE_AVAILABLE, None, metadata)
+
+    def exists(self, experiment_id: str) -> bool:
+        """Whether a usable artifact is stored for this experiment.
+
+        A thin reading of :meth:`status`, so "usable" means one thing in this
+        codebase. A corrupted artifact answers **False** here: a caller asking
+        this question is deciding whether to offer a prediction, and an
+        artifact whose manifest cannot be read is not one to offer.
+        """
+        return self.status(experiment_id).is_available
 
     def metadata_for(self, experiment_id: str) -> ModelArtifactMetadata:
         """Return the manifest without deserialising the model.
@@ -363,6 +513,23 @@ def _digest_of(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _recorded_size(payload: Any) -> int | None:
+    """Return the model size a manifest recorded, or ``None`` if it has none.
+
+    The cheap half of the integrity check: comparing this against the file on
+    disk costs a ``stat`` and catches the common corruption — a truncated or
+    replaced file — without reading a byte of the model. The digest in
+    :func:`_recorded_digest` is the thorough half, and it is only worth paying
+    for at load time.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    recorded = (payload.get("model_file") or {}).get("bytes")
+    return recorded if isinstance(recorded, int) and not isinstance(
+        recorded, bool
+    ) else None
+
+
 def _recorded_digest(manifest: Path) -> str | None:
     """Return the model digest a manifest recorded, or ``None`` if it has none."""
     try:
@@ -390,6 +557,17 @@ __all__ = [
     "MANIFEST_FILENAME",
     "MAX_MODEL_BYTES",
     "MODEL_FILENAME",
+    "REASON_MANIFEST_INVALID",
+    "REASON_MANIFEST_UNREADABLE",
+    "REASON_MODEL_FILE_MISSING",
+    "REASON_MODEL_FILE_TRUNCATED",
+    "REASON_MODEL_TOO_LARGE",
+    "REASON_NO_ARTIFACT",
+    "REASON_UNSUPPORTED_SCHEMA_VERSION",
+    "STATE_AVAILABLE",
+    "STATE_CORRUPTED",
+    "STATE_NOT_AVAILABLE",
+    "ArtifactStatus",
     "LoadedModel",
     "LocalModelArtifactStore",
     "ModelArtifactStore",

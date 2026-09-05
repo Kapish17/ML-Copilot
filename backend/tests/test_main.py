@@ -107,12 +107,14 @@ def test_credentials_are_never_allowed_cross_origin() -> None:
 def test_an_empty_allowlist_installs_no_cross_origin_middleware() -> None:
     """A deployment serving the dashboard from this origin adds no surface.
 
-    The request-context middleware is always installed and is named
-    explicitly, so this stays a statement about CORS: an empty allowlist must
-    add no cross-origin handling, not merely fewer middlewares than before.
+    The two unconditional middlewares — the request id, and the body-size
+    ceiling — are named explicitly, so this stays a statement about CORS: an
+    empty allowlist must add no cross-origin handling, not merely fewer
+    middlewares than before. Listing them by name is also what makes a
+    middleware added later show up here as a decision rather than as noise.
     """
     application = create_app(Settings(cors_allow_origins=()))
 
     installed = [middleware.cls.__name__ for middleware in application.user_middleware]
-    assert installed == ["RequestContextMiddleware"]
+    assert set(installed) == {"RequestContextMiddleware", "RequestBodyLimitMiddleware"}
     assert "CORSMiddleware" not in installed

@@ -123,7 +123,8 @@ Full detail, including the ingestion adapters, storage and deployment:
 | **Explainability** | SHAP over the transformed features with readable names, global ranked importance and signed per-prediction contributions, and a permutation fallback for models SHAP cannot handle. A failed explanation is a status, not a 500. |
 | **Experiment tracking** | Versioned JSON records: fingerprint, every preprocessing decision, candidate results, both scores, the baseline, the explanation, and the environment. Atomic writes. **No dataset rows are stored** — the record holds column names and statistics, never a cell. |
 | **Model persistence** | A successful run's winning `Pipeline` — the preprocessing *as fitted*, plus the retrained estimator — is written to an application-owned artifact directory beside a manifest of the feature schema, checksummed and verified on load. Written only after evaluation succeeds; a failed write is a warning, not a failed experiment. |
-| **Prediction** | `POST /api/v1/experiments/{id}/predict` runs new records through that exact stored pipeline. **Nothing is re-fitted**, so a prediction goes through the same transformation the held-out score was measured through. A request carries feature values and never a path. |
+| **Model lifecycle** | One check decides whether a stored model is `available`, `not_available` or `corrupted`, and every caller reads that one answer. The three are distinguished because their fixes differ: re-run the experiment, or upgrade the service, or nothing — a damaged artifact is the server's own file, not the caller's mistake. |
+| **Prediction** | `POST /api/v1/experiments/{id}/predict` runs new records through that exact stored pipeline. **Nothing is re-fitted**, so a prediction goes through the same transformation the held-out score was measured through. A request carries feature values and never a path, and its records are held for one request and released. |
 | **Retrieval** | Semantic search over the project's own documentation and its run history, with structure-aware chunking, pre-ranking metadata filters and stable citations. The default embedding provider is stateless — no download, no key, identical vectors everywhere. |
 | **Grounded answers** | Evidence-first generation with validated citations, over any OpenAI-compatible endpoint — hosted, or a model on your laptop via `LLM_BASE_URL`. |
 | **Bounded agent** | Four registered tools, typed arguments, hard budgets, four outcomes all returned as HTTP 200 with a status. No chain-of-thought is ever returned. |
@@ -198,11 +199,21 @@ a short paraphrase. That is the trade for needing no download and no key;
 
 **11 · Predict with it.** Open the **Predict** tab on the run's page. The form
 is built from the model's own declared schema, not from anything the page
-already knew — type a row and get a class back with its probabilities. The
-values run through the *same fitted preprocessing* the run produced; nothing is
-re-fitted, which is what makes this prediction comparable to the held-out score
-in step 7. Old runs recorded before this existed say so instead of showing a
-form that could not work.
+already knew: a numeric column gets a number box, a boolean gets the two values
+it accepts, and every box is optional because the model's imputation was fitted
+for missing values. Type a row and get a class back with its probabilities.
+
+Read the two numbers carefully, because they are the thing this screen is most
+careful about. The percentages are **the model's own output for this record** —
+how close the decision was. The `f1` underneath is what the model scored on 60
+held-out rows in step 7. Neither is a confidence in this answer, and the panel
+says so rather than leaving you to assume. The values themselves run through
+the *same fitted preprocessing* the run produced; nothing is re-fitted, which is
+what makes this prediction comparable to that score at all.
+
+Old runs recorded before this existed say so instead of showing a form that
+could not work — and so does a run whose stored model is damaged, in different
+words, because the fix is different.
 
 **From a terminal instead:** `./scripts/demo.sh` walks the same path with
 `curl`, printing each result. It needs no key and no network. On Windows, run it
@@ -289,8 +300,12 @@ An uploaded dataset is parsed in memory for one request and released. There is
 no upload directory, no temporary file, and deliberately no volume that could
 become one. The model volume holds fitted `Pipeline` objects — learned
 parameters, and column *names* in their manifests. It holds no dataset rows.
-`MODEL_ARTIFACT_DIR` moves it; `MAX_PREDICTION_RECORDS` caps a prediction
-batch.
+`MODEL_ARTIFACT_DIR` moves it; `MAX_PREDICTION_RECORDS` caps a prediction batch
+and `MAX_REQUEST_BODY_MB` caps the bytes it may arrive in.
+
+Removing the model volume removes the models. The records survive
+independently and stay readable, and those runs then report `not_available`
+rather than a model rebuilt after the fact.
 
 ## Local development
 
@@ -554,9 +569,15 @@ reading.
   application-generated artifacts are ever loaded (see
   [PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md)). **Uploading a model
   file is not supported**, and no endpoint accepts one.
-- **Prediction is synchronous and modest.** One request, up to 500 records by
-  default, answered inline. No batch jobs, no streaming, no async scoring
-  service.
+- **Prediction is synchronous and modest.** One request, up to 500 records and
+  10 MB by default, answered inline. No batch jobs, no streaming, no async
+  scoring service, **and no rate limiting** — the limits bound one request, not
+  how many a caller may send.
+- **Nothing records what was predicted.** No prediction history, no drift
+  monitoring, and no comparison of live inputs against the training
+  distribution. A record is validated against the model's *schema*, so a value
+  of the right type but far outside the training range is accepted and
+  predicted on.
 - **Runs recorded before persistence existed have no model.** They report
   `model_not_available` rather than an artifact conjured after the fact.
 - **No hyperparameter optimisation.** Six scikit-learn estimators at their
@@ -600,9 +621,12 @@ reading.
 21. ~~Lightweight API authentication — one shared key on the endpoints that
     cost something, off by default, kept out of the browser and out of every
     image, log and schema~~
-22. **Model persistence and prediction** — the winning `Pipeline` written after
-    a successful run, and a protected prediction endpoint that reuses the
-    preprocessing *as fitted*, never re-fitting and never accepting a path
+22. ~~Model persistence and prediction — the winning `Pipeline` written after a
+    successful run, and a protected prediction endpoint that reuses the
+    preprocessing *as fitted*, never re-fitting and never accepting a path~~
+23. **Model lifecycle and prediction polish** — three artifact states decided
+    in one place, a model endpoint worth building a client on, typed inputs
+    from the persisted schema, and a body ceiling to go with the record one
     *(current)*
 
 **Next**, in the honest order: **TLS**, then background execution. TLS comes

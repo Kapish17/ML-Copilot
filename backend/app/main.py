@@ -25,7 +25,7 @@ from app.api.dependencies import (
     get_rag_config,
 )
 from app.api.error_handlers import register_exception_handlers
-from app.api.middleware import RequestContextMiddleware
+from app.api.middleware import RequestBodyLimitMiddleware, RequestContextMiddleware
 from app.api.v1 import api_router
 from app.core.config import Settings, get_settings
 from app.core.logging import REQUEST_ID_HEADER, configure_logging
@@ -316,6 +316,12 @@ def create_app(
         application.dependency_overrides[get_dataset_source] = lambda: dataset_source
 
     _allow_browser_origins(application, config)
+    # Below the request-id middleware, so an oversized body is still logged
+    # with an id and still answers with one — a caller who hits the limit gets
+    # a failure they can quote, like every other failure here.
+    application.add_middleware(
+        RequestBodyLimitMiddleware, max_bytes=config.max_request_body_bytes
+    )
     # Added last, so it sits outside the CORS middleware and every response —
     # including a preflight that CORS answers on its own — carries a request id
     # and produces one log line.

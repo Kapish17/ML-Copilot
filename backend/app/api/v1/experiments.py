@@ -345,7 +345,11 @@ _MODEL_ERRORS: dict[int | str, dict[str, object]] = {
     },
     status.HTTP_404_NOT_FOUND: {
         "model": ErrorResponse,
-        "description": "No experiment is stored under that id.",
+        "description": (
+            "No experiment is stored under that id. Note that a run with no "
+            "usable model is **not** this: that is a 200 whose `status` is "
+            "`not_available` or `corrupted`."
+        ),
     },
 }
 
@@ -369,9 +373,23 @@ _PREDICT_ERRORS: dict[int | str, dict[str, object]] = {
             "name the record and the columns."
         ),
     },
+    status.HTTP_413_CONTENT_TOO_LARGE: {
+        "model": ErrorResponse,
+        "description": (
+            "`request_body_too_large` — the body exceeds "
+            "`MAX_REQUEST_BODY_MB`. A record count is not a size: this is the "
+            "bound in the other dimension."
+        ),
+    },
     status.HTTP_500_INTERNAL_SERVER_ERROR: {
         "model": ErrorResponse,
-        "description": "The stored model could not be read.",
+        "description": (
+            "`model_artifact_unreadable` — a stored artifact that does not "
+            "check out. A 500 rather than a 4xx because nothing the caller "
+            "changes will help: the broken file is this service's own. The "
+            "specific reason is reported by `GET .../model` as "
+            "`status: \"corrupted\"` with a `reason_code`."
+        ),
     },
 }
 
@@ -393,15 +411,25 @@ def experiment_model(
 
     Answered from the **artifact store**, not from the stored record. The
     record notes that a model was written when the run finished; this says
-    whether one is there now, which is a different question once an artifact
-    can be deleted or a volume wiped.
+    whether one is usable now, which is a different question once an artifact
+    can be deleted, a volume wiped, or a file left half-written.
 
-    When a model is present the response carries the exact feature schema a
+    Three states, and each implies a different next step. `available` means
+    predict. `not_available` means there is no artifact — normal for a run
+    recorded before model persistence existed — and the fix is to re-run the
+    experiment. `corrupted` means an artifact is stored and does not check
+    out, and `reason_code` says which kind of damage, because "upgrade the
+    service" and "re-run the experiment" are different instructions.
+
+    **All three are 200.** Whether a run can be predicted from is an answer,
+    not a failure; only an unknown experiment is a 404.
+
+    When a model is available the response carries the exact feature schema a
     prediction must satisfy — each column's name, the branch of the fitted
     preprocessing that handles it, and the dtype it had at training time — so
     a client builds its form from what the model actually wants rather than
     from a guess. Only the manifest is read; the model itself is not
-    deserialised, so asking is cheap.
+    deserialised, so asking is cheap enough to do on every page load.
 
     **No filesystem location appears in the response**, and none is available
     to appear: nothing in this path handles one.

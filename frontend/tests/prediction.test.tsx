@@ -1,25 +1,38 @@
 /**
  * Tests for predicting from a stored model, in the dashboard.
  *
- * The panel's job is to be honest about three states and useful in the fourth:
- * checking, no model stored, a failed prediction, and a result. The one that
- * would be easy to get wrong is the second — a run recorded before model
- * persistence existed, or one whose artifact was deleted, has no model, and
- * rendering an empty form for it would produce requests that cannot succeed.
+ * The panel has to be honest about what it cannot do and useful when it can.
+ * The backend reports three lifecycle states — `available`, `not_available`
+ * and `corrupted` — and only the first has a form; the other two say what
+ * happened and what to do, in different words, because they have different
+ * fixes. Rendering a form for either would invite someone to type a record
+ * and then tell them nothing they typed was the problem.
  *
  * The form is built from the schema the backend declares rather than from
  * anything the page already knows, so a test that fakes a different schema
  * must see a different form. That is asserted directly, because it is the
  * property that keeps the dashboard from sending features the model was not
- * trained on.
+ * trained on — and it is why a boolean feature gets two options rather than a
+ * text box.
+ *
+ * The last group is every way a prediction can fail: no key, a rejected
+ * record, a broken artifact, an unreachable backend. Each has to produce a
+ * sentence someone can act on, and none may show a path, a traceback or an
+ * exception type.
  */
 
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { PredictionPanel } from "@/components/experiments/PredictionPanel";
-import { MODEL_AVAILABLE, MODEL_UNAVAILABLE, PREDICTION } from "./fixtures";
-import { errorEnvelope, mockBackend } from "./mockApi";
+import {
+  MODEL_AVAILABLE,
+  MODEL_CORRUPTED,
+  MODEL_UNAVAILABLE,
+  MODEL_WITH_BOOLEAN,
+  PREDICTION,
+} from "./fixtures";
+import { errorEnvelope, mockBackend, mockNetworkFailure } from "./mockApi";
 
 const EXPERIMENT_ID = "exp_e36e7bbf5267_20260902T054517Z_503e";
 
@@ -168,8 +181,11 @@ describe("making a prediction", () => {
     await fillAndSubmit({ income: "42000" });
 
     expect(
-      await screen.findByText(/measurement of the model, not a confidence/i),
+      await screen.findByText(/measures the model, not this prediction/i),
     ).toBeInTheDocument();
+    // And the sample size travels with the score, so "0.94 f1" is not read as
+    // a claim of unknown weight.
+    expect(screen.getByText(/36 held-out rows/i)).toBeInTheDocument();
   });
 
   it("says a rejected record was rejected, in mapped language", async () => {
@@ -247,6 +263,172 @@ describe("making a prediction", () => {
     for (const leak of ["joblib", "/data/", "artifact.json", ".pkl"]) {
       expect(container.textContent).not.toContain(leak);
     }
+  });
+});
+
+describe("the model's lifecycle states", () => {
+  it("separates a damaged model from a missing one", async () => {
+    // The reason a boolean was not enough. Both mean "you cannot predict",
+    // and only one of them is fixed by re-running the experiment.
+    mockBackend([{ match: MODEL_ROUTE, body: MODEL_CORRUPTED }]);
+    renderPanel();
+
+    expect(await screen.findByText(/cannot be used/i)).toBeInTheDocument();
+    // The backend's own sentence, which says what to do about this particular
+    // failure rather than about unavailability in general.
+    expect(screen.getByText(/does not match the size recorded/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^predict$/i })).toBeNull();
+  });
+
+  it("offers no form for either unusable state", async () => {
+    // A form whose every submission is refused is worse than no form: it
+    // invites someone to type a record and then tells them nothing they typed
+    // was the problem.
+    for (const availability of [MODEL_UNAVAILABLE, MODEL_CORRUPTED]) {
+      mockBackend([{ match: MODEL_ROUTE, body: availability }]);
+      const { unmount } = renderPanel();
+
+      await screen.findByText(availability.reason!);
+      expect(screen.queryByLabelText(/income/)).toBeNull();
+      expect(screen.queryByRole("button", { name: /^predict$/i })).toBeNull();
+      unmount();
+    }
+  });
+});
+
+describe("the form the schema produces", () => {
+  it("gives a boolean feature two values instead of a free-text box", async () => {
+    // Typing "yes" would work and typing "yep" would not, and nobody should
+    // discover that from a 422.
+    mockBackend([{ match: MODEL_ROUTE, body: MODEL_WITH_BOOLEAN }]);
+    renderPanel();
+
+    const field = await screen.findByLabelText(/auto_renew/);
+    expect(field.tagName).toBe("SELECT");
+    expect(
+      Array.from((field as HTMLSelectElement).options).map((option) => option.value),
+    ).toEqual(["", "true", "false"]);
+  });
+
+  it("gives a datetime feature a date box", async () => {
+    mockBackend([{ match: MODEL_ROUTE, body: MODEL_WITH_BOOLEAN }]);
+    renderPanel();
+
+    expect(await screen.findByLabelText(/signed_on/)).toHaveAttribute("type", "date");
+  });
+
+  it("sends the chosen boolean and null for the boxes left alone", async () => {
+    const backend = mockBackend([
+      { match: PREDICT_ROUTE, body: PREDICTION },
+      { match: MODEL_ROUTE, body: MODEL_WITH_BOOLEAN },
+    ]);
+    renderPanel();
+
+    await userEvent.selectOptions(
+      await screen.findByLabelText(/auto_renew/),
+      "true",
+    );
+    await userEvent.click(screen.getByRole("button", { name: /^predict$/i }));
+
+    const call = backend.requests.find((request) =>
+      request.url.includes("/predict"),
+    );
+    expect(JSON.parse(String(call!.body)).records[0]).toEqual({
+      income: null,
+      auto_renew: "true",
+      signed_on: null,
+    });
+  });
+});
+
+describe("when the request fails", () => {
+  it("says a key is needed and that this dashboard cannot hold one", async () => {
+    mockBackend([
+      {
+        match: PREDICT_ROUTE,
+        status: 401,
+        body: errorEnvelope("authentication_required", "Authentication required."),
+      },
+      { match: MODEL_ROUTE, body: MODEL_AVAILABLE },
+    ]);
+    renderPanel();
+
+    await fillAndSubmit({ income: "1" });
+
+    expect(await screen.findByText(/requires an API key/i)).toBeInTheDocument();
+    // Not "try again": a retry from a browser cannot succeed, and saying so
+    // is the honest instruction.
+    expect(screen.getByText(/cannot hold one safely/i)).toBeInTheDocument();
+  });
+
+  it("points at the boxes a rejected record named", async () => {
+    // The backend says which features are wrong; the form is where that is
+    // useful. Nothing else from `details` is rendered.
+    mockBackend([
+      {
+        match: PREDICT_ROUTE,
+        status: 422,
+        body: errorEnvelope(
+          "invalid_prediction_input",
+          "Record 0 is missing 1 required feature(s): tenure_months.",
+          { missing_features: ["tenure_months"] },
+        ),
+      },
+      { match: MODEL_ROUTE, body: MODEL_AVAILABLE },
+    ]);
+    renderPanel();
+
+    await fillAndSubmit({ income: "1" });
+    await screen.findByText(/could not predict/i);
+
+    expect(screen.getByLabelText(/tenure_months/)).toHaveAttribute(
+      "aria-invalid",
+      "true",
+    );
+    expect(screen.getByLabelText(/income/)).not.toHaveAttribute("aria-invalid");
+  });
+
+  it("reports a server failure without inventing a cause", async () => {
+    mockBackend([
+      {
+        match: PREDICT_ROUTE,
+        status: 500,
+        body: errorEnvelope("model_artifact_unreadable", "Something went wrong."),
+      },
+      { match: MODEL_ROUTE, body: MODEL_AVAILABLE },
+    ]);
+    renderPanel();
+
+    await fillAndSubmit({ income: "1" });
+
+    expect(
+      await screen.findByText(/problem with the saved file/i),
+    ).toBeInTheDocument();
+    // The form stays, because the person's values are still worth keeping.
+    expect(screen.getByRole("button", { name: /^predict$/i })).toBeInTheDocument();
+  });
+
+  it("says the backend could not be reached when it could not", async () => {
+    mockBackend([{ match: MODEL_ROUTE, body: MODEL_AVAILABLE }]);
+    renderPanel();
+    await screen.findByLabelText(/income/);
+
+    mockNetworkFailure();
+    await fillAndSubmit({ income: "1" });
+
+    expect(
+      await screen.findByText(/backend could not be reached/i),
+    ).toBeInTheDocument();
+  });
+
+  it("offers a retry when the model check itself fails", async () => {
+    mockNetworkFailure();
+    renderPanel();
+
+    expect(
+      await screen.findByText(/could not check for a stored model/i),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /try again/i })).toBeInTheDocument();
   });
 });
 

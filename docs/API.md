@@ -98,6 +98,34 @@ request produces and is the fastest way to find one request in a log.
 agent run that ran out of budget, returns **200** with a status field saying
 so. Only a genuine provider or server failure is 5xx.
 
+### Resource limits
+
+Every path that does real work is bounded, because execution is synchronous and
+a request holds a worker for its whole duration. The bounds that a caller can
+hit are configuration, not constants in a route, and
+`GET /api/v1/experiments/capabilities` reports the ones that apply to a run.
+
+| Limit | Default | Applies to |
+| --- | --- | --- |
+| `MAX_UPLOAD_MB` | 25 | An uploaded dataset — `413 file_too_large` |
+| `MAX_REQUEST_BODY_MB` | 10 | Any **JSON** body — `413 request_body_too_large` |
+| `MAX_PREDICTION_RECORDS` | 500 | Records per prediction — `422 invalid_prediction_input` |
+| `MAX_DATASET_ROWS` / `MAX_DATASET_COLUMNS` | 1 000 000 / 1 000 | A parsed dataset |
+| `MAX_EXPERIMENT_ROWS`, `MAX_CV_FOLDS`, `MAX_CANDIDATE_MODELS` | 200 000, 10, 6 | What one experiment may do |
+| `AGENT_MAX_TOOL_CALLS`, `AGENT_MAX_ITERATIONS`, `AGENT_MAX_CONTEXT_CHARS` | see `/api/v1/agent/status` | One agent run; a request may lower these and never raise them |
+
+The first three are worth reading together. A dataset upload and a JSON body
+are bounded separately because they are read by different code and a multipart
+upload is exempt from the JSON ceiling. And **a record count is not a size**:
+five hundred records each carrying a very long string is legal under
+`MAX_PREDICTION_RECORDS` and unbounded under any other measure, which is why
+bodies are bounded too.
+
+**None of these is a rate limit**, and none is claimed to be. Every holder of
+the key can send a bounded request as often as they like; see
+[PRODUCTION_READINESS.md](PRODUCTION_READINESS.md), which says so plainly
+rather than implying otherwise.
+
 ---
 
 ## System
@@ -243,8 +271,10 @@ Rank several stored runs against each other.
 **Body** `{"experiment_ids": ["exp_...", "exp_..."]}` — at least two.
 
 **Returns** the shared `task_type`, `primary_metric`, `direction` and
-`higher_is_better`; `best_experiment_id`; and a `table[]` row per run with its
-selection score, test score, baseline and improvement.
+`higher_is_better`; `run_count` and `best_experiment_id`; a `runs[]` entry per
+run with its selection score, test score, baseline and improvement; and
+`table`, the same ranking rendered as a readable **text** table for a terminal.
+Branch on `runs`; print `table`.
 
 Ranking respects metric direction — for RMSE and MAE the best run is the lowest
 one, and the response says which direction was applied.
@@ -290,23 +320,67 @@ Whether this experiment can be predicted from, and with what.
 
 Answered from the **artifact store**, not from the experiment record: the
 record says a model was written when the run finished; this says whether one is
-readable now.
+usable now.
+
+**Three states, and they are the model's lifecycle.**
+
+| `status` | What it means | What to do |
+| --- | --- | --- |
+| `available` | A usable model is stored. | Predict. |
+| `not_available` | This run has no artifact. Normal for a run recorded before model persistence existed, and for one whose artifact was removed. | Re-run the experiment. |
+| `corrupted` | An artifact is stored and does not check out. | Depends on `reason_code`. |
+
+**All three are 200.** "This run cannot be predicted from" is an answer, and a
+client needs it in order to render the right thing. A 404 here means the
+*experiment* does not exist.
 
 **Returns** `ModelAvailability`:
 
-- `experiment_id`, `available`, `max_records`, and `reason` — why not, when
-  `available` is false.
+- `experiment_id`, `status`, `available` (`status == "available"`, for a
+  caller that only needs to branch), `max_records`.
+- `reason_code` and `reason` when there is no usable model — a stable code to
+  branch on and the same thing as a sentence. The codes are `no_artifact`,
+  `manifest_unreadable`, `manifest_invalid`, `unsupported_schema_version`,
+  `model_file_missing`, `model_file_truncated` and `model_too_large`. They
+  describe the artifact's *condition* and never where it is kept.
 - When available: `model_name`, `display_name`, `task_type`, `target_column`,
   `classes` (empty for regression), `created_at`, `train_row_count`,
-  `primary_metric`, `primary_metric_value`, and `features[]` of
+  `test_row_count`, `primary_metric`, `primary_metric_value`,
+  `supports_probabilities`, `artifact_schema_version`, and `features[]` of
   `{name, kind, dtype}` — `kind` being which branch of the fitted preprocessing
   handles the column (`numeric`, `categorical`, `boolean`, `datetime`).
-- When unavailable, every descriptive field is `null` and `features` is empty —
-  deliberately not a placeholder schema, so a client that builds a form from
-  `features` builds nothing rather than a form whose requests cannot succeed.
+- When **not** available, every descriptive field is `null` and `features` is
+  empty — deliberately not a placeholder schema, so a client that builds a form
+  from `features` builds nothing rather than a form whose every submission
+  fails.
 
-**`available: false` is a 200.** "This run has no model" is an answer, not a
-failure. A 404 here means the experiment itself does not exist.
+Two of those fields exist to stop a specific misreading. `test_row_count`
+travels beside `primary_metric_value` because "0.87 f1" and "0.87 f1 on 60
+held-out rows" are different claims. `supports_probabilities` lets a client
+decide whether to render a probability section *before* predicting, rather than
+inferring it from a `null` afterwards.
+
+```json
+{ "experiment_id": "exp_1869526fc402_20260904T081814Z_9c78",
+  "status": "available", "available": true,
+  "reason_code": null, "reason": null, "max_records": 500,
+  "model_name": "random_forest_classifier",
+  "display_name": "Random Forest Classifier",
+  "task_type": "classification", "target_column": "renewed",
+  "classes": [0, 1],
+  "features": [{ "name": "tenure_months", "kind": "numeric", "dtype": "int64" }],
+  "train_row_count": 240, "test_row_count": 60,
+  "primary_metric": "f1", "primary_metric_value": 0.866,
+  "supports_probabilities": true, "artifact_schema_version": "1.0" }
+```
+
+**The check is cheap and shallow, deliberately.** The manifest is read and
+validated and the model file is checked for presence and for the size recorded
+at save time — nothing is unpickled, so a client may ask on every page load.
+The thorough checks, the SHA-256 digest and that the object really is a
+pipeline, need the file itself and happen when it is loaded. An artifact that
+passes the first and fails the second is reported by the endpoint that meets
+it, rather than papered over by a status call pretending to have looked.
 
 **Errors.** `404 experiment_not_found` · `400 invalid_experiment_id`.
 
@@ -341,11 +415,17 @@ confident prediction made without that value.
 - `prediction_count`.
 - `model` — `experiment_id`, `created_at`, `model_name`, `display_name`,
   `task_type`, `target_column`, `classes`, `features[]`, `train_row_count`,
-  `primary_metric` and `primary_metric_value`.
+  `test_row_count`, `primary_metric`, `primary_metric_value`,
+  `supports_probabilities` and `artifact_schema_version`.
 
-> `model.primary_metric_value` is the winner's score on the **held-out test
-> set**. It says how much to trust the model. It is not a confidence in this
-> prediction.
+> **Two numbers, two meanings, and they are easy to confuse.**
+> `model.primary_metric_value` is the winner's score over
+> `model.test_row_count` held-out rows: it says how much to trust *the model*.
+> `probabilities` is what the estimator reports for *this record* — useful for
+> seeing how close a decision was, and not a calibrated statement about how
+> often the model is right in the world. **Nothing in this response scores an
+> individual prediction**, and a client that labelled either number a
+> "confidence" would be claiming something the API does not measure.
 
 **Errors.**
 
@@ -356,12 +436,26 @@ confident prediction made without that value.
 | The run has no stored model | 409 | `model_not_available` |
 | A missing, unexpected or uncoercible feature; an empty or oversized batch; a record that is not an object | 422 | `invalid_prediction_input` |
 | Malformed JSON, or a body that is not a `records` list | 422 | `invalid_request` |
-| A stored artifact that cannot be read or verified | 500 | `model_artifact_unreadable` |
+| A stored artifact that fails its checks | 500 | `model_artifact_unreadable` |
 | The model raised while predicting | 500 | `prediction_failed` |
+| A body larger than `MAX_REQUEST_BODY_MB` | 413 | `request_body_too_large` |
 
-`model_not_available` is a **409, not a 404**, so "no such run" and "this run
-has no model" stay distinguishable — a run from before persistence existed, or
-one whose artifact was deleted, is reported rather than fabricated.
+Three of those are worth reading together, because they are the difference
+between "your request is wrong", "there is nothing to use", and "our file is
+broken":
+
+- `model_not_available` is a **409, not a 404**, so "no such run" and "this run
+  has no model" stay distinguishable — a run from before persistence existed,
+  or one whose artifact was deleted, is reported rather than fabricated.
+- `model_artifact_unreadable` is a **500** because nothing the caller changes
+  will help: the stored file is this service's own. Like every 5xx here it
+  answers with a generic message and no `details`; the specific reason goes to
+  the log, and to `GET .../model`, which reports it as `status: "corrupted"`
+  with a `reason_code` rather than as a failure. A prediction is refused at
+  that check, **before anything is deserialised**.
+- `request_body_too_large` bounds a request's *bytes*, which `max_records`
+  does not: a handful of records carrying very long strings is legal under a
+  row limit. See [Resource limits](#resource-limits).
 
 An `invalid_prediction_input` failure carries the reason in `details`: the
 `index` of the offending record, and then `missing_features` /
@@ -369,12 +463,32 @@ An `invalid_prediction_input` failure carries the reason in `details`: the
 the `expected` kind when a value could not be read as the type that column was
 trained as. A client can point at the box that is wrong.
 
+**A worked example**, from asking what the model wants to reading the answer:
+
 ```bash
-curl -H 'Content-Type: application/json' \
+EXPERIMENT=exp_1869526fc402_20260904T081814Z_9c78
+
+# 1. What does it expect, and can it be used at all?
+curl -s http://localhost:8000/api/v1/experiments/$EXPERIMENT/model
+# {"status":"available","target_column":"renewed","supports_probabilities":true,
+#  "features":[{"name":"tenure_months","kind":"numeric","dtype":"int64"}, ...],
+#  "primary_metric":"f1","primary_metric_value":0.866,"test_row_count":60, ...}
+
+# 2. Send one record with exactly those feature names. `null` means "missing".
+curl -s -H 'Content-Type: application/json' \
      -d '{"records": [{"tenure_months": 30, "monthly_spend": 34.89,
-                       "support_tickets": 2, "satisfaction_score": 6.7}]}' \
-     http://localhost:8000/api/v1/experiments/exp_.../predict
+                       "support_tickets": 2, "satisfaction_score": null}]}' \
+     http://localhost:8000/api/v1/experiments/$EXPERIMENT/predict
+# {"predictions":[{"index":0,"prediction":1,
+#                  "probabilities":{"0":0.26,"1":0.74}}],
+#  "prediction_count":1,
+#  "model":{"display_name":"Random Forest Classifier","primary_metric":"f1",
+#           "primary_metric_value":0.866,"test_row_count":60, ...}}
 ```
+
+The same request with a batch is the same shape: put more objects in `records`,
+get more objects in `predictions`, matched by `index`. On a deployment with
+`API_AUTH_ENABLED=true`, add `-H "Authorization: Bearer $API_AUTH_KEY"` to both.
 
 ---
 

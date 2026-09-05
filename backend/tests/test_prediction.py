@@ -9,11 +9,18 @@ The distinctions worth having are the ones a caller has to act on:
 
     unknown experiment              404  experiment_not_found
     known experiment, no model      409  model_not_available
+    known experiment, damaged model 500  model_artifact_unreadable
     model, bad records              422  invalid_prediction_input
     model, good records             200
+    body larger than the ceiling    413  request_body_too_large
 
 Collapsing the first two into one error would tell someone their run had
 vanished when it is sitting in the history, so each is asserted separately.
+
+The model endpoint answers the same question without failing: `available`,
+`not_available` and `corrupted` all arrive as **200**, because "this run
+cannot be predicted from" is an answer a client needs in order to render the
+right thing, and each of the three implies a different next step.
 
 **No path reaches this API and none leaves it.** A prediction request carries
 feature values and nothing else; the model is chosen by the id in the URL. The
@@ -34,6 +41,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.main import create_app
+from app.schemas.prediction import MAX_RECORDS_HARD_LIMIT
 from ml.artifacts import LocalModelArtifactStore
 from ml.artifacts.store import MANIFEST_FILENAME, MODEL_FILENAME
 
@@ -295,6 +303,192 @@ def test_asking_about_an_unknown_experiment_is_a_404(
 
 
 # ---------------------------------------------------------------------------
+# The model's lifecycle, over HTTP
+#
+# The endpoint reports three states and each one means a different next step.
+# What these tests pin is that the state is answered from the artifact as it is
+# *now* — every one of them changes something on disk and asks again.
+# ---------------------------------------------------------------------------
+
+
+def test_a_usable_model_reports_available_with_its_lifecycle_metadata(
+    predict_client: TestClient, classification_run: dict
+) -> None:
+    """Everything a client needs to describe the model, and nothing more."""
+    body = predict_client.get(
+        f"/api/v1/experiments/{classification_run['experiment_id']}/model"
+    ).json()
+
+    assert body["status"] == "available"
+    assert body["available"] is True
+    assert body["reason_code"] is None
+    assert body["reason"] is None
+
+    # What it is, what it predicts, and how well — with the sample size, so
+    # the score is not read as a claim of unknown weight.
+    assert body["model_name"] == "logistic_regression"
+    assert body["display_name"]
+    assert body["task_type"] == "classification"
+    assert body["target_column"] == "renewed"
+    assert body["train_row_count"] > 0
+    assert body["test_row_count"] > 0
+    assert body["primary_metric"]
+    assert body["primary_metric_value"] is not None
+    assert body["supports_probabilities"] is True
+    assert body["artifact_schema_version"] == "1.0"
+    assert body["created_at"]
+
+    # And nothing about the host or how the artifact is kept.
+    assert "environment" not in body
+    assert "random_state" not in body
+
+
+def test_a_regression_model_reports_no_classes_and_no_probabilities(
+    predict_client: TestClient, regression_run: dict
+) -> None:
+    """So a client knows not to render a probability section at all."""
+    body = predict_client.get(
+        f"/api/v1/experiments/{regression_run['experiment_id']}/model"
+    ).json()
+
+    assert body["status"] == "available"
+    assert body["classes"] == []
+    assert body["supports_probabilities"] is False
+
+
+def test_a_removed_artifact_reports_not_available_with_a_stable_code(
+    predict_client: TestClient, artifact_dir: Path
+) -> None:
+    """Absence is normal, and says so in a code as well as a sentence."""
+    record = run(
+        predict_client, CLASSIFICATION_CSV, "renewed", models=["logistic_regression"]
+    )
+    experiment_id = record["experiment_id"]
+    LocalModelArtifactStore(artifact_dir).delete(experiment_id)
+
+    body = predict_client.get(f"/api/v1/experiments/{experiment_id}/model").json()
+
+    assert body["status"] == "not_available"
+    assert body["available"] is False
+    assert body["reason_code"] == "no_artifact"
+    assert "re-run" in body["reason"].lower()
+    assert body["features"] == []
+    assert body["supports_probabilities"] is False
+
+
+def test_a_damaged_artifact_reports_corrupted_rather_than_missing(
+    predict_client: TestClient, artifact_dir: Path
+) -> None:
+    """The state a boolean could not express, and the reason it was added.
+
+    "No model" and "a broken model" have different fixes, and a dashboard that
+    tells someone to re-run an experiment when the real answer is that a file
+    is damaged has sent them to do the wrong thing.
+    """
+    record = run(
+        predict_client, CLASSIFICATION_CSV, "renewed", models=["logistic_regression"]
+    )
+    experiment_id = record["experiment_id"]
+    model = artifact_dir / experiment_id / MODEL_FILENAME
+    model.write_bytes(model.read_bytes()[:32])
+
+    body = predict_client.get(f"/api/v1/experiments/{experiment_id}/model").json()
+
+    assert body["status"] == "corrupted"
+    assert body["available"] is False
+    assert body["reason_code"] == "model_file_truncated"
+    # No schema is published for a model that cannot answer: a form built from
+    # one would have every submission fail.
+    assert body["features"] == []
+
+
+def test_an_artifact_from_a_newer_version_says_so_specifically(
+    predict_client: TestClient, artifact_dir: Path
+) -> None:
+    """Because the fix is to upgrade, not to re-run."""
+    record = run(
+        predict_client, CLASSIFICATION_CSV, "renewed", models=["logistic_regression"]
+    )
+    experiment_id = record["experiment_id"]
+    manifest = artifact_dir / experiment_id / MANIFEST_FILENAME
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["schema_version"] = "99.0"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    body = predict_client.get(f"/api/v1/experiments/{experiment_id}/model").json()
+
+    assert body["status"] == "corrupted"
+    assert body["reason_code"] == "unsupported_schema_version"
+    assert "newer version" in body["reason"]
+
+
+def test_an_unreadable_manifest_reports_corrupted_and_names_no_file(
+    predict_client: TestClient, artifact_dir: Path
+) -> None:
+    """A damaged artifact is described by its condition, never by its bytes."""
+    record = run(
+        predict_client, CLASSIFICATION_CSV, "renewed", models=["logistic_regression"]
+    )
+    experiment_id = record["experiment_id"]
+    (artifact_dir / experiment_id / MANIFEST_FILENAME).write_text("{ oops", "utf-8")
+
+    body = predict_client.get(f"/api/v1/experiments/{experiment_id}/model").json()
+
+    assert body["status"] == "corrupted"
+    assert body["reason_code"] == "manifest_unreadable"
+    rendered = json.dumps(body)
+    for leak in (MANIFEST_FILENAME, MODEL_FILENAME, "joblib", str(artifact_dir)):
+        assert leak not in rendered
+
+
+def test_a_corrupted_artifact_is_refused_by_predict_without_being_opened(
+    predict_client: TestClient, artifact_dir: Path
+) -> None:
+    """The two endpoints agree, because they ask the same question.
+
+    A prediction against a damaged artifact fails deterministically and with a
+    generic message — and it fails at the status check, before anything is
+    handed to the deserialiser.
+    """
+    record = run(
+        predict_client, CLASSIFICATION_CSV, "renewed", models=["logistic_regression"]
+    )
+    experiment_id = record["experiment_id"]
+    model = artifact_dir / experiment_id / MODEL_FILENAME
+    model.write_bytes(model.read_bytes()[:32])
+
+    status = predict_client.get(
+        f"/api/v1/experiments/{experiment_id}/model"
+    ).json()["status"]
+    response = predict_client.post(
+        f"/api/v1/experiments/{experiment_id}/predict",
+        json={"records": [{"income": 5, "tenure_months": 5, "segment": "a"}]},
+    )
+
+    assert status == "corrupted"
+    assert response.status_code == 500
+    body = response.json()
+    assert body["error"]["code"] == "model_artifact_unreadable"
+    assert body["error"]["details"] == {}
+
+
+def test_a_model_file_missing_beside_its_manifest_is_corrupted(
+    predict_client: TestClient, artifact_dir: Path
+) -> None:
+    """Not "never had one": the manifest is written second, so this is damage."""
+    record = run(
+        predict_client, CLASSIFICATION_CSV, "renewed", models=["logistic_regression"]
+    )
+    experiment_id = record["experiment_id"]
+    (artifact_dir / experiment_id / MODEL_FILENAME).unlink()
+
+    body = predict_client.get(f"/api/v1/experiments/{experiment_id}/model").json()
+
+    assert body["status"] == "corrupted"
+    assert body["reason_code"] == "model_file_missing"
+
+
+# ---------------------------------------------------------------------------
 # Predicting
 # ---------------------------------------------------------------------------
 
@@ -412,6 +606,191 @@ def test_a_malformed_request_is_refused_by_the_schema(
         response = predict_client.post(url, json=payload)
         assert response.status_code == 422, payload
         assert "error" in response.json()
+
+
+def test_an_empty_record_is_refused_as_a_missing_schema_not_an_empty_row(
+    predict_client: TestClient, classification_run: dict
+) -> None:
+    """`{}` is not "predict with defaults" — it is every feature missing.
+
+    Worth its own test because the alternative reading is tempting and wrong:
+    imputing every column would produce a confident prediction about nothing
+    in particular, which is exactly the outcome this endpoint refuses.
+    """
+    experiment_id = classification_run["experiment_id"]
+
+    response = predict_client.post(
+        f"/api/v1/experiments/{experiment_id}/predict", json={"records": [{}]}
+    )
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "invalid_prediction_input"
+    assert set(body["error"]["details"]["missing_features"]) == {
+        "income",
+        "tenure_months",
+        "segment",
+    }
+
+
+@pytest.mark.parametrize(
+    "value",
+    [{"nested": 1}, [1, 2, 3], True],
+    ids=["object", "list", "boolean for a numeric column"],
+)
+def test_a_malformed_feature_value_is_a_422_and_never_a_crash(
+    predict_client: TestClient, classification_run: dict, value: Any
+) -> None:
+    """JSON nests and a feature value does not.
+
+    A list reaching a coercion written for scalars is the sort of input that
+    produces an ambiguous-truth-value `ValueError` deep in pandas and a 500 at
+    the edge. It is refused by name instead. (A boolean *is* accepted for a
+    numeric column — `True` is 1 — so that case asserts a 200; it is here to
+    keep the parametrisation honest about which values are actually refused.)
+    """
+    experiment_id = classification_run["experiment_id"]
+    record = {**a_record(predict_client, experiment_id), "income": value}
+
+    response = predict_client.post(
+        f"/api/v1/experiments/{experiment_id}/predict", json={"records": [record]}
+    )
+
+    if isinstance(value, bool):
+        assert response.status_code == 200
+        return
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_prediction_input"
+
+
+# ---------------------------------------------------------------------------
+# Resource protection
+#
+# Two ceilings in two dimensions, because one of them alone is not a bound.
+# The record limit stops a long batch; the body limit stops a short one made
+# of very large values. No rate limiting is implemented — see
+# `docs/PRODUCTION_READINESS.md`, which says so rather than implying otherwise.
+# ---------------------------------------------------------------------------
+
+
+def test_a_batch_beyond_the_configured_ceiling_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The limit is the configured one, not a constant in the route.
+
+    Set low deliberately: a test that had to build five hundred records to
+    prove a five-hundred-record limit would be proving something about the
+    default rather than about the mechanism.
+    """
+    settings = Settings(
+        experiment_store_dir=tmp_path / "runs",
+        model_artifact_dir=tmp_path / "models",
+        max_prediction_records=3,
+    )
+
+    with TestClient(create_app(settings)) as client:
+        record = run(
+            client, CLASSIFICATION_CSV, "renewed", models=["logistic_regression"]
+        )
+        experiment_id = record["experiment_id"]
+        url = f"/api/v1/experiments/{experiment_id}/predict"
+        one = a_record(client, experiment_id)
+
+        assert client.get(f"/api/v1/experiments/{experiment_id}/model").json()[
+            "max_records"
+        ] == 3
+
+        within = client.post(url, json={"records": [one] * 3})
+        beyond = client.post(url, json={"records": [one] * 4})
+
+    assert within.status_code == 200
+    assert within.json()["prediction_count"] == 3
+
+    assert beyond.status_code == 422
+    body = beyond.json()
+    assert body["error"]["code"] == "invalid_prediction_input"
+    assert body["error"]["details"]["maximum"] == 3
+    assert body["error"]["details"]["record_count"] == 4
+
+
+def test_the_schema_refuses_an_absurd_batch_before_a_list_is_built(
+    predict_client: TestClient, classification_run: dict
+) -> None:
+    """A second ceiling, in the request contract itself.
+
+    The configured limit is checked after the body has been parsed into
+    dictionaries. This one is checked by the schema, so a caller sending a
+    million records is refused without a million dictionaries existing first.
+    """
+    experiment_id = classification_run["experiment_id"]
+
+    response = predict_client.post(
+        f"/api/v1/experiments/{experiment_id}/predict",
+        json={"records": [{"income": 1}] * (MAX_RECORDS_HARD_LIMIT + 1)},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_a_body_larger_than_the_limit_is_refused_before_it_is_parsed(
+    tmp_path: Path,
+) -> None:
+    """The bound the record ceiling does not provide.
+
+    Five hundred records is a limit on rows and says nothing about their size:
+    a handful of records carrying very long strings is legal under it and
+    unbounded under any other measure. Bodies are bounded too, and the refusal
+    uses the same envelope as every other failure so a client parses it the
+    same way.
+    """
+    settings = Settings(
+        experiment_store_dir=tmp_path / "runs",
+        model_artifact_dir=tmp_path / "models",
+        max_request_body_bytes=4096,
+    )
+
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            "/api/v1/experiments/exp_anything/predict",
+            json={"records": [{"income": "x" * 20_000}]},
+        )
+        # A small body on the same client still reaches the application, so
+        # the limit is a limit and not a closed door.
+        small = client.post(
+            "/api/v1/experiments/exp_anything/predict",
+            json={"records": [{"income": 1}]},
+        )
+
+    assert response.status_code == 413
+    body = response.json()
+    assert body["error"]["code"] == "request_body_too_large"
+    assert body["error"]["details"]["max_bytes"] == 4096
+    assert response.headers.get("X-Request-ID")
+
+    assert small.status_code == 404
+
+
+def test_the_body_limit_leaves_dataset_uploads_alone(tmp_path: Path) -> None:
+    """Uploads have their own, larger limit and their own streaming reader.
+
+    A second ceiling over the top of them would be a confusing way to change
+    `MAX_UPLOAD_MB`, so multipart requests are passed straight through.
+    """
+    settings = Settings(
+        experiment_store_dir=tmp_path / "runs",
+        model_artifact_dir=tmp_path / "models",
+        max_request_body_bytes=1024,
+    )
+
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            "/api/v1/datasets/profile",
+            files={"file": ("data.csv", io.BytesIO(CLASSIFICATION_CSV), "text/csv")},
+        )
+
+    assert len(CLASSIFICATION_CSV) > 1024
+    assert response.status_code == 200
 
 
 def test_predicting_from_an_experiment_with_no_model_is_a_409(

@@ -94,14 +94,33 @@ class PredictedModel(BaseModel):
     )
     features: list[PredictedFeature] = Field(default_factory=list)
     train_row_count: int
+    test_row_count: int | None = Field(
+        None,
+        description=(
+            "How many held-out rows the metric below was measured on. A score "
+            "without its sample size overstates what is known about it."
+        ),
+    )
     primary_metric: str
     primary_metric_value: float | None = Field(
         None,
         description=(
             "The winner's score on the **held-out test set**, carried so a "
-            "caller can see how much to trust a prediction. It is a "
-            "measurement of the model, not of this prediction."
+            "caller can see how much to trust the model. It is a measurement "
+            "of the model over many rows, **not a confidence in this "
+            "prediction** — nothing here scores an individual answer."
         ),
+    )
+    supports_probabilities: bool = Field(
+        False,
+        description=(
+            "Whether this model can report a probability per class. False for "
+            "regression, and for a classifier whose estimator does not provide "
+            "them — in which case `probabilities` is null on every item."
+        ),
+    )
+    artifact_schema_version: str | None = Field(
+        None, description="Which manifest shape the stored artifact uses."
     )
 
 
@@ -128,7 +147,10 @@ class PredictionItem(BaseModel):
         description=(
             "Probability per class label, for a classifier whose estimator "
             "provides them. `null` for regression, and for a classifier that "
-            "does not."
+            "does not. **These are the model's own outputs**, produced by the "
+            "same fitted estimator that chose the label — useful for seeing "
+            "how close a decision was, and not a calibrated statement about "
+            "how often the model is right in the world."
         ),
     )
 
@@ -146,12 +168,12 @@ class ModelAvailability(BaseModel):
 
     Answered from the **artifact store**, not from the experiment record: the
     record says a model was written when the run finished, and this says
-    whether one is there now.
+    whether one is usable now.
 
-    When no model is available every descriptive field is null and ``features``
-    is empty, rather than a placeholder schema — so a client that renders a
-    form from ``features`` renders nothing, instead of an empty form that could
-    not work.
+    When no model is usable every descriptive field is null and ``features`` is
+    empty, rather than a placeholder schema — so a client that renders a form
+    from ``features`` renders nothing, instead of an empty form whose every
+    submission would fail.
     """
 
     # Every key the service produces is declared below, so `forbid` is a real
@@ -160,12 +182,43 @@ class ModelAvailability(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     experiment_id: str
+    status: str = Field(
+        ...,
+        description=(
+            "The model's lifecycle state: `available` — a usable model is "
+            "stored; `not_available` — this run has no artifact, which is "
+            "normal for one recorded before model persistence existed or one "
+            "whose artifact was removed; `corrupted` — an artifact is stored "
+            "and does not check out. All three are 200 responses: whether a "
+            "run can be predicted from is an answer, not a failure. Only an "
+            "unknown experiment is a 404."
+        ),
+        examples=["available"],
+    )
     available: bool = Field(
-        ..., description="Whether a stored model is present for this experiment."
+        ...,
+        description=(
+            "Whether a prediction can be attempted — `status == \"available\"`, "
+            "kept as a boolean for a client that only needs to branch."
+        ),
+    )
+    reason_code: str | None = Field(
+        None,
+        description=(
+            "Why no model is usable, as a stable code to branch on: "
+            "`no_artifact`, `manifest_unreadable`, `manifest_invalid`, "
+            "`unsupported_schema_version`, `model_file_missing`, "
+            "`model_file_truncated` or `model_too_large`. `null` when the "
+            "model is available. It describes the artifact's condition and "
+            "never where it is kept."
+        ),
     )
     reason: str | None = Field(
         None,
-        description="Why prediction is unavailable, when it is. `null` otherwise.",
+        description=(
+            "The same thing as a sentence for a person, ending in what to do "
+            "about it. `null` when the model is available."
+        ),
     )
     max_records: int = Field(
         ..., description="Most records one prediction request may carry."
@@ -176,10 +229,41 @@ class ModelAvailability(BaseModel):
     target_column: str | None = None
     classes: list[JsonValue] = Field(default_factory=list)
     features: list[PredictedFeature] = Field(default_factory=list)
-    created_at: str | None = None
+    created_at: str | None = Field(
+        None, description="When the model artifact was written."
+    )
     train_row_count: int | None = None
+    test_row_count: int | None = Field(
+        None,
+        description=(
+            "How many held-out rows `primary_metric_value` was measured on. "
+            "Carried beside the metric because a score without its sample "
+            "size overstates what is known."
+        ),
+    )
     primary_metric: str | None = None
-    primary_metric_value: float | None = None
+    primary_metric_value: float | None = Field(
+        None,
+        description=(
+            "The winner's score on the **held-out test set**. A measurement of "
+            "the model, not a confidence in any prediction it goes on to make."
+        ),
+    )
+    supports_probabilities: bool = Field(
+        False,
+        description=(
+            "Whether a prediction from this model can carry a probability per "
+            "class. False for regression, and for a classifier whose estimator "
+            "does not provide them."
+        ),
+    )
+    artifact_schema_version: str | None = Field(
+        None,
+        description=(
+            "Which manifest shape the stored artifact uses. Present when a "
+            "model is available."
+        ),
+    )
 
 
 __all__ = [

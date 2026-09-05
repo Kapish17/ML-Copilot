@@ -266,13 +266,17 @@ curl -sS --max-time 60 "${AUTH_HEADER[@]}" \
 AVAILABLE="$(read_json "$WORK_DIR/model.json" 'str(data["available"]).lower()')"
 
 if [ "$AVAILABLE" != "true" ]; then
-    note "no model stored: $(read_json "$WORK_DIR/model.json" 'data.get("reason") or "?"')"
+    # Three states, not a boolean: `not_available` is a run from before model
+    # persistence existed, `corrupted` is a stored artifact that does not check
+    # out, and they have different fixes.
+    note "$(read_json "$WORK_DIR/model.json" '"%s (%s): %s" % (data["status"], data.get("reason_code") or "?", data.get("reason") or "?")')"
 elif [ "${DATASET##*.}" != "csv" ]; then
     note "skipped: this step reads its example row from a CSV, and DATASET is not one"
 else
     read_json "$WORK_DIR/model.json" '
-"  %s predicts %r from %d feature(s)" % (
-    data["display_name"], data["target_column"], len(data["features"]))'
+"  %s predicts %r from %d feature(s); scored %.4f %s on %d held-out rows" % (
+    data["display_name"], data["target_column"], len(data["features"]),
+    data["primary_metric_value"], data["primary_metric"], data["test_row_count"])'
 
     # One record, built from the first row of the demo file and narrowed to
     # exactly the features the model declares. A feature the model was not

@@ -1135,6 +1135,23 @@ filesystem implementation. A model is written after `os.replace`, so an
 interrupted save leaves no half-file, and the manifest is written second — an
 artifact without its manifest is unreadable rather than half-trusted.
 
+**Three states, decided once.** `store.status(experiment_id)` returns
+`available`, `not_available` or `corrupted`, and it is the only code that
+decides which — `exists()` is a reading of it, and both prediction endpoints
+answer from it, so two callers cannot disagree about the same directory. The
+check is cheap and shallow on purpose: the manifest is parsed and validated and
+the model file is checked for presence and for the size the manifest recorded,
+with nothing unpickled, so asking costs a JSON read and a `stat`. The deep
+checks — the SHA-256 digest and that the object really is a `Pipeline` — need
+the file itself and belong to `load`.
+
+`not_available` and `corrupted` are kept apart because their fixes differ, and
+`reason_code` carries which kind: `no_artifact`, `manifest_unreadable`,
+`manifest_invalid`, `unsupported_schema_version`, `model_file_missing`,
+`model_file_truncated`, `model_too_large`. The codes are stable strings; the
+sentence a person reads is composed in the backend, which is the layer that
+knows there is a person.
+
 **Validation is strict in both directions.** Every trained-on feature must be
 present in a record; one the model was *not* trained on is refused rather than
 ignored, because the fitted `ColumnTransformer` uses `remainder="drop"` and

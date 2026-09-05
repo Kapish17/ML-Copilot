@@ -356,13 +356,20 @@ so the error a caller gets is the first thing actually wrong: does the
 experiment exist (404), does it have a stored model (409), are the records
 valid for that model's schema (422), then predict.
 
-Three things about it are deliberate:
+Four things about it are deliberate:
 
 - **The store is the authority, the record is a note.** `GET .../model` asks
-  the store, so an artifact deleted after the run reports `available: false`
+  the store, so an artifact deleted after the run reports `not_available`
   while the record still truthfully says a model was written.
-- **`model_not_available` is 409, not 404**, so "no such run" and "this run has
-  no model" stay distinguishable.
+- **One status call, read by both routes.** `describe` and `predict` ask the
+  store the same question and get the same answer, so the endpoint that offers
+  a form and the endpoint that answers it cannot disagree — and a prediction
+  against a damaged artifact is refused *before* anything is deserialised.
+- **`model_not_available` is 409, a damaged artifact is 500.** The first is the
+  caller's to act on and nobody's fault; the second is this service's own
+  broken file, which nothing the caller changes will fix. Collapsing them would
+  send someone to re-run an experiment when the answer is that a file is
+  damaged, or the reverse.
 - **Nothing here handles a path.** The service receives an experiment id and a
   list of records. It has no way to name a file and no field that could carry
   one; the store validates the id and re-checks the resolved directory against
@@ -711,6 +718,7 @@ or a network.
 | `EXPLANATION_ROWS` | `500` | Rows SHAP values are computed over |
 | `MODEL_ARTIFACT_DIR` | `ml/experiments/models` | Where trained model artifacts are written |
 | `MAX_PREDICTION_RECORDS` | `500` | Most records one prediction request may carry |
+| `MAX_REQUEST_BODY_MB` | `10` | Largest JSON body the API reads. Multipart uploads are exempt and keep `MAX_UPLOAD_MB` |
 
 Profiling thresholds, explanation limits, page sizes and the comparison limit
 are fields on `Settings` in `app/core/config.py`, each with a named default

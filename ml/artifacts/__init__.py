@@ -11,7 +11,8 @@ rebuild: the object saved here is the object the experiment fitted, and the
 object a prediction runs through later is the same one, unchanged.
 
     ml.artifacts.schema      what a model must remember about itself
-    ml.artifacts.store       where it is kept, and the rules for loading it
+    ml.artifacts.store       where it is kept, the rules for loading it, and
+                             the one check that decides whether it is usable
     ml.artifacts.prediction  validating records, and predicting from them
 
 Two things worth reading before changing anything here: the trust boundary at
@@ -41,6 +42,10 @@ from ml.artifacts.schema import (
 from ml.artifacts.store import (
     MANIFEST_FILENAME,
     MODEL_FILENAME,
+    STATE_AVAILABLE,
+    STATE_CORRUPTED,
+    STATE_NOT_AVAILABLE,
+    ArtifactStatus,
     LoadedModel,
     LocalModelArtifactStore,
     ModelArtifactStore,
@@ -51,6 +56,10 @@ __all__ = [
     "DEFAULT_MAX_RECORDS",
     "MANIFEST_FILENAME",
     "MODEL_FILENAME",
+    "STATE_AVAILABLE",
+    "STATE_CORRUPTED",
+    "STATE_NOT_AVAILABLE",
+    "ArtifactStatus",
     "FeatureSpec",
     "LoadedModel",
     "LocalModelArtifactStore",

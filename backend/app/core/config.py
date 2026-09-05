@@ -93,6 +93,21 @@ DEFAULT_EXPLANATION_TOP_FEATURES = 50
 #: than training, but it is still synchronous and still holds a worker, so it
 #: is bounded like every other path that does real work.
 DEFAULT_MAX_PREDICTION_RECORDS = 500
+#: Largest JSON request body the API will read, in megabytes.
+#:
+#: The record ceiling above bounds a prediction request's *rows* and says
+#: nothing about its *bytes*: five hundred records each holding a ten-megabyte
+#: string is a legal request under that limit and five gigabytes of memory
+#: before any validation runs, because the body is parsed before a handler
+#: sees it. This is the matching bound in the other dimension, and it is the
+#: same idea as ``MAX_UPLOAD_MB`` applied to the one body shape that does not
+#: go through the upload path.
+#:
+#: Ten megabytes is roughly twenty thousand records of a wide dataset — far
+#: above any honest use of a five-hundred-row endpoint, and far below what
+#: would hurt. **Multipart uploads are not subject to it**; they have their own
+#: larger limit and their own reader.
+DEFAULT_MAX_REQUEST_BODY_MB = 10
 #: History listing.
 DEFAULT_EXPERIMENT_PAGE_LIMIT = 50
 DEFAULT_MAX_EXPERIMENT_PAGE_LIMIT = 200
@@ -196,6 +211,8 @@ class Settings:
     max_dataset_rows: int = DEFAULT_MAX_DATASET_ROWS
     max_dataset_columns: int = DEFAULT_MAX_DATASET_COLUMNS
     supported_dataset_extensions: tuple[str, ...] = SUPPORTED_DATASET_EXTENSIONS
+    #: Applies to JSON bodies only; multipart uploads keep ``max_upload_bytes``.
+    max_request_body_bytes: int = DEFAULT_MAX_REQUEST_BODY_MB * BYTES_PER_MB
 
     # API authentication
     api_auth_enabled: bool = DEFAULT_API_AUTH_ENABLED
@@ -305,6 +322,9 @@ def get_settings() -> Settings:
         # is an afternoon nobody gets back.
         api_auth_key=os.getenv("API_AUTH_KEY", "").strip(),
         max_upload_bytes=_env_int("MAX_UPLOAD_MB", DEFAULT_MAX_UPLOAD_MB) * BYTES_PER_MB,
+        max_request_body_bytes=(
+            _env_int("MAX_REQUEST_BODY_MB", DEFAULT_MAX_REQUEST_BODY_MB) * BYTES_PER_MB
+        ),
         cors_allow_origins=_env_origins(
             "CORS_ALLOW_ORIGINS", DEFAULT_CORS_ALLOW_ORIGINS
         ),

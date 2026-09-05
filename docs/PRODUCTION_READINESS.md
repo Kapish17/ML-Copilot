@@ -38,7 +38,7 @@ This document is the checklist. Anything unticked is stated as unticked.
 | ✅ | **CI needs no secret.** `contents: read`, nothing read from `secrets.`, so it works unchanged on a fork. | `.github/workflows/ci.yml` |
 | ❌ | **Identity and authorisation.** The API key admits a caller; it does not say *who*. No users, no roles, no sessions, no expiry, and no revocation short of changing the key and restarting. Everyone holding it is the same caller and the log cannot tell them apart. | — |
 | ❌ | **TLS.** The stack speaks plain HTTP, and **a bearer token is a password sent on every request** — over plain HTTP anyone on the path reads it once and has it forever. Terminate TLS in front: `Client ──HTTPS──▶ reverse proxy ──HTTP──▶ FastAPI`. No proxy is included here. | — |
-| ⚠️ | **Resource protection is per request, not per caller.** Every expensive path is already bounded, and those bounds are why no new limit was added alongside authentication: upload size (`MAX_UPLOAD_MB`), parsed shape (`MAX_DATASET_ROWS`, `MAX_DATASET_COLUMNS`), what an experiment may run on (`MAX_EXPERIMENT_ROWS`, `MAX_CV_FOLDS`, `MAX_CANDIDATE_MODELS`), what SHAP may explain (`EXPLANATION_ROWS`), the agent's ceilings (`AGENT_MAX_TOOL_CALLS`, `AGENT_MAX_ITERATIONS`, `AGENT_MAX_CONTEXT_CHARS` — a request may lower these and never raise them), and retrieval's `RAG_MAX_TOP_K` and `RAG_MAX_QUERY_LENGTH`. **What none of them bounds is a rate**: nothing stops one holder of the key from sending the same bounded request a thousand times. | `backend/app/core/config.py` |
+| ⚠️ | **Resource protection is per request, not per caller.** Every expensive path is bounded: upload size (`MAX_UPLOAD_MB`), **any JSON body** (`MAX_REQUEST_BODY_MB`, enforced in middleware because a body is parsed before route code could object — multipart uploads are exempt and keep their own limit), parsed shape (`MAX_DATASET_ROWS`, `MAX_DATASET_COLUMNS`), what an experiment may run on (`MAX_EXPERIMENT_ROWS`, `MAX_CV_FOLDS`, `MAX_CANDIDATE_MODELS`), what SHAP may explain (`EXPLANATION_ROWS`), a prediction batch (`MAX_PREDICTION_RECORDS`, with a hard schema ceiling above it so an absurd batch is refused before a list that size is built), the agent's ceilings (`AGENT_MAX_TOOL_CALLS`, `AGENT_MAX_ITERATIONS`, `AGENT_MAX_CONTEXT_CHARS` — a request may lower these and never raise them), and retrieval's `RAG_MAX_TOP_K` and `RAG_MAX_QUERY_LENGTH`. Rows and bytes are bounded separately because one is not the other: five hundred records each carrying a very long string is legal under a row limit. **What none of them bounds is a rate**: nothing stops one holder of the key from sending the same bounded request a thousand times. | `backend/app/core/config.py`, `backend/app/api/middleware.py` |
 | ❌ | **Rate limiting.** Deliberately absent. Doing it properly across replicas needs shared state, and adding Redis to a single-container local tool would be more attack surface than it removes. | — |
 | ❌ | **Secret management.** The credential comes from a `.env` file. No vault, no rotation, no per-tenant keys. | — |
 | ❌ | **Static analysis and image scanning.** The audits read dependency manifests, not this project's own code or its built images. | — |
@@ -88,9 +88,11 @@ that looks excellent and means nothing.
 | ✅ | **Prediction reuses the fitted preprocessing.** What is persisted is the complete `Pipeline` the run produced — preprocessing *as fitted on the training rows*, plus the retrained estimator. A prediction calls that object. **Nothing is re-fitted and nothing is reassembled from the record**, and a test proves it by making `fit` and `fit_transform` raise for the duration of a prediction. | Re-fitting on request data would apply a different transformation from the one the held-out score was measured through, making the reported score a claim about a model that no longer exists. |
 | ✅ | **Persistence happens only after a successful run.** The artifact is written after evaluation completes, so a failed or incomplete run leaves nothing behind that could be predicted from. A failed *write* is a warning, not a failed experiment. | A model saved before it was evaluated is a model no one has measured. |
 | ✅ | **A missing model is reported, not fabricated.** A run recorded before persistence existed, or one whose artifact was removed, answers `model_not_available`. Nothing is reconstructed after the fact. | A retroactively rebuilt artifact would not be the model the record's score describes. |
-| ⚠️ | **The feature schema is enforced, and unexpected columns are refused.** Every trained-on feature must be present; one the model does not know is rejected rather than dropped. Marked ⚠️ because that is *schema* validation, not distribution validation: a value inside the trained dtype but far outside the training range is accepted and predicted on. | The fitted `ColumnTransformer` drops an unknown column, so a misspelt name would otherwise yield a confident prediction made without that value. |
+| ⚠️ | **The feature schema is enforced, and unexpected columns are refused.** Every trained-on feature must be present; one the model does not know is rejected rather than dropped. A value that is not the kind of thing its column was trained as is refused by name, and a list or an object where a value belongs is refused rather than reaching pandas. Marked ⚠️ because that is *schema* validation, not distribution validation: a value inside the trained dtype but far outside the training range is accepted and predicted on. | The fitted `ColumnTransformer` drops an unknown column, so a misspelt name would otherwise yield a confident prediction made without that value. |
+| ✅ | **One check decides whether a model is usable.** `available`, `not_available` or `corrupted`, computed in one place and read by everything: the model endpoint reports it, `exists()` is a reading of it, and a prediction is refused on it **before anything is deserialised**. The check is shallow by design — the manifest and the file's recorded size, no unpickling — with the digest and the type check at load. | Two callers answering "is there a usable model?" separately is how a dashboard comes to offer a form for a model that had already gone. |
+| ✅ | **A damaged artifact is a 500, a missing one is a 409.** Nothing a caller changes fixes a broken stored file, so it is not reported as their mistake; the generic message goes to them and the specific reason to the log and to the model endpoint's `reason_code`. | Collapsing the two would tell someone to re-run an experiment when the real answer is "upgrade the service", or the reverse. |
 | ❌ | **Model registry, versioning and rollback.** One artifact per experiment, on a local volume. No MLflow, no registry, no promotion, no rollback, no sharing between replicas. | A model here is reproducible from its record, not managed as a release. |
-| ❌ | **Prediction monitoring.** Nothing records what was predicted, or compares live inputs against the training distribution. | Drift is invisible; see the row below. |
+| ❌ | **Prediction monitoring.** Nothing records what was predicted, or compares live inputs against the training distribution. There is no prediction history and no store for one. | Drift is invisible; see the row below. |
 | ❌ | **Drift, monitoring, fairness analysis.** None. | — |
 
 ---
@@ -113,7 +115,13 @@ Stated plainly, in one place:
   backend-for-frontend. Neither is included.
 - **No rate limiting.** The key stops a stranger from spending your CPU; it
   does nothing about the holder of the key doing so. The hard budgets are what
-  bound that, and they bound one request at a time, not a rate.
+  bound that, and they bound one request at a time, not a rate. Prediction is
+  bounded in both dimensions that matter for one request — records and bytes —
+  and in neither dimension that matters for many of them.
+- **Nothing is recorded about a prediction.** No history, no drift detection,
+  no comparison of a submitted record against the training distribution. A
+  record is checked against the model's *schema*, so a value of the right type
+  and an implausible size is accepted and predicted on.
 - **No TLS or reverse proxy.** Plain HTTP — and a bearer credential over plain
   HTTP is readable by anyone on the path, so authentication and TLS are one
   decision, not two.
@@ -125,13 +133,15 @@ Stated plainly, in one place:
   registry, no promotion or rollback, no versioning beyond one artifact per
   experiment, and no sharing between replicas — the artifact volume belongs to
   one container. Prediction is synchronous and capped at
-  `MAX_PREDICTION_RECORDS` (default 500) per request. **Only artifacts this
-  application wrote are ever loaded; uploading a model file is not supported**,
-  and an artifact is `joblib`, so it is portable only to a compatible
-  scikit-learn.
+  `MAX_PREDICTION_RECORDS` (default 500) records and `MAX_REQUEST_BODY_MB`
+  (default 10) of body per request. **Only artifacts this application wrote are
+  ever loaded; uploading a model file is not supported**, and an artifact is
+  `joblib`, so it is portable only to a compatible scikit-learn.
 - **Removing the artifact volume removes the models.** The records survive
-  independently and remain readable; the runs then report
-  `model_not_available` rather than a model rebuilt after the fact.
+  independently and remain readable; the runs then report `not_available`
+  rather than a model rebuilt after the fact. An artifact that is present and
+  does not check out reports `corrupted`, separately, because the fix is
+  different — and a prediction against either is refused rather than attempted.
 - **No horizontal scaling.** One backend container owns the local store and the
   local index.
 - **Local storage.** Experiment records are JSON files on a volume. No
