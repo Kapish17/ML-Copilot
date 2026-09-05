@@ -13,6 +13,7 @@ import { ExperimentSummary } from "@/components/experiments/ExperimentSummary";
 import { MetricsPanel } from "@/components/experiments/MetricsPanel";
 import { ModelComparisonTable } from "@/components/experiments/ModelComparisonTable";
 import { PredictionPanel } from "@/components/experiments/PredictionPanel";
+import { RunDiagnostics } from "@/components/experiments/RunDiagnostics";
 import { GlobalImportance } from "@/components/explainability/GlobalImportance";
 import { QualityFindings } from "@/components/dataset/QualityFindings";
 import { getExperiment } from "@/lib/api/experiments";
@@ -96,6 +97,18 @@ export default function ExperimentDetailPage() {
                   id: "metrics",
                   label: "Metrics",
                   content: <MetricsPanel evaluation={record.evaluation} />,
+                },
+                {
+                  id: "diagnostics",
+                  label: "Diagnostics",
+                  // Hidden when nothing was flagged: a "0" beside the label
+                  // reads as a score, not as an absence.
+                  badge: record.evaluation.diagnostics?.length || undefined,
+                  content: (
+                    <RunDiagnostics
+                      diagnostics={record.evaluation.diagnostics}
+                    />
+                  ),
                 },
                 {
                   id: "explain",

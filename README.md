@@ -120,6 +120,8 @@ Full detail, including the ingestion adapters, storage and deployment:
 | **Leakage prevention** | Structural, not procedural. The train/test split happens before anything is fitted; every transformer is fitted on training rows only; the fitted preprocessing travels inside the model artefact so scoring cannot diverge from training. |
 | **Model selection** | Six models, cross-validated on the **training rows only**, with fold-level scores, mean and spread. The winner is chosen from CV scores and never from the test set. |
 | **Unbiased evaluation** | The winner is retrained on the full training set and measured **once** on the untouched test set, against a naive baseline, with metric direction carried alongside so nothing assumes higher is better. |
+| **An explained choice** | Every record says in one sentence why the winner won and on which score — *"Random Forest Classifier selected because it achieved the best cross-validation F1 over 5 folds (0.8658 ± 0.0391) among 3 candidate models"* — composed from the recorded numbers by the ML layer, **never written by a language model**, and never a claim about whether the winner is any good. |
+| **Diagnostics that hedge on purpose** | Nine checks read a finished run's own numbers and name what is worth a second look: a gap between the cross-validated and held-out scores, folds that disagreed, a small dataset or split, a dominant class, a class missing from the test rows, an undefined metric, a baseline not beaten, a selection that spent the test set. They are **signals, not verdicts** — *"potential overfitting signal"*, never *"the model is overfit"* — they change no score and fail nothing, and a test asserts the verdict words are absent from every message. |
 | **Explainability** | SHAP over the transformed features with readable names, global ranked importance and signed per-prediction contributions, and a permutation fallback for models SHAP cannot handle. A failed explanation is a status, not a 500. |
 | **Experiment tracking** | Versioned JSON records: fingerprint, every preprocessing decision, candidate results, both scores, the baseline, the explanation, and the environment. Atomic writes. **No dataset rows are stored** — the record holds column names and statistics, never a cell. |
 | **Model persistence** | A successful run's winning `Pipeline` — the preprocessing *as fitted*, plus the retrained estimator — is written to an application-owned artifact directory beside a manifest of the feature schema, checksummed and verified on load. Written only after evaluation succeeds; a failed write is a warning, not a failed experiment. |
@@ -176,6 +178,14 @@ cross-validated F1 near **0.866 ± 0.039**, scored on training folds only, with
 **7 · Read the held-out score.** Expect a test F1 near **0.866** on 60 rows no
 model saw, against a majority-class baseline of **0.846** — an improvement of
 about two points. That baseline is why the raw number is not the story.
+
+Under the two scores, the run says in one sentence **why that model won** —
+composed from the numbers above it, not written by a language model — and the
+**Diagnostics** tab says what is worth a second look. On this dataset expect
+nothing flagged: 300 rows, a 60-row held-out split, a near-balanced target and
+a cross-validated score the held-out measurement matches. Re-run it with
+`strategy=holdout` to see the other case, where the run reports that the score
+which measured the model also chose it.
 
 **8 · Open the SHAP explanation.** Expect `tenure_months` (0.084),
 `logins_last_30d` (0.061) and `support_tickets` (0.048) at the top — exactly
@@ -583,7 +593,13 @@ reading.
 - **Runs recorded before persistence existed have no model.** They report
   `model_not_available` rather than an artifact conjured after the fact.
 - **No hyperparameter optimisation.** Six scikit-learn estimators at their
-  defaults. No Optuna, no grid search, no XGBoost or LightGBM.
+  defaults. No Optuna, no grid search, no XGBoost or LightGBM. The upside is
+  that there is nothing to tune on the test set; the reported scores are for
+  untuned models and should be read that way.
+- **Diagnostics are thresholds, not statistics.** Nine checks against round,
+  documented constants. No significance test, no correction for multiple
+  comparisons, no power analysis — and a check that has not fired is not
+  evidence of health, which is what the empty state says.
 - **No database and no vector database.** Records and the index are local
   files. No PostgreSQL, no MLflow, no Qdrant.
 - **No horizontal scaling, no cloud deployment, no multi-architecture images.**

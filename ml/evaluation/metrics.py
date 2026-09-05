@@ -151,9 +151,84 @@ DEFAULT_PRIMARY_METRIC = {
 }
 
 
+#: Every defined metric, indexed by key. Keys are unique across tasks, which
+#: lets a label be found without knowing which task produced the number.
+_METRICS_BY_KEY = {
+    definition.key: definition
+    for definitions in _METRICS_BY_TASK.values()
+    for definition in definitions
+}
+
+
 def metrics_for_task(task_type: TaskType) -> tuple[MetricDefinition, ...]:
     """Return every metric defined for a task type."""
     return _METRICS_BY_TASK.get(task_type, ())
+
+
+def metric_label(key: str) -> str:
+    """Return a metric's display name for a heading or a sentence.
+
+    Anything reading a stored record — a comparison table, an experiment
+    summary — has the metric key but not always the task that produced it, and
+    ``CV F1`` reads better than ``CV f1``.
+
+    Args:
+        key: A metric identifier such as ``"f1"`` or ``"rmse"``.
+
+    Returns:
+        str: The display name, or the key unchanged when no metric of that
+        name is defined. Unlike :func:`get_metric` this never raises: a label
+        is presentation, and a record naming a metric this code no longer
+        defines should still be readable.
+    """
+    definition = _METRICS_BY_KEY.get(key)
+    return definition.display_name if definition is not None else key
+
+
+def format_metric_value(
+    value: Any, *, digits: int = 4, missing: str = "-"
+) -> str:
+    """Render one metric value for a table or a sentence.
+
+    Args:
+        value: The number, or ``None`` when the metric was not available.
+        digits: Decimal places for values below a thousand. Larger values —
+            an RMSE in dollars, say — are shown with thousands separators and
+            two decimals instead, where four would be noise.
+        missing: What to print when there is no number.
+
+    Returns:
+        str: The formatted value, or ``missing``. A non-finite value is
+        treated as missing rather than printed as ``nan``.
+    """
+    number = _finite(value)
+    if number is None:
+        return missing
+    if abs(number) >= 1000:
+        return f"{number:,.2f}"
+    return f"{number:.{digits}f}"
+
+
+def format_metric_spread(
+    value: Any, spread: Any, *, digits: int = 4, missing: str = "-"
+) -> str:
+    """Render a score with its variability, as ``0.8421 ± 0.0310``.
+
+    The two numbers belong together: a mean across folds without the spread
+    between them invites more confidence than the run earned. The ``±`` is a
+    standard deviation across folds — a measure of how much the folds
+    disagreed, not a confidence interval.
+    """
+    number = _finite(value)
+    centre = format_metric_value(value, digits=digits, missing=missing)
+    width = _finite(spread)
+    if number is None or width is None:
+        return centre
+    # A spread is read against its centre, so both are rendered at the same
+    # precision: "5,118.33 ± 221.43", never "5,118.33 ± 221.4277".
+    if abs(number) >= 1000:
+        return f"{centre} ± {width:,.2f}"
+    return f"{centre} ± {format_metric_value(width, digits=digits)}"
 
 
 def get_metric(key: str, task_type: TaskType) -> MetricDefinition:

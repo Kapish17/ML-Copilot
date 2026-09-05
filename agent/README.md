@@ -131,7 +131,7 @@ Four, wrapping services that already exist. None of them computes anything.
 | Tool | Wraps | Returns |
 | --- | --- | --- |
 | `dataset_profile` | the dataset profiling service | rows, columns, target, inferred task, quality findings, per-column summary |
-| `run_experiment` | `ExperimentRunner` | the stored run: id, selected model, scores, candidates, headline importances |
+| `run_experiment` | `ExperimentRunner` | the stored run: id, selected model, scores, candidates, headline importances, the sentence saying why the winner won, and the diagnostics the run raised |
 | `search_knowledge` | `RetrievalService` | ranked passages with citation ids |
 | `explain_experiment` | `ml/explainability` | ranked feature importances, or per-row contributions |
 
@@ -396,6 +396,22 @@ variable, a filesystem path or any hidden state.
 | the planner could not be used at all | `failed` |
 
 Only `completed` may be presented to a user as an answer.
+
+### Two questions the model is not allowed to answer for itself
+
+*"Why did this model win?"* and *"is this result trustworthy?"* are the
+questions a language model answers most fluently and most wrongly, so neither
+is left to it. The backend composes the reason from the run's recorded numbers
+and raises its own diagnostics; the tool summary carries both, and the answer
+prompt says to use them: repeat the rationale rather than inferring a different
+one from the held-out score, repeat a diagnostic in its own words rather than
+sharpening it into a verdict, and say nothing was flagged rather than calling a
+model sound. Inventing a concern no observation raised is as much a fabrication
+as inventing a citation.
+
+The prompt also names the `±` beside a cross-validated score for what it is —
+the spread across folds — and forbids describing it as a confidence interval or
+as a margin of error on the held-out number.
 
 ### Citations, and fabrications
 

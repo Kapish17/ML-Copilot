@@ -271,6 +271,42 @@ def test_the_rendered_experiment_invents_no_conclusion(
         assert phrase not in text
 
 
+def test_the_rendered_experiment_says_why_the_model_won(
+    experiment_run: FakeExperimentRun,
+) -> None:
+    """A retrieved passage can answer "why this model?" without guessing.
+
+    The sentence comes from the record, where the ML layer composed it from
+    the run's own numbers. Rendering it means an answering model repeats a
+    stored fact instead of reconstructing a reason from loose scores.
+    """
+    text = render_experiment(experiment_run)
+
+    assert "Why this model won:" in text
+    assert experiment_run.selection.selection_rationale in text
+
+
+def test_diagnostics_are_rendered_in_the_words_they_were_written_in(
+    experiment_run_with_diagnostics: FakeExperimentRun,
+) -> None:
+    """Verbatim, because paraphrase is how a signal becomes a verdict."""
+    text = render_experiment(experiment_run_with_diagnostics)
+
+    assert "signals worth a second look, not verdicts" in text.lower()
+    assert (
+        "Potential overfitting signal: held-out performance is materially "
+        "below cross-validation performance." in text
+    )
+    assert "the model is overfit" not in text.lower()
+
+
+def test_a_run_with_no_diagnostics_says_so(
+    experiment_run: FakeExperimentRun,
+) -> None:
+    """Silence would read as "not checked" rather than "nothing found"."""
+    assert "Diagnostics: none were raised" in render_experiment(experiment_run)
+
+
 def test_an_experiment_without_an_explanation_says_so(
 ) -> None:
     """Absence is recorded as absence, not omitted."""
@@ -293,6 +329,11 @@ def test_experiment_metadata_carries_what_filtering_needs(
     assert metadata["selected_model"] == "random_forest_classifier"
     assert metadata["primary_metric"] == "f1"
     assert metadata["test_score"] == 0.85
+    # How much data was behind the score, and whether anything was flagged —
+    # enough to narrow a search without putting a paragraph in every chunk.
+    assert metadata["train_row_count"] == 192
+    assert metadata["feature_count"] == 3
+    assert metadata["warning_count"] == 0
 
 
 def test_experiment_metadata_is_json_safe(experiment_run: FakeExperimentRun) -> None:

@@ -288,6 +288,7 @@ def experiment_run(
     baseline_score: float | None = 0.71,
     created_at: datetime | None = None,
     tags: tuple[str, ...] = (),
+    diagnostics: tuple[dict[str, object], ...] = (),
 ):
     """Build a small ExperimentRun without running the whole pipeline.
 
@@ -362,6 +363,7 @@ def experiment_run(
             baseline_comparison={"absolute_improvement": improvement},
             test_row_count=60,
             is_unbiased=True,
+            diagnostics=diagnostics,
         ),
         explainability=ExplainabilitySection(
             status="available",

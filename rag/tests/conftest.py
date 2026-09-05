@@ -92,6 +92,25 @@ def experiment_run() -> FakeExperimentRun:
 
 
 @pytest.fixture
+def experiment_run_with_diagnostics() -> FakeExperimentRun:
+    """A run that raised a signal, worded the way the ML layer words them."""
+    return FakeExperimentRun(
+        experiment_id="exp_ddd111222333_20260101T120000Z_0002",
+        diagnostics=(
+            {
+                "code": "generalisation_gap",
+                "severity": "warning",
+                "message": (
+                    "Potential overfitting signal: held-out performance is "
+                    "materially below cross-validation performance."
+                ),
+                "details": {"relative_shortfall": 0.31},
+            },
+        ),
+    )
+
+
+@pytest.fixture
 def experiment_store(experiment_run: FakeExperimentRun) -> FakeExperimentStore:
     """An experiment store holding one classification and one regression run."""
     return FakeExperimentStore(

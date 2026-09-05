@@ -152,6 +152,10 @@ Target column: renewed
 ## Model selection
 Selection strategy: cross_validation
 Selection score: 0.8623 ± 0.0465
+Why this model won: logistic_regression selected because it achieved the best
+cross-validation F1 over 5 folds (0.8623 ± 0.0465) among 2 candidate models.
+The held-out score is an independent measurement taken after this choice, not
+the reason for it.
 Candidate results:
 - logistic_regression: 0.8623 ± 0.0465 (succeeded)
 - random_forest_classifier: 0.7998 ± 0.0474 (succeeded)
@@ -161,6 +165,7 @@ Final test score: 0.8750
 Baseline: most_frequent
 - absolute_improvement: 0.8750
 - beats_baseline: yes
+Diagnostics: none were raised for this run.
 
 ## Explainability
 Top features by importance:
@@ -173,6 +178,13 @@ record. This module never writes "the model performed well" or "the forest was
 the better choice", because neither is in the record — that reading is a job
 for a future model with the evidence in front of it, and putting invented
 prose into the index would mean retrieving and citing it as fact later.
+
+The two sentence-shaped lines are the exception that proves the rule: both come
+from the record. "Why this model won" is the rationale the ML layer composed
+from the run's own numbers, and a diagnostic is rendered **verbatim**, wording
+included. Both are quoted rather than paraphrased for the same reason nothing
+else here is written freehand — a paraphrase of "potential overfitting signal"
+is how a hedge becomes a verdict two retrievals later.
 
 ### Searchable metadata
 
@@ -189,6 +201,8 @@ possible:
 | `selected_model` | `logistic_regression` |
 | `primary_metric` | `f1` |
 | `selection_score`, `test_score`, `is_unbiased`, `tags`, `created_at` | … |
+| `train_row_count`, `feature_count` | `192`, `3` — how much data was behind the score |
+| `warning_count` | `0` — how many diagnostics the run raised, as a count, not the sentences |
 
 ### The dependency runs one way
 

@@ -17,14 +17,29 @@ from dataclasses import dataclass
 from typing import Any
 
 from ml.errors import IncomparableExperimentsError
-from ml.evaluation.metrics import MetricDirection
-from ml.experiments.run import ExperimentRun
+from ml.evaluation.metrics import (
+    MetricDirection,
+    format_metric_spread,
+    format_metric_value,
+    metric_label,
+)
+from ml.experiments.run import CROSS_VALIDATION_STRATEGY, ExperimentRun
 from ml.experiments.store import shared_metric_direction
 
 
 @dataclass(frozen=True)
 class ComparisonRow:
-    """One run's line in a comparison table."""
+    """One run's line in a comparison table.
+
+    Carries the context a comparison is unreadable without: what chose the
+    model, what measured it, and how much data was behind each number. Two F1
+    scores mean different things when one came from 4,000 training rows and
+    the other from 90, and a row that hides that invites the wrong conclusion.
+
+    Every field is read from the stored record. Nothing here is recomputed or
+    inferred, and a value the run did not store is ``None`` rather than a
+    plausible substitute.
+    """
 
     experiment_id: str
     created_at: str
@@ -36,6 +51,22 @@ class ComparisonRow:
     test_score: float | None
     baseline_score: float | None
     improvement: float | None
+    #: Added after the first comparison shipped; defaulted so a caller that
+    #: builds a row positionally still works.
+    task_type: str = ""
+    primary_metric: str = ""
+    train_row_count: int | None = None
+    test_row_count: int | None = None
+    feature_count: int | None = None
+    #: How many diagnostics on this run are worth more than a glance, so a
+    #: table can mark the runs to read carefully without carrying every
+    #: sentence. See :mod:`ml.evaluation.diagnostics`.
+    warning_count: int = 0
+    #: True when the test score played no part in choosing the model.
+    is_unbiased: bool = False
+    #: One sentence on why this run's model won, composed from its own
+    #: recorded numbers — never written by a language model.
+    rationale: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         """Render the row as plain, JSON-friendly values."""
@@ -45,11 +76,19 @@ class ComparisonRow:
             "name": self.name,
             "model_name": self.model_name,
             "strategy": self.strategy,
+            "task_type": self.task_type,
+            "primary_metric": self.primary_metric,
             "selection_score": self.selection_score,
             "selection_score_std": self.selection_score_std,
             "test_score": self.test_score,
             "baseline_score": self.baseline_score,
             "improvement": self.improvement,
+            "train_row_count": self.train_row_count,
+            "test_row_count": self.test_row_count,
+            "feature_count": self.feature_count,
+            "warning_count": self.warning_count,
+            "is_unbiased": self.is_unbiased,
+            "rationale": self.rationale,
         }
 
 
@@ -67,6 +106,11 @@ class ExperimentComparison:
         """True when a larger score is a better result."""
         return self.direction is MetricDirection.HIGHER_IS_BETTER
 
+    @property
+    def all_cross_validated(self) -> bool:
+        """True when every run here chose its model without the test set."""
+        return all(row.strategy == CROSS_VALIDATION_STRATEGY for row in self.rows)
+
     def best(self) -> ComparisonRow | None:
         """The best-scoring run, or ``None`` when none has a score."""
         scored = [row for row in self.rows if row.test_score is not None]
@@ -82,6 +126,9 @@ class ExperimentComparison:
         return {
             "task_type": self.task_type,
             "primary_metric": self.primary_metric,
+            #: Sent so a reader labels its columns the same way this table
+            #: does, without keeping its own copy of the metric names.
+            "primary_metric_label": metric_label(self.primary_metric),
             "direction": self.direction.value,
             "run_count": len(self.rows),
             "best_experiment_id": best.experiment_id if best else None,
@@ -92,30 +139,51 @@ class ExperimentComparison:
         """Render the comparison as a readable text table.
 
         The score columns are labelled with the metric and with where each
-        number came from, so a selection score is never read as a test score.
+        number came from, so a selection score is never read as a test score,
+        and the cross-validated column carries its own spread — a mean across
+        folds without it invites more confidence than the run earned.
+
+        A run with diagnostics worth reading is marked, not scored down: the
+        marker says "read this one's notes", never "this one is wrong".
         """
-        label = self.primary_metric.upper()
+        label = metric_label(self.primary_metric)
+        # "CV" only when it is true of every row. A comparison may mix
+        # strategies, and a holdout run's selecting score is the held-out score
+        # rather than a fold mean.
+        selection_label = (
+            f"CV {label}" if self.all_cross_validated else f"Selection {label}"
+        )
         headers = (
             "Experiment",
             "Model",
-            f"CV {label}",
-            f"Test {label}",
+            selection_label,
+            f"Held-out {label}",
             "Baseline",
             "Improvement",
+            "Train rows",
+            "Features",
+            "Notes",
         )
 
         def cell(value: float | None) -> str:
             """Format one number, or mark it absent."""
-            return f"{value:.4f}" if value is not None else "-"
+            return format_metric_value(value)
+
+        def count(value: int | None) -> str:
+            """Format a row or feature count, or mark it absent."""
+            return f"{value:,}" if value is not None else "-"
 
         body = [
             (
                 row.experiment_id,
                 row.model_name,
-                cell(row.selection_score),
+                format_metric_spread(row.selection_score, row.selection_score_std),
                 cell(row.test_score),
                 cell(row.baseline_score),
                 f"{row.improvement:+.4f}" if row.improvement is not None else "-",
+                count(row.train_row_count),
+                count(row.feature_count),
+                f"{row.warning_count} to review" if row.warning_count else "-",
             )
             for row in self.rows
         ]
@@ -140,7 +208,22 @@ class ExperimentComparison:
         )
         direction = "higher is better" if self.higher_is_better else "lower is better"
         lines.append("")
-        lines.append(f"Ranked by test {label} ({direction}) on {self.task_type} runs.")
+        lines.append(
+            f"Ranked by held-out {label} ({direction}) on {self.task_type} runs."
+        )
+        lines.append(
+            "The selection column is the score that chose each model: for a "
+            "cross-validated run, the mean across folds ± the spread between "
+            "them — how much the folds disagreed, not a confidence interval. "
+            "The held-out column is a separate measurement, taken once after "
+            "the choice."
+        )
+        if not self.all_cross_validated:
+            lines.append(
+                "Some of these runs chose their model on the held-out rows, so "
+                "for those the two columns are one measurement used twice. "
+                "Their notes say so."
+            )
         return "\n".join(lines)
 
 
@@ -188,6 +271,14 @@ def compare_experiments(runs: Sequence[ExperimentRun]) -> ExperimentComparison:
             improvement=run.evaluation.baseline_comparison.get(
                 "absolute_improvement"
             ),
+            task_type=run.task_type,
+            primary_metric=run.primary_metric,
+            train_row_count=run.preprocessing.train_row_count,
+            test_row_count=run.evaluation.test_row_count,
+            feature_count=run.feature_count,
+            warning_count=run.evaluation.warning_count,
+            is_unbiased=run.evaluation.is_unbiased,
+            rationale=run.selection.selection_rationale,
         )
         for run in ordered
     )

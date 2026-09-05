@@ -54,8 +54,13 @@ export function ExperimentHistoryTable({
           <Th>Dataset</Th>
           <Th>Task</Th>
           <Th>Selected model</Th>
-          <Th numeric>CV mean</Th>
-          <Th numeric>Test score</Th>
+          {/*
+            "Selection score", not "CV mean": this list mixes strategies, and
+            a holdout run's selecting score is not cross-validated. One
+            heading has to be true of every row under it.
+          */}
+          <Th numeric>Selection score</Th>
+          <Th numeric>Held-out score</Th>
         </tr>
       }
     >
@@ -98,6 +103,11 @@ export function ExperimentHistoryTable({
             <Td className="font-mono text-xs">{run.selected_model}</Td>
             <Td numeric className="text-ink-600">
               {formatMetric(run.selection_score)}
+              {run.selection_score_std != null && (
+                <span className="block text-xs">
+                  ± {formatMetric(run.selection_score_std)}
+                </span>
+              )}
             </Td>
             <Td numeric className="font-semibold">
               {formatMetric(run.test_score)}

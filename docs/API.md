@@ -220,10 +220,14 @@ and `warnings`. The parts worth knowing:
 - `preprocessing` — every decision made, per column, plus the split sizes and
   whether it was stratified.
 - `selection` — `candidates[]` with each model's CV score and spread,
-  `selected_model`, `selection_score`, `scored_on`, and
-  `uses_test_data: false`.
+  `selected_model`, `selection_score`, `scored_on`,
+  `uses_test_data: false`, and `rationale`: one sentence saying why the winner
+  won, composed by the ML layer from the numbers above. Written by that code
+  and never by a language model — display it as sent rather than composing
+  your own.
 - `evaluation` — `primary_metric_value` and `metrics` **on the held-out test
-  set**, the baseline comparison, `test_row_count` and `is_unbiased`.
+  set**, the baseline comparison, `test_row_count`, `is_unbiased`,
+  `diagnostics[]` and `warning_count`.
 - `explainability` — `status`, `method` (`shap` or the permutation fallback)
   and ranked `feature_importances`.
 - `model_artifact` — present when the winning model was persisted: `stored`,
@@ -237,6 +241,26 @@ and `warnings`. The parts worth knowing:
 > `evaluation.primary_metric_value` is the single held-out measurement. They
 > are different numbers answering different questions and must not be compared
 > as though they were the same one.
+
+**`evaluation.diagnostics[]`** — situations in this run worth a second look.
+Each entry is `{code, severity, message, details}`, `severity` is `warning` or
+`info`, and `warning_count` counts the warnings. The `code` is stable and safe
+to branch on (`generalisation_gap`, `high_cv_variability`, `small_dataset`,
+`small_test_set`, `class_imbalance`, `missing_class_in_test`,
+`undefined_metric`, `baseline_not_beaten`, `selection_used_test_data`); the
+`message` is written for a person and should be shown verbatim.
+
+> Diagnostics are **signals, not verdicts, and never failures**. A run that
+> raises them completed exactly as asked and its scores are unchanged. The
+> wording is deliberate — "potential overfitting signal", not "the model is
+> overfit" — because the same evidence is consistent with an unlucky split or
+> a small test set. Paraphrasing these messages into conclusions is the one
+> thing a client must not do with them. An empty list means these particular
+> checks found nothing, not that the model is sound.
+
+A `±` figure beside a cross-validated score is the standard deviation **across
+the folds** — how much they disagreed with each other. It is not a confidence
+interval and not a margin of error on the held-out number.
 
 **Errors.** Everything the profile endpoint can return, plus
 `400 invalid_experiment_configuration` (a bad fold count, an unknown model, a
@@ -253,7 +277,9 @@ List stored runs, newest first.
 
 **Returns** `count`, `limit` and `experiments[]` of headlines — id, timestamp,
 name, fingerprint, task, target, selected model, strategy, primary metric,
-`selection_score` and `test_score`.
+`selection_score` and its `selection_score_std`, `test_score`,
+`train_row_count`, `test_row_count`, `feature_count`, `warning_count` and
+`is_unbiased`.
 
 **Errors.** `400 invalid_request` for an unknown sort key, order or filter
 value — the `details` name what is accepted.
@@ -272,11 +298,19 @@ Rank several stored runs against each other.
 
 **Body** `{"experiment_ids": ["exp_...", "exp_..."]}` — at least two.
 
-**Returns** the shared `task_type`, `primary_metric`, `direction` and
-`higher_is_better`; `run_count` and `best_experiment_id`; a `runs[]` entry per
-run with its selection score, test score, baseline and improvement; and
-`table`, the same ranking rendered as a readable **text** table for a terminal.
-Branch on `runs`; print `table`.
+**Returns** the shared `task_type`, `primary_metric`, its display
+`primary_metric_label`, `direction` and `higher_is_better`; `run_count` and
+`best_experiment_id`; a `runs[]` entry per run; and `table`, the same ranking
+rendered as a readable **text** table for a terminal. Branch on `runs`; print
+`table`.
+
+Each `runs[]` entry carries what a score needs in order to be read honestly:
+`model_name`, `task_type`, `primary_metric`, `selection_score` with
+`selection_score_std`, `test_score`, `baseline_score`, `improvement`,
+`train_row_count`, `test_row_count`, `feature_count`, `warning_count`,
+`is_unbiased`, `rationale` and `created_at`. Two F1 scores are not comparable
+without knowing how many rows and features produced them, so the row carries
+both rather than leaving a reader to fetch each record.
 
 Ranking respects metric direction — for RMSE and MAE the best run is the lowest
 one, and the response says which direction was applied.

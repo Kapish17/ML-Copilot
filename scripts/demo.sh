@@ -197,6 +197,9 @@ read_json "$WORK_DIR/run.json" '
     data["selection"]["selected_model"],
     data["selection"]["primary_metric"],
     data["selection"]["uses_test_data"])'
+read_json "$WORK_DIR/run.json" '
+"  why: %s" % (data["selection"].get("rationale") or "(not recorded)")'
+note "that sentence is composed from the numbers above, never by a language model"
 
 step "6. Held-out test performance — measured once, on rows no model saw"
 read_json "$WORK_DIR/run.json" '
@@ -211,6 +214,18 @@ read_json "$WORK_DIR/run.json" '
     "beats it" if b["beats_baseline"] else "does NOT beat it")
  if b else "  baseline: none")(data["evaluation"].get("baseline_comparison"))'
 note "this number and the cross-validated one above answer different questions"
+
+# ---------------------------------------------------------------------------
+# What the run says about itself. Signals, not verdicts: each one is a prompt
+# to look at something, and a clean run prints nothing here — which is the
+# point. A check that always finds something teaches people to skip it.
+# ---------------------------------------------------------------------------
+read_json "$WORK_DIR/run.json" '
+"\n".join(
+    "  [%s] %s" % (d["severity"], d["message"])
+    for d in data["evaluation"].get("diagnostics", []))
+or "  diagnostics: nothing was flagged on this run"'
+note "diagnostics are signals worth checking, never verdicts, and never failures"
 
 step "7. What the model is doing — SHAP"
 read_json "$WORK_DIR/run.json" '

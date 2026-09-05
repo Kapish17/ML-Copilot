@@ -173,6 +173,42 @@ def test_the_experiment_tool_summarises_the_stored_record(
     assert len(output["candidates"]) == 2
 
 
+def test_the_summary_carries_the_reason_the_model_won(
+    experiment_tool: RunExperimentTool,
+) -> None:
+    """So a planner repeats the backend's reason instead of inventing one.
+
+    "Which model is best and why" is the question the agent is most likely to
+    answer fluently and wrongly. The sentence the ML layer composed is put in
+    front of it, and the answer prompt tells it to use that one.
+    """
+    output = experiment_tool.run(
+        {"dataset": "sales", "target_column": "churned"}
+    ).output
+
+    assert "cross-validation F1" in output["selection_rationale"]
+    assert output["selection_scored_on"] == "training_folds"
+    assert output["selection_score_std"] == 0.02
+    assert output["held_out_is_unbiased"] is True
+
+
+def test_the_summary_carries_the_diagnostics_a_run_raised(
+    experiment_tool: RunExperimentTool,
+) -> None:
+    """Signals reach the planner as sentences, not as thresholds to re-derive."""
+    output = experiment_tool.run(
+        {"dataset": "sales", "target_column": "churned"}
+    ).output
+    diagnostics = output["diagnostics"]
+
+    assert [item["code"] for item in diagnostics] == ["small_test_set"]
+    assert diagnostics[0]["severity"] == "warning"
+    assert "Small held-out set" in diagnostics[0]["message"]
+    # The numbers behind each signal stay in the record; the planner gets the
+    # sentence, which already contains the ones that matter.
+    assert "details" not in diagnostics[0]
+
+
 def test_the_experiment_tool_passes_only_declared_options(
     dataset_source: InMemoryDatasetSource,
 ) -> None:

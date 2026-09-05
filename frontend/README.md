@@ -234,6 +234,21 @@ better than it is.
 falls. Every metric is shown with the direction the backend reported, so a
 table mixing R² and RMSE stays readable.
 
+**A fold spread is not a confidence interval.** The `±` beside a
+cross-validated score is how much the folds disagreed with each other, and both
+the comparison table and the run summary say so where the number appears.
+
+**Why a model won comes from the backend.** The run summary shows the sentence
+the ML layer composed from that run's recorded numbers, rendered as sent. This
+app never assembles its own version — a second explanation of the same choice
+is a second answer to the same question.
+
+**Diagnostics are signals, not verdicts.** The run's Diagnostics tab lists what
+is worth a second look, in the wording the backend used, with a severity
+carried by a word and a glyph rather than a colour alone. A run with
+diagnostics completed exactly as asked, so nothing is styled as an error, and
+an empty list says these checks found nothing — not that the model is sound.
+
 **Status leads, prose follows.** All four agent outcomes — `completed`,
 `partial`, `insufficient_evidence`, `grounding_failed` — arrive as HTTP 200,
 and only the first is an answer to act on. The verdict is rendered above the

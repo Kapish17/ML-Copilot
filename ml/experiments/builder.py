@@ -18,11 +18,13 @@ later, and exactly what a retrieval layer will want to index.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
 
+from ml.evaluation.diagnostics import diagnose_run
 from ml.experiments.fingerprint import fingerprint_dataset
 from ml.experiments.identity import configuration_hash, generate_experiment_id
 from ml.experiments.run import (
@@ -117,7 +119,7 @@ def _selection_section(summary: Mapping[str, Any]) -> SelectionSection:
     selection = summary["selection"]
     metric = selection["primary_metric"]
     candidates = tuple(dict(item) for item in selection["candidates"])
-    return SelectionSection(
+    section = SelectionSection(
         strategy=str(summary["strategy"]),
         folds=summary.get("folds"),
         primary_metric=str(metric["key"]),
@@ -130,14 +132,43 @@ def _selection_section(summary: Mapping[str, Any]) -> SelectionSection:
         scored_on=selection.get("scored_on"),
         uses_test_data=bool(selection.get("uses_test_data", False)),
     )
+    # Composed once, from the numbers just recorded, and stored with them. The
+    # property would recompose the same sentence on demand; writing it down
+    # means a reader of the raw JSON sees the explanation too.
+    return replace(section, rationale=section.selection_rationale)
 
 
-def _evaluation_section(summary: Mapping[str, Any]) -> EvaluationSection:
-    """Build the evaluation section from the selection result's summary."""
+def _train_class_labels(prepared: PreparedDataset) -> tuple[str, ...]:
+    """The classes present in the training rows, when the task has classes.
+
+    Read from the split's own target description rather than from the fitted
+    model, so this stays a composition of results the pipeline already
+    produced.
+    """
+    train = prepared.summary()["target_distribution"]["train"]
+    counts = train.get("class_counts") or {}
+    return tuple(str(label) for label in counts)
+
+
+def _evaluation_section(
+    summary: Mapping[str, Any],
+    *,
+    selection: SelectionSection,
+    dataset: DatasetSection,
+    preprocessing: PreprocessingSection,
+    train_class_labels: Sequence[str] = (),
+) -> EvaluationSection:
+    """Build the evaluation section from the selection result's summary.
+
+    The diagnostics are attached here, at the one point where the selection
+    numbers and the held-out numbers are both in hand. They read those recorded
+    values and nothing else — no dataset, no fitted model — so a stored record
+    could produce the same list years later.
+    """
     final = summary["final_evaluation"]
     metrics = final["metrics"]
     baseline = final["baseline"]
-    return EvaluationSection(
+    section = EvaluationSection(
         primary_metric=str(final["primary_metric"]["key"]),
         primary_metric_value=final["primary_metric"]["value"],
         metrics=dict(metrics["values"]),
@@ -148,6 +179,26 @@ def _evaluation_section(summary: Mapping[str, Any]) -> EvaluationSection:
         classification_details=metrics.get("classification"),
         test_row_count=int(final["test_row_count"]),
         is_unbiased=bool(final["is_unbiased"]),
+    )
+    found = diagnose_run(
+        metric=section.primary_metric,
+        direction=selection.primary_metric_direction,
+        selection_score=selection.selection_score,
+        selection_score_std=selection.selection_score_std,
+        held_out_score=section.primary_metric_value,
+        folds=selection.folds,
+        uses_test_data=selection.uses_test_data,
+        strategy=selection.strategy,
+        row_count=dataset.row_count,
+        train_row_count=preprocessing.train_row_count,
+        test_row_count=section.test_row_count,
+        classification_details=section.classification_details,
+        train_class_labels=train_class_labels,
+        unavailable_metrics=section.unavailable_metrics,
+        baseline_comparison=section.baseline_comparison,
+    )
+    return replace(
+        section, diagnostics=tuple(item.as_dict() for item in found)
     )
 
 
@@ -257,7 +308,13 @@ def create_experiment_run(
     )
     preprocessing = _preprocessing_section(prepared)
     selection_section = _selection_section(summary)
-    evaluation = _evaluation_section(summary)
+    evaluation = _evaluation_section(
+        summary,
+        selection=selection_section,
+        dataset=dataset,
+        preprocessing=preprocessing,
+        train_class_labels=_train_class_labels(prepared),
+    )
 
     config_hash = configuration_hash(
         configuration_components(

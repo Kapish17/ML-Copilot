@@ -199,6 +199,15 @@ selection ─▶ retrain winner ─▶ one test measurement ─▶ SHAP ─▶ s
   the direction it used.
 - **Baselines.** Every run is compared against a naive baseline, so "0.86
   accuracy" can be read against what predicting the majority class would score.
+- **The selection rationale** is one sentence, composed from the recorded
+  numbers, saying why the winner won and on which score. Composed by `ml/`,
+  never by a language model — the agent is handed this sentence rather than
+  asked to reconstruct the reason.
+- **Diagnostics** read a finished run's own numbers and name what is worth a
+  second look: a gap between the cross-validated and held-out scores, folds
+  that disagreed, a tiny split, a dominant class, a baseline not beaten. They
+  are signals rather than verdicts — "potential overfitting signal", never
+  "the model is overfit" — they change no score, and they fail nothing.
 
 Details: [ml/README.md](../ml/README.md).
 
@@ -322,8 +331,14 @@ atomic-write implementation. **MLflow is not implemented.**
 
 One record holds the dataset fingerprint and shape, every preprocessing
 decision, the candidate results, the CV score and its spread, the single test
-measurement, the baseline comparison, the explanation and the environment
-(Python version, platform, package versions, random state).
+measurement, the baseline comparison, the sentence saying why the winner won,
+the diagnostics the run raised, the explanation and the environment (Python
+version, platform, package versions, random state).
+
+That is also what makes a run reproducible from the record alone: the seed, the
+content fingerprint, the transformed feature schema and the configuration hash
+are all in it, and the hash covers the inputs only, so re-running the same setup
+is findable as a repeat.
 
 It does **not** hold dataset rows. It does not hold the fitted model either —
 that lives in the artifact store described above, and the record carries only a

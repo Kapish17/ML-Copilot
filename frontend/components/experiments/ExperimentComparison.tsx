@@ -5,6 +5,7 @@ import { experimentHref } from "@/lib/citations";
 import type { ExperimentComparison as Comparison } from "@/lib/api/types";
 import {
   directionLabel,
+  formatCount,
   formatMetric,
   formatSigned,
   formatTimestamp,
@@ -30,6 +31,16 @@ export function ExperimentComparisonView({
     comparison.primary_metric,
     comparison.direction,
   );
+  const metric = metricLabel(comparison.primary_metric);
+  // "CV" only when it is true of every row. A history can hold runs chosen by
+  // cross-validation and runs chosen on the held-out rows, and one heading has
+  // to be true of everything under it.
+  const allCrossValidated = comparison.runs.every(
+    (run) => run.strategy === "cross_validation",
+  );
+  const selectionHeading = allCrossValidated
+    ? `CV ${metric}`
+    : `Selection ${metric}`;
 
   return (
     <div>
@@ -49,10 +60,12 @@ export function ExperimentComparisonView({
             <Th>Run</Th>
             <Th>Model</Th>
             <Th>Created</Th>
-            <Th numeric>CV mean</Th>
-            <Th numeric>Test score</Th>
+            <Th numeric>{selectionHeading}</Th>
+            <Th numeric>Held-out {metric}</Th>
             <Th numeric>Baseline</Th>
             <Th numeric>Improvement</Th>
+            <Th numeric>Train rows</Th>
+            <Th numeric>Features</Th>
           </tr>
         }
       >
@@ -74,6 +87,19 @@ export function ExperimentComparisonView({
                     </Badge>
                   </span>
                 )}
+                {/*
+                  Beside the run's name rather than in a column of its own: a
+                  marker at the far right of nine columns is a marker nobody
+                  reads, and the whole point of it is to be seen before the
+                  score is.
+                */}
+                {run.warning_count ? (
+                  <span className="ml-2 font-sans">
+                    <Badge tone="warn" glyph="!">
+                      {run.warning_count} to review
+                    </Badge>
+                  </span>
+                ) : null}
                 <span className="mt-0.5 block break-id font-mono text-xs font-normal text-ink-500">
                   {run.experiment_id}
                 </span>
@@ -97,10 +123,33 @@ export function ExperimentComparisonView({
                 {formatMetric(run.baseline_score)}
               </Td>
               <Td numeric>{formatSigned(run.improvement)}</Td>
+              <Td numeric className="text-ink-600">
+                {formatCount(run.train_row_count)}
+              </Td>
+              <Td numeric className="text-ink-600">
+                {formatCount(run.feature_count)}
+              </Td>
             </tr>
           );
         })}
       </DataTable>
+
+      {/*
+        The two score columns are easy to conflate, and conflating them is the
+        single most misleading thing this table could do. Said once, plainly,
+        under the numbers they describe.
+      */}
+      <p className="mt-2 text-xs leading-relaxed text-ink-500">
+        {selectionHeading} is the score that chose each model: for a
+        cross-validated run, the mean across the folds of the training rows,
+        with ± the spread between those folds — how much they disagreed, not a
+        confidence interval. The held-out column is a separate measurement,
+        taken once after the model was chosen.
+        {!allCrossValidated &&
+          " Some of these runs chose their model on the held-out rows, so for those the two columns are one measurement used twice."}{" "}
+        Runs marked <span className="font-medium">to review</span> raised
+        diagnostics worth reading on the run&rsquo;s own page.
+      </p>
     </div>
   );
 }

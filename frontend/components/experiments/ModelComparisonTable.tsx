@@ -44,10 +44,21 @@ export function ModelComparisonTable({
     evaluation.baseline_metrics?.[metric] ??
     null;
 
-  const strategyLabel =
-    selection.strategy === "cross_validation"
-      ? `${selection.folds ?? "k"}-fold cross-validation on training rows`
-      : "holdout scoring";
+  const crossValidated = selection.strategy === "cross_validation";
+  const strategyLabel = crossValidated
+    ? `${selection.folds ?? "k"}-fold cross-validation on training rows`
+    : "their score on the held-out rows";
+  // Under holdout the selecting score is not cross-validated and did not come
+  // from the training rows, so neither the column heading nor the group
+  // heading may say it did — that conflation is the one this table exists to
+  // prevent, and it would be worst on the run where it matters most.
+  const selectionHeading = crossValidated
+    ? `CV mean`
+    : `Selection ${metricLabel(metric)}`;
+  const spreadHeading = crossValidated ? "CV std" : "Spread";
+  const finalHeading = crossValidated
+    ? `Final · untouched test set (${evaluation.test_row_count} rows)`
+    : `Final · the same ${evaluation.test_row_count} held-out rows`;
 
   return (
     <div>
@@ -64,7 +75,7 @@ export function ModelComparisonTable({
       </div>
 
       <DataTable
-        caption={`Candidate models scored by ${strategyLabel}, and the winner's single measurement on the untouched test set`}
+        caption={`Candidate models scored by ${strategyLabel}, and the winner's single measurement on the held-out test set`}
         head={
           <>
             <tr className="border-b border-ink-100">
@@ -73,20 +84,20 @@ export function ModelComparisonTable({
                 Selection · {strategyLabel}
               </Th>
               <Th scope="col" numeric className="bg-accent-50" colSpan={3}>
-                Final · untouched test set ({evaluation.test_row_count} rows)
+                {finalHeading}
               </Th>
               <Th scope="col" className="align-bottom">Status</Th>
             </tr>
             <tr>
               <Th />
               <Th scope="col" numeric className="bg-ink-50">
-                CV mean
+                {selectionHeading}
               </Th>
               <Th scope="col" numeric className="bg-ink-50">
-                CV std
+                {spreadHeading}
               </Th>
               <Th scope="col" numeric className="bg-accent-50">
-                Test {metricLabel(metric)}
+                Held-out {metricLabel(metric)}
               </Th>
               <Th scope="col" numeric className="bg-accent-50">
                 Baseline
@@ -173,8 +184,11 @@ export function ModelComparisonTable({
       <p className="mt-3 text-xs text-ink-600">
         <span className="font-medium">Why two groups.</span> Every candidate was
         scored by {strategyLabel}. Only the winner was retrained and measured on
-        the held-out rows, once — so the test column has one number in it by
+        the held-out rows, once — so the held-out column has one number in it by
         design, and the two groups are not comparable to each other.
+        {crossValidated
+          ? " The ± is the spread across the folds — how much they disagreed — and not a confidence interval."
+          : " Both columns were computed on the same rows, so the held-out number is the best of several draws rather than an independent estimate."}
         {baseline && (
           <>
             {" "}

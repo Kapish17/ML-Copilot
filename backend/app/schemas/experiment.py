@@ -118,6 +118,34 @@ class ExperimentSelection(BaseModel):
         ..., description="'training_folds' or 'held_out_test_set'."
     )
     uses_test_data: bool
+    rationale: str = Field(
+        "",
+        description=(
+            "One sentence on why the winning model won, composed by the ML "
+            "layer from this run's own recorded numbers. Never written by a "
+            "language model, and never a judgement about whether the winner "
+            "is any good."
+        ),
+    )
+
+
+class ExperimentDiagnostic(BaseModel):
+    """One thing about a finished run worth a second look.
+
+    A signal, not a verdict, and never a failure: a run with diagnostics
+    completed exactly as asked. The ``code`` is stable and safe to branch on;
+    the ``message`` is written for a person to read.
+    """
+
+    code: str = Field(
+        ..., description="Stable identifier, such as 'generalisation_gap'."
+    )
+    severity: str = Field(..., description="'warning' or 'info'.")
+    message: str
+    details: dict[str, JsonValue] = Field(
+        default_factory=dict,
+        description="The numbers behind the signal, and the threshold used.",
+    )
 
 
 class ExperimentEvaluation(BaseModel):
@@ -141,6 +169,16 @@ class ExperimentEvaluation(BaseModel):
             "True when the test set played no part in choosing the model. "
             "False under the holdout strategy, where the score is optimistic."
         ),
+    )
+    diagnostics: list[ExperimentDiagnostic] = Field(
+        default_factory=list,
+        description=(
+            "Situations in this run worth a second look — signals, not "
+            "verdicts, and not failures. Empty on a run that raised none."
+        ),
+    )
+    warning_count: int = Field(
+        0, description="How many diagnostics ask for more than a glance."
     )
 
 
@@ -264,7 +302,13 @@ class ExperimentHeadline(BaseModel):
     strategy: str
     primary_metric: str
     selection_score: float | None = None
+    selection_score_std: float | None = None
     test_score: float | None = None
+    train_row_count: int | None = None
+    test_row_count: int | None = None
+    feature_count: int | None = None
+    warning_count: int = 0
+    is_unbiased: bool = False
 
 
 class ExperimentListResponse(BaseModel):
@@ -276,18 +320,49 @@ class ExperimentListResponse(BaseModel):
 
 
 class ComparisonRowModel(BaseModel):
-    """One run's line in a comparison, ranked best first."""
+    """One run's line in a comparison, ranked best first.
+
+    Carries what a score needs to be read honestly: which metric, chosen how,
+    measured on how many rows, and whether the run raised anything worth a
+    second look. Fields the run did not record stay ``None``.
+    """
 
     experiment_id: str
     created_at: str
     name: str
     model_name: str
     strategy: str
-    selection_score: float | None = None
-    selection_score_std: float | None = None
-    test_score: float | None = None
+    task_type: str = ""
+    primary_metric: str = ""
+    selection_score: float | None = Field(
+        None, description="Score the model was chosen by; not a test result."
+    )
+    selection_score_std: float | None = Field(
+        None,
+        description=(
+            "Standard deviation across the folds — how much they disagreed. "
+            "Not a confidence interval."
+        ),
+    )
+    test_score: float | None = Field(
+        None, description="Held-out measurement, taken once after selection."
+    )
     baseline_score: float | None = None
     improvement: float | None = None
+    train_row_count: int | None = None
+    test_row_count: int | None = None
+    feature_count: int | None = Field(
+        None, description="Features after encoding, as the model saw them."
+    )
+    warning_count: int = Field(
+        0, description="Diagnostics on this run worth more than a glance."
+    )
+    is_unbiased: bool = Field(
+        False, description="True when the test score did not choose the model."
+    )
+    rationale: str = Field(
+        "", description="Why this run's model won, from its recorded numbers."
+    )
 
 
 class ExperimentComparisonResponse(BaseModel):
@@ -295,6 +370,9 @@ class ExperimentComparisonResponse(BaseModel):
 
     task_type: str
     primary_metric: str
+    primary_metric_label: str = Field(
+        "", description="The metric's display name, for column headings."
+    )
     direction: str = Field(
         ..., description="'higher_is_better' or 'lower_is_better'."
     )

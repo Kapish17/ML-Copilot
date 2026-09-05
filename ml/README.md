@@ -76,7 +76,8 @@ ml/
 ├── evaluation/
 │   ├── splitting.py         Train/test split and target-distribution reporting
 │   ├── metrics.py           Task metrics, their directions, the primary metric
-│   └── cross_validation.py  K-fold validation over the training rows
+│   ├── cross_validation.py  K-fold validation over the training rows
+│   └── diagnostics.py       Signals worth a second look in a finished run
 ├── models/
 │   ├── registry.py      Which estimators exist and how to build them
 │   ├── spec.py          The validated request for one training run
@@ -555,6 +556,23 @@ The primary metric is configurable per run
 Steps 1 and 2 never read the test set, so step 4 is the first and only time the
 model meets that data — which is what makes the number an unbiased estimate.
 
+**The evaluation contract, in full.** The held-out split is used for exactly
+one thing: measuring the winner, once. It is not used to tune anything, to
+choose between models, to fit a preprocessor, or to select features. Each half
+of that is enforced somewhere and checked somewhere:
+
+| Guarantee | Where it holds | Where it is checked |
+| --- | --- | --- |
+| Preprocessing learns from training rows only | `ml/pipelines/preparation.py` fits on the train split | `ml/tests/test_leakage.py` — including "changing the test rows cannot change what was fitted" |
+| Selection reads no test-set number | `compare_models(strategy="cross_validation")` builds a comparison with no test metrics in it at all | `ml/tests/test_selection.py::test_ruining_the_test_set_leaves_the_cv_ranking_unchanged` |
+| Folds fit their own preprocessing | the fold splitter refits inside each fold | `ml/tests/test_cross_validation.py` |
+| The record says which number came from where | `scored_on`, `uses_test_data`, `is_unbiased` | `ml/tests/test_evaluation_contract.py` |
+| A run that *does* spend the test set says so | the holdout strategy sets `is_unbiased=False` and raises `selection_used_test_data` | `ml/tests/test_evaluation_contract.py` |
+
+No hyperparameter search exists in this project, so there is nothing to tune on
+the test set — model parameters come from a registry of fixed specifications.
+That is a real limitation, stated as one rather than dressed up as discipline.
+
 ```
 Model                                   CV Mean F1  CV Std
 ----------------------------------------------------------
@@ -868,8 +886,8 @@ of which is a summary of something the pipeline already produced:
 | identity | `schema_version`, `experiment_id`, `configuration_hash`, `created_at`, `name`, `description`, `tags` |
 | `dataset` | fingerprint and its algorithm, row and column counts, column names and dtypes, target column, task type, source format, data-quality findings |
 | `preprocessing` | the configuration, feature groups, selected and excluded columns, per-column decisions, transformed feature names, split sizes, seed, stratification |
-| `selection` | strategy, folds, candidate models, every candidate's score, the winner, the selection score and its spread, what it was scored on, and whether test data was involved |
-| `evaluation` | the final metrics on the untouched test set, the baseline and the improvement over it, classification detail, and whether the measurement is unbiased |
+| `selection` | strategy, folds, candidate models, every candidate's score, the winner, the selection score and its spread, what it was scored on, whether test data was involved, and one sentence saying why the winner won |
+| `evaluation` | the final metrics on the untouched test set, the baseline and the improvement over it, classification detail, whether the measurement is unbiased, and the diagnostics the run raised |
 | `explainability` | method, explainer, ranked feature importances, sample and feature counts, and any warnings — `None` when nothing was explained |
 | `environment` | Python version, platform, library versions, random seed |
 
@@ -1025,6 +1043,89 @@ comparison establishes one shared metric first, reads its direction from the
 same `MetricDefinition` the selection code uses, and orders accordingly.
 Runs with no score sort last rather than winning by accident. The result
 renders as a table of plain values, a JSON-safe `summary()`, or text.
+
+Each row carries what a score needs in order to be read honestly, all of it
+read from the stored record and none of it recomputed:
+
+| Field | Why it is in the row |
+| --- | --- |
+| `model_name`, `task_type`, `primary_metric` | what was measured, and by which yardstick |
+| `selection_score`, `selection_score_std` | the mean over folds and the spread between them — the number that *chose* the model |
+| `test_score` | the held-out measurement, taken once after the choice |
+| `baseline_score`, `improvement` | what a naive model scored, and the margin |
+| `train_row_count`, `test_row_count`, `feature_count` | how much data was behind each number |
+| `warning_count` | how many diagnostics this run raised |
+| `is_unbiased` | whether the test score played any part in choosing |
+| `rationale` | why this run's winner won |
+| `created_at` | when |
+
+The text table labels the two score columns `CV F1` and `Held-out F1`, prints
+the cross-validated column as `0.8421 ± 0.0310`, and says in a footnote that
+the `±` is fold-to-fold spread and **not a confidence interval**. A field of
+runs where one is quietly a small-sample result is the situation this table
+exists to prevent.
+
+### Why the winner won
+
+`SelectionSection.rationale` is one sentence, composed by
+`ml.experiments.run.selection_rationale` from the numbers the selection
+recorded:
+
+> Random Forest selected because it achieved the best cross-validation F1 over
+> 5 folds (0.8421 ± 0.0310) among 3 candidate models. The held-out score is an
+> independent measurement taken after this choice, not the reason for it.
+
+Three properties are deliberate. It names the **selection** basis, never the
+held-out score, because the held-out score did not choose the model. It is
+composed by this code and **never by a language model** — the agent is given
+this sentence and told to use it, precisely because "which model is best and
+why" is the question a model answers most fluently and most wrongly. And it
+makes no claim about whether the winner is any *good*: that is what the
+diagnostics below are for, and they raise questions rather than answering them.
+
+The field is optional, like every field added after a schema version. A record
+written before it reads back with `rationale=None` and the
+`selection_rationale` property recomposes the same sentence on demand.
+
+### Diagnostics: signals, not verdicts
+
+`ml/evaluation/diagnostics.py` reads a finished run's own recorded numbers and
+returns the situations worth a second look. It fits nothing, reads no dataset,
+and computes no metric — every threshold is applied to a value the run already
+stored, which is why the same list can be produced from a record years later.
+
+| Code | Raised when |
+| --- | --- |
+| `generalisation_gap` | the held-out score is ≥15% worse than the cross-validated one |
+| `high_cv_variability` | the fold spread is ≥25% of the fold mean |
+| `small_dataset` | fewer than 200 rows in total |
+| `small_test_set` | fewer than 50 held-out rows |
+| `class_imbalance` | one class holds ≥80% of the evaluated rows (≥95% is worded more strongly) |
+| `missing_class_in_test` | the model can predict a class the held-out rows do not contain |
+| `undefined_metric` | a metric could not be computed, with the reason (a note, not a warning) |
+| `baseline_not_beaten` | the winner did not beat the naive baseline |
+| `selection_used_test_data` | the held-out score also chose the model — the holdout strategy |
+
+Every threshold is a module constant, so the documentation cannot drift from
+the code.
+
+**What these are not.** They are not verdicts. A gap between cross-validated
+and held-out performance is consistent with overfitting, and also with an
+unlucky split, a small test set, or a distribution that shifts across the
+data's natural order; the module cannot tell those apart and does not try. So
+it says *"potential overfitting signal: held-out performance is materially
+below cross-validation performance"* and never *"the model is overfit"*. A
+test asserts the verdict words are absent from every message the module can
+produce.
+
+They are not failures either. Nothing here fails a run, changes a score or
+blocks a result — a run with four diagnostics is a completed run with four
+things worth reading. And they prove nothing about leakage: leakage is
+prevented structurally, in `ml/pipelines/preparation.py`, and a diagnostic is a
+prompt to look rather than evidence of a fault.
+
+A healthy run raises none. That is worth stating: a check that always finds
+something teaches its readers to skip it.
 
 ### Building a record
 

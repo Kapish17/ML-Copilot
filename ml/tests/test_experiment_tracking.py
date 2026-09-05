@@ -435,6 +435,85 @@ def test_the_comparison_carries_the_baseline_and_improvement() -> None:
     assert row.selection_score == pytest.approx(0.81)
 
 
+def test_a_comparison_row_carries_the_context_a_score_needs() -> None:
+    """Two F1 scores are not comparable without knowing what produced them.
+
+    Rows, features and the metric belong beside the number: 0.84 from ninety
+    training rows and 0.84 from four thousand are not the same claim.
+    """
+    row = compare_experiments([experiment_run()]).rows[0]
+
+    assert row.task_type == "classification"
+    assert row.primary_metric == "f1"
+    assert row.train_row_count == 240
+    assert row.test_row_count == 60
+    assert row.feature_count == 2
+    assert row.is_unbiased is True
+    assert row.selection_score_std == pytest.approx(0.02)
+    assert "cross-validation F1" in row.rationale
+
+
+def test_a_comparison_row_reports_how_many_signals_a_run_raised() -> None:
+    """Enough to mark a row for a second look; the sentences live on its page."""
+    rows = compare_experiments(
+        [
+            experiment_run(
+                experiment_id="exp_flagged",
+                test_score=0.9,
+                diagnostics=(
+                    {"code": "small_test_set", "severity": "warning", "message": "…"},
+                    {"code": "undefined_metric", "severity": "info", "message": "…"},
+                ),
+            ),
+            experiment_run(experiment_id="exp_clean", test_score=0.8),
+        ]
+    ).rows
+
+    assert [row.warning_count for row in rows] == [1, 0]
+
+
+def test_a_comparison_row_invents_nothing_it_was_not_given() -> None:
+    """A record without a number produces a row without one."""
+    row = compare_experiments(
+        [experiment_run(selection_score=None, selection_score_std=None)]
+    ).rows[0]
+
+    assert row.selection_score is None
+    assert row.selection_score_std is None
+
+
+def test_the_comparison_names_the_metric_for_its_headings() -> None:
+    """So a reader labels its columns the same way this table does."""
+    summary = compare_experiments([experiment_run()]).summary()
+
+    assert summary["primary_metric"] == "f1"
+    assert summary["primary_metric_label"] == "F1"
+
+
+def test_the_table_shows_the_cross_validation_spread_beside_its_mean() -> None:
+    """A mean over folds without the spread invites unearned confidence."""
+    text = compare_experiments(
+        [experiment_run(selection_score=0.8421, selection_score_std=0.031)]
+    ).as_text()
+
+    assert "0.8421 ± 0.0310" in text
+
+
+def test_the_table_marks_a_run_that_raised_signals() -> None:
+    """Marked for reading, not scored down."""
+    text = compare_experiments(
+        [
+            experiment_run(
+                diagnostics=(
+                    {"code": "small_test_set", "severity": "warning", "message": "…"},
+                )
+            )
+        ]
+    ).as_text()
+
+    assert "1 to review" in text
+
+
 def test_unscored_runs_rank_last_in_a_comparison() -> None:
     """A run with no final score cannot be the best one."""
     comparison = compare_experiments(
@@ -492,10 +571,15 @@ def test_the_comparison_renders_a_readable_table() -> None:
     ).as_text()
 
     assert "CV F1" in text
-    assert "Test F1" in text
+    # "Held-out", not "Test": the column is a measurement taken after the
+    # choice was made, and the heading is the only place that says so.
+    assert "Held-out F1" in text
     assert "Baseline" in text
     assert "Improvement" in text
+    assert "Train rows" in text
+    assert "Features" in text
     assert "higher is better" in text
+    assert "not a confidence interval" in text
     assert "exp_b" in text.splitlines()[2], "the best run leads the table"
 
 

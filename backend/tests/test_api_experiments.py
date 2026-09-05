@@ -172,6 +172,38 @@ def test_cross_validation_never_reads_the_test_set(
     assert classification_run["evaluation"]["is_unbiased"] is True
 
 
+def test_the_response_says_why_the_winning_model_won(
+    classification_run: dict[str, Any]
+) -> None:
+    """Composed by the ML layer from the run's numbers, and sent as it is."""
+    rationale = classification_run["selection"]["rationale"]
+
+    assert "cross-validation" in rationale
+    assert "held-out score is an independent measurement" in rationale
+
+
+def test_the_response_carries_the_signals_this_run_actually_raised(
+    classification_run: dict[str, Any]
+) -> None:
+    """The diagnostics field is always present and always earned.
+
+    This suite's dataset is 240 rows, which leaves a 48-row held-out split —
+    genuinely a small one, and the run says so. What it must not say is
+    anything the numbers do not support, so the checks that depend on a poor
+    result are asserted absent.
+    """
+    evaluation = classification_run["evaluation"]
+    raised = {item["code"] for item in evaluation["diagnostics"]}
+
+    assert raised == {"small_test_set"}
+    assert evaluation["warning_count"] == 1
+    assert not raised & {
+        "generalisation_gap",
+        "baseline_not_beaten",
+        "selection_used_test_data",
+    }
+
+
 def test_the_holdout_strategy_declares_itself_optimistic(
     experiment_client: TestClient,
 ) -> None:
@@ -186,6 +218,32 @@ def test_the_holdout_strategy_declares_itself_optimistic(
 
     assert payload["selection"]["uses_test_data"] is True
     assert payload["evaluation"]["is_unbiased"] is False
+    # And the reason is put where a reader will meet it, in the same words
+    # every other surface uses.
+    diagnostics = {item["code"]: item for item in payload["evaluation"]["diagnostics"]}
+    assert "selection_used_test_data" in diagnostics
+    assert diagnostics["selection_used_test_data"]["severity"] == "warning"
+    assert payload["evaluation"]["warning_count"] >= 1
+    assert "not independent of this choice" in payload["selection"]["rationale"]
+
+
+def test_a_diagnostic_is_a_signal_and_never_a_verdict(
+    experiment_client: TestClient,
+) -> None:
+    """The wording rule, checked at the edge a client actually reads."""
+    payload = run_experiment(
+        experiment_client,
+        target_column="renewed",
+        models=CLASSIFIERS,
+        strategy="holdout",
+        name="holdout wording",
+    ).json()
+    messages = " ".join(
+        item["message"] for item in payload["evaluation"]["diagnostics"]
+    ).lower()
+
+    for verdict in ("is overfit", "proves", "guarantees", "do not use"):
+        assert verdict not in messages
 
 
 def test_the_result_is_measured_against_a_baseline(
@@ -740,7 +798,41 @@ def test_two_classification_runs_can_be_compared(
     }
     scores = [row["test_score"] for row in payload["runs"]]
     assert scores == sorted(scores, reverse=True)
-    assert "Test F1" in payload["table"]
+    assert "Held-out F1" in payload["table"]
+
+
+def test_a_comparison_row_carries_what_a_score_needs_to_be_read(
+    experiment_client: TestClient, classification_run: dict[str, Any]
+) -> None:
+    """The metric, the spread, the data behind it, and anything flagged."""
+    second = run_experiment(
+        experiment_client,
+        target_column="renewed",
+        models=["logistic_regression"],
+        folds=FOLDS,
+        name="logistic only",
+    ).json()
+
+    payload = experiment_client.post(
+        COMPARE_URL,
+        json={
+            "experiment_ids": [
+                classification_run["experiment_id"],
+                second["experiment_id"],
+            ]
+        },
+    ).json()
+
+    assert payload["primary_metric_label"] == "F1"
+    for row in payload["runs"]:
+        assert row["task_type"] == "classification"
+        assert row["primary_metric"] == "f1"
+        assert row["train_row_count"] > 0
+        assert row["feature_count"] > 0
+        assert row["is_unbiased"] is True
+        # One signal each: a 240-row dataset leaves a 48-row held-out split.
+        assert row["warning_count"] == 1
+        assert "cross-validation" in row["rationale"]
 
 
 def test_runs_judged_by_different_metrics_are_not_ranked(

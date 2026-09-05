@@ -237,6 +237,15 @@ def experiment_payload(experiment_id: str = "exp_20260101T000000Z_abc123") -> di
             "selected_model": "random_forest_classifier",
             "strategy": "cross_validation",
             "selection_score": 0.87,
+            "selection_score_std": 0.02,
+            "folds": 5,
+            "scored_on": "training_folds",
+            "rationale": (
+                "Random Forest selected because it achieved the best "
+                "cross-validation F1 over 5 folds (0.8700 ± 0.0200) among 2 "
+                "candidate models. The held-out score is an independent "
+                "measurement taken after this choice, not the reason for it."
+            ),
             "candidates": [
                 {"model_name": "logistic_regression", "score": 0.81, "status": "ok"},
                 {"model_name": "random_forest_classifier", "score": 0.87, "status": "ok"},
@@ -246,6 +255,20 @@ def experiment_payload(experiment_id: str = "exp_20260101T000000Z_abc123") -> di
             "primary_metric": "f1",
             "primary_metric_value": 0.86,
             "metrics": {"f1": 0.86, "accuracy": 0.88},
+            "test_row_count": 48,
+            "is_unbiased": True,
+            "diagnostics": [
+                {
+                    "code": "small_test_set",
+                    "severity": "warning",
+                    "message": (
+                        "Small held-out set: the final measurement was taken "
+                        "on 48 rows."
+                    ),
+                    "details": {"test_row_count": 48},
+                }
+            ],
+            "warning_count": 1,
         },
         "explainability": {
             "method": "shap",

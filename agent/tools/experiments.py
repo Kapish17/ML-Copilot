@@ -58,6 +58,13 @@ def summarise_run(payload: Mapping[str, Any]) -> dict[str, Any]:
     context budget without changing any decision. The identifier is preserved
     exactly, because it is what the answer will cite and what a person will
     look the run up by.
+
+    Two of these fields exist so the model is never left to invent them. The
+    ``selection_rationale`` is the sentence the ML layer composed from the run's
+    own numbers, and ``diagnostics`` are the signals it raised. A planner asked
+    why a model won, or whether a result is trustworthy, should be repeating
+    what the backend already decided — the backend is the source of truth, and
+    a fluent guess is exactly what this project must not produce.
     """
     dataset = payload.get("dataset") or {}
     selection = payload.get("selection") or {}
@@ -76,9 +83,24 @@ def summarise_run(payload: Mapping[str, Any]) -> dict[str, Any]:
         "selected_model": selection.get("selected_model"),
         "selection_strategy": selection.get("strategy"),
         "selection_score": selection.get("selection_score"),
+        "selection_score_std": selection.get("selection_score_std"),
+        "selection_folds": selection.get("folds"),
+        "selection_scored_on": selection.get("scored_on"),
+        "selection_rationale": selection.get("rationale"),
         "primary_metric": evaluation.get("primary_metric"),
         "primary_metric_value": evaluation.get("primary_metric_value"),
         "test_metrics": evaluation.get("metrics") or {},
+        "test_row_count": evaluation.get("test_row_count"),
+        "held_out_is_unbiased": evaluation.get("is_unbiased"),
+        "diagnostics": [
+            {
+                "code": item.get("code"),
+                "severity": item.get("severity"),
+                "message": item.get("message"),
+            }
+            for item in (evaluation.get("diagnostics") or [])
+            if isinstance(item, dict)
+        ],
         "warnings": list(payload.get("warnings") or []),
     }
 

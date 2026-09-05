@@ -209,6 +209,10 @@ def _selection_section(run: Any) -> list[str]:
         + _score_with_spread(selection.selection_score, selection.selection_score_std),
         f"Scored on: {selection.scored_on or 'n/a'}",
         f"Used test data for selection: {_number(selection.uses_test_data)}",
+        # Rendered so a retrieved passage can answer "why this model?" with the
+        # sentence the ML layer composed, rather than leaving an answering
+        # model to reconstruct the reason from loose numbers.
+        f"Why this model won: {selection.selection_rationale}",
     ]
     if selection.folds:
         lines.append(f"Cross-validation folds: {selection.folds}")
@@ -279,6 +283,23 @@ def _evaluation_section(run: Any) -> list[str]:
             f"- {key}: {reason}"
             for key, reason in sorted(evaluation.unavailable_metrics.items())
         )
+
+    diagnostics = evaluation.diagnostics or ()
+    if diagnostics:
+        # Rendered verbatim, wording included. The messages are deliberately
+        # written as signals rather than verdicts, and paraphrasing them into
+        # a retrievable document is how "potential overfitting signal" becomes
+        # "the model is overfit" three hops later.
+        lines.append(
+            "Diagnostics — signals worth a second look, not verdicts and not "
+            "failures:"
+        )
+        for item in diagnostics:
+            severity = item.get("severity", "info")
+            lines.append(f"- [{severity}] {item.get('code', '?')}: "
+                         f"{item.get('message', '')}")
+    else:
+        lines.append("Diagnostics: none were raised for this run.")
     return lines
 
 
@@ -405,6 +426,11 @@ def experiment_metadata(run: Any) -> dict[str, Any]:
         "tags": list(run.tags),
         "row_count": run.dataset.row_count,
         "column_count": run.dataset.column_count,
+        "train_row_count": run.preprocessing.train_row_count,
+        "feature_count": run.feature_count,
+        #: A count, not the sentences: enough to filter on "runs with nothing
+        #: flagged" without putting a paragraph in every chunk's metadata.
+        "warning_count": run.evaluation.warning_count,
     }
 
 

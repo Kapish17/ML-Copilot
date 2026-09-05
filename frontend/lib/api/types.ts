@@ -214,6 +214,13 @@ export interface ExperimentSelection {
   scored_on: string;
   /** False under cross-validation: the test set was not touched to choose. */
   uses_test_data: boolean;
+  /**
+   * One sentence on why the winning model won, composed by the backend from
+   * this run's own recorded numbers. Displayed as sent: it is not written by
+   * a language model, and the frontend must not compose its own version.
+   * Optional, because records written before it exist.
+   */
+  rationale?: string;
 }
 
 export interface BaselineComparison {
@@ -247,6 +254,21 @@ export interface ExperimentEvaluation {
   classification_details?: ClassificationDetails | null;
   test_row_count: number;
   is_unbiased: boolean;
+  /**
+   * Situations in this run worth a second look. Signals, not verdicts, and
+   * not failures — a run with diagnostics completed exactly as asked.
+   * Optional, because records written before diagnostics existed have none.
+   */
+  diagnostics?: ExperimentDiagnostic[];
+  warning_count?: number;
+}
+
+/** One signal about a finished run. `code` is stable; `message` is for people. */
+export interface ExperimentDiagnostic {
+  code: string;
+  severity: "warning" | "info" | string;
+  message: string;
+  details?: JsonObject;
 }
 
 export interface FeatureImportance {
@@ -448,7 +470,13 @@ export interface ExperimentHeadline {
   strategy: string;
   primary_metric: string;
   selection_score: number | null;
+  selection_score_std?: number | null;
   test_score: number | null;
+  train_row_count?: number | null;
+  test_row_count?: number | null;
+  feature_count?: number | null;
+  warning_count?: number;
+  is_unbiased?: boolean;
 }
 
 export interface ExperimentListResponse {
@@ -463,16 +491,30 @@ export interface ComparisonRow {
   name: string;
   model_name: string;
   strategy: string;
+  task_type?: string;
+  primary_metric?: string;
+  /** The score that chose the model. Never a test result. */
   selection_score: number | null;
+  /** Spread across folds — how much they disagreed, not a confidence interval. */
   selection_score_std: number | null;
+  /** The held-out measurement, taken once after selection. */
   test_score: number | null;
   baseline_score: number | null;
   improvement: number | null;
+  train_row_count?: number | null;
+  test_row_count?: number | null;
+  /** Features after encoding, as the model saw them. */
+  feature_count?: number | null;
+  /** Diagnostics on this run worth more than a glance. */
+  warning_count?: number;
+  is_unbiased?: boolean;
+  rationale?: string;
 }
 
 export interface ExperimentComparison {
   task_type: string;
   primary_metric: string;
+  primary_metric_label?: string;
   direction: MetricDirection | string;
   higher_is_better: boolean;
   run_count: number;

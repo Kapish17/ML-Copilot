@@ -268,6 +268,8 @@ retrain, evaluate once on the test set
         ↓
 SHAP global explanation               ml/explainability/
         ↓
+diagnose the finished run             ml/evaluation/diagnostics.py
+        ↓
 build + store the ExperimentRun       ml/experiments/
         ↓
 JSON response                         schemas/experiment.py
@@ -277,6 +279,16 @@ Execution is **synchronous**: the response arrives when the run has finished.
 No queue, worker or background execution is implemented, but `ExperimentRunner`
 is a plain function of its arguments with no shared state, so moving it onto a
 worker later is a change of caller rather than of runner.
+
+The response's `selection.rationale` is one sentence saying why the winner won,
+and `evaluation.diagnostics[]` is what the run raised about itself — a stable
+`code`, a `severity` of `warning` or `info`, and a `message` written for a
+person. Both are composed by `ml/` from the run's own recorded numbers: no
+language model is involved in either, and the API adds nothing to them. Show
+the message as sent — the wording is deliberately a signal ("potential
+overfitting signal") rather than a verdict ("the model is overfit"), because
+the evidence supports the first and not the second. Diagnostics never change a
+score, never fail a run and never affect a status code.
 
 A successful run's winning pipeline is persisted after evaluation, which is
 what `GET .../model` and `POST .../predict` use — see

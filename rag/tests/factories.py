@@ -205,6 +205,7 @@ class FakeExperimentRun:
         selection_score: float = 0.87,
         tags: tuple[str, ...] = ("baseline",),
         with_explanation: bool = True,
+        diagnostics: tuple[dict[str, Any], ...] = (),
     ) -> None:
         """Build a complete synthetic record."""
         self.experiment_id = experiment_id
@@ -278,6 +279,17 @@ class FakeExperimentRun:
             selection_score_std=0.02,
             scored_on="training_folds",
             uses_test_data=False,
+            # The real record composes this from its own numbers and exposes it
+            # under both names — the stored value and the property that
+            # recomposes it when a record predates the field.
+            rationale=(
+                f"{selected_model} selected because it achieved the best "
+                "cross-validation F1 over 5 folds among 2 candidate models."
+            ),
+            selection_rationale=(
+                f"{selected_model} selected because it achieved the best "
+                "cross-validation F1 over 5 folds among 2 candidate models."
+            ),
         )
         self.evaluation = FakeSection(
             primary_metric=primary_metric,
@@ -303,6 +315,10 @@ class FakeExperimentRun:
             },
             test_row_count=48,
             is_unbiased=True,
+            diagnostics=diagnostics,
+            warning_count=sum(
+                1 for item in diagnostics if item.get("severity") == "warning"
+            ),
         )
         self.explainability = (
             FakeSection(
@@ -345,6 +361,11 @@ class FakeExperimentRun:
     def primary_metric(self) -> str:
         """The metric the winner was chosen by."""
         return self.selection.primary_metric
+
+    @property
+    def feature_count(self) -> int:
+        """Features after encoding, as the model saw them."""
+        return len(self.preprocessing.transformed_feature_names)
 
 
 class FakeExperimentStore:

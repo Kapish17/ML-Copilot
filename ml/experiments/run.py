@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ml.errors import InvalidExperimentRecordError, UnsupportedSchemaVersionError
+from ml.evaluation.metrics import format_metric_spread, metric_label
 from ml.experiments.serialization import to_jsonable
 
 #: The version of this record format. Bump it when a change would stop older
@@ -196,6 +197,96 @@ class PreprocessingSection:
         )
 
 
+#: The strategy value that means "chosen by cross-validation on the training
+#: rows". Compared as a string because a record stores the strategy's value,
+#: not the enum, and this module reads records.
+CROSS_VALIDATION_STRATEGY = "cross_validation"
+
+
+def selection_rationale(
+    *,
+    strategy: str,
+    selected_model: str,
+    primary_metric: str,
+    selection_score: float | None = None,
+    selection_score_std: float | None = None,
+    folds: int | None = None,
+    uses_test_data: bool = False,
+    candidate_count: int = 0,
+) -> str:
+    """Say in one sentence why the winning model won.
+
+    Composed here, from the numbers the selection actually recorded, so the
+    explanation cannot drift from the run. Nothing in this project asks a
+    language model to write it: an invented rationale that sounds right is
+    worse than no rationale at all.
+
+    The sentence states the basis for the choice and nothing more. It does not
+    say whether the winner is good, whether the margin was meaningful, or
+    whether it will hold up on new data — those are judgements the numbers on
+    their own do not support, and the diagnostics in
+    :mod:`ml.evaluation.diagnostics` raise the questions worth raising.
+
+    Args:
+        strategy: How the winner was chosen — ``"cross_validation"`` or
+            ``"holdout"``.
+        selected_model: The winner's name, as it should be read.
+        primary_metric: The metric key the ranking used.
+        selection_score: The winner's score on that metric, if recorded.
+        selection_score_std: How much the folds disagreed, if recorded.
+        folds: Number of cross-validation folds, when applicable.
+        uses_test_data: True when the selecting score came from the test set,
+            which makes the final measurement dependent on the choice.
+        candidate_count: How many models were in the running.
+
+    Returns:
+        str: One or two plain sentences.
+    """
+    label = metric_label(primary_metric)
+    if uses_test_data:
+        basis = f"held-out {label}"
+    elif strategy == CROSS_VALIDATION_STRATEGY:
+        basis = f"cross-validation {label}"
+        if folds:
+            basis += f" over {folds} folds"
+    else:
+        basis = f"{label} under the '{strategy}' selection strategy"
+
+    score = format_metric_spread(selection_score, selection_score_std, missing="")
+    scored = f" ({score})" if score else ""
+
+    if candidate_count == 1:
+        # Naming a field of one as "the best" would overstate the comparison.
+        opening = (
+            f"{selected_model} was the only candidate model; its {basis} "
+            f"was {score}."
+            if score
+            else f"{selected_model} was the only candidate model, ranked by {basis}."
+        )
+    elif candidate_count > 1:
+        opening = (
+            f"{selected_model} selected because it achieved the best {basis}"
+            f"{scored} among {candidate_count} candidate models."
+        )
+    else:
+        # No candidate list recorded: say what chose it, claim no field size.
+        opening = (
+            f"{selected_model} selected on {basis}{scored}."
+        )
+
+    if uses_test_data:
+        closing = (
+            "That score came from the held-out set, so the final evaluation "
+            "is not independent of this choice."
+        )
+    else:
+        closing = (
+            "The held-out score is an independent measurement taken after "
+            "this choice, not the reason for it."
+        )
+    return f"{opening} {closing}"
+
+
 @dataclass(frozen=True)
 class SelectionSection:
     """Which models were tried and how the winner was chosen.
@@ -216,6 +307,39 @@ class SelectionSection:
     selection_score_std: float | None = None
     scored_on: str | None = None
     uses_test_data: bool = False
+    #: One sentence saying **why this model won**, composed from the fields
+    #: above by :func:`selection_rationale`. Written by this code from the
+    #: recorded numbers — never by a language model, and never a judgement
+    #: about whether the winner is any good. Optional, like every field added
+    #: after a schema version: a record written before it reads back with
+    #: ``None`` and the property recomposes one on demand.
+    rationale: str | None = None
+
+    @property
+    def selected_display_name(self) -> str:
+        """The winner's readable name, falling back to its registry key."""
+        for candidate in self.candidates:
+            if candidate.get("model_name") == self.selected_model:
+                return str(candidate.get("display_name") or self.selected_model)
+        return self.selected_model
+
+    @property
+    def selection_rationale(self) -> str:
+        """Why the winner won, from the stored numbers.
+
+        Recomposed when a record predates the field, so a reader never sees a
+        blank where an explanation belongs.
+        """
+        return self.rationale or selection_rationale(
+            strategy=self.strategy,
+            selected_model=self.selected_display_name,
+            primary_metric=self.primary_metric,
+            selection_score=self.selection_score,
+            selection_score_std=self.selection_score_std,
+            folds=self.folds,
+            uses_test_data=self.uses_test_data,
+            candidate_count=len(self.candidates) or len(self.candidate_models),
+        )
 
     def as_dict(self) -> dict[str, Any]:
         """Render the section as plain, JSON-friendly values."""
@@ -231,6 +355,7 @@ class SelectionSection:
             "selection_score_std": self.selection_score_std,
             "scored_on": self.scored_on,
             "uses_test_data": self.uses_test_data,
+            "rationale": self.selection_rationale,
         }
 
     @classmethod
@@ -249,6 +374,7 @@ class SelectionSection:
             selection_score_std=payload.get("selection_score_std"),
             scored_on=payload.get("scored_on"),
             uses_test_data=bool(payload.get("uses_test_data", False)),
+            rationale=payload.get("rationale"),
         )
 
 
@@ -266,6 +392,22 @@ class EvaluationSection:
     classification_details: dict[str, Any] | None = None
     test_row_count: int = 0
     is_unbiased: bool = False
+    #: Things about this run worth a second look — a gap between the
+    #: cross-validated and held-out scores, folds that disagreed, a tiny test
+    #: split, a dominant class. **Signals, never verdicts**, and never
+    #: failures: see :mod:`ml.evaluation.diagnostics`.
+    #:
+    #: Optional, so a record written before diagnostics existed reads back
+    #: with an empty tuple rather than failing — the same additive pattern
+    #: `explainability` and `model_artifact` use.
+    diagnostics: tuple[dict[str, Any], ...] = ()
+
+    @property
+    def warning_count(self) -> int:
+        """How many diagnostics ask for more than a glance."""
+        return sum(
+            1 for item in self.diagnostics if item.get("severity") == "warning"
+        )
 
     def as_dict(self) -> dict[str, Any]:
         """Render the section as plain, JSON-friendly values."""
@@ -280,6 +422,8 @@ class EvaluationSection:
             "classification_details": self.classification_details,
             "test_row_count": self.test_row_count,
             "is_unbiased": self.is_unbiased,
+            "diagnostics": [dict(item) for item in self.diagnostics],
+            "warning_count": self.warning_count,
         }
 
     @classmethod
@@ -297,6 +441,7 @@ class EvaluationSection:
             classification_details=payload.get("classification_details"),
             test_row_count=int(payload.get("test_row_count", 0)),
             is_unbiased=bool(payload.get("is_unbiased", False)),
+            diagnostics=_records(payload.get("diagnostics")),
         )
 
 
@@ -518,6 +663,16 @@ class ExperimentRun:
         """The metric the run was judged by."""
         return self.evaluation.primary_metric
 
+    @property
+    def feature_count(self) -> int:
+        """How many features the model actually saw, after encoding.
+
+        The transformed count, not the column count: one categorical column
+        with twelve levels is twelve features to the model, and that is the
+        number that belongs beside a score.
+        """
+        return len(self.preprocessing.transformed_feature_names)
+
     def headline(self) -> dict[str, Any]:
         """A one-line view of the run, for listings and comparisons."""
         return {
@@ -531,7 +686,13 @@ class ExperimentRun:
             "strategy": self.selection.strategy,
             "primary_metric": self.primary_metric,
             "selection_score": self.selection.selection_score,
+            "selection_score_std": self.selection.selection_score_std,
             "test_score": self.evaluation.primary_metric_value,
+            "train_row_count": self.preprocessing.train_row_count,
+            "test_row_count": self.evaluation.test_row_count,
+            "feature_count": self.feature_count,
+            "warning_count": self.evaluation.warning_count,
+            "is_unbiased": self.evaluation.is_unbiased,
         }
 
     def to_dict(self) -> dict[str, Any]:

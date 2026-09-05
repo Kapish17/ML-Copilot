@@ -27,6 +27,21 @@ export function ExperimentSummary({
   execution?: ExperimentExecution;
 }) {
   const { dataset, selection, evaluation } = record;
+  const metric = metricLabel(evaluation.primary_metric);
+  // Under the holdout strategy the selecting score is not cross-validated and
+  // did not come from the training rows — it is the held-out score, used
+  // twice. Labelling it "CV" and "training rows only" there would be the exact
+  // conflation the rest of this page exists to prevent.
+  const spread =
+    selection.selection_score_std === null
+      ? ""
+      : `± ${formatMetric(selection.selection_score_std)} · `;
+  const selectionLabel = selection.uses_test_data
+    ? `Selection ${metric}`
+    : `CV ${metric}`;
+  const selectionHint = selection.uses_test_data
+    ? `${spread}held-out rows — this score also chose the model`
+    : `${spread}training rows only`;
 
   return (
     <Card
@@ -44,18 +59,18 @@ export function ExperimentSummary({
     >
       <StatRow>
         <StatTile
-          label={`Test ${metricLabel(evaluation.primary_metric)}`}
+          label={`Held-out ${metric}`}
           value={formatMetric(evaluation.primary_metric_value)}
-          hint="measured once, unseen rows"
+          hint={
+            evaluation.is_unbiased
+              ? `measured once on ${formatCount(evaluation.test_row_count)} unseen rows`
+              : `${formatCount(evaluation.test_row_count)} rows that also chose the model`
+          }
         />
         <StatTile
-          label="CV mean"
+          label={selectionLabel}
           value={formatMetric(selection.selection_score)}
-          hint={
-            selection.selection_score_std === null
-              ? "training rows only"
-              : `± ${formatMetric(selection.selection_score_std)} · training rows only`
-          }
+          hint={selectionHint}
         />
         <StatTile label="Target" value={dataset.target_column} />
         <StatTile
@@ -70,6 +85,11 @@ export function ExperimentSummary({
         <StatTile
           label="Candidates"
           value={formatCount(selection.candidates.length)}
+        />
+        <StatTile
+          label="Features"
+          value={formatCount(record.preprocessing.transformed_feature_names.length)}
+          hint="after encoding, as the model saw them"
         />
         <StatTile
           label="Fingerprint"
@@ -88,6 +108,18 @@ export function ExperimentSummary({
           />
         )}
       </StatRow>
+
+      {/*
+        Why this model won, in the backend's own words. Rendered as sent and
+        never composed here: the sentence is built from the run's recorded
+        numbers, and a second version assembled in the browser would be a
+        second answer to the same question.
+      */}
+      {selection.rationale && (
+        <p className="mt-4 border-l-2 border-accent-200 pl-3 text-sm leading-relaxed text-ink-700">
+          {selection.rationale}
+        </p>
+      )}
 
       {record.tags && record.tags.length > 0 && (
         <div className="mt-3 flex flex-wrap gap-1.5">

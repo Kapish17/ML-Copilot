@@ -244,6 +244,8 @@ export const CLASSIFICATION_RUN: ExperimentRunResponse = {
     selection_score_std: 0.016125350251944674,
     scored_on: "training folds",
     uses_test_data: false,
+    rationale:
+      "Logistic Regression selected because it achieved the best cross-validation F1 over 3 folds (0.8528 ± 0.0161) among 3 candidate models. The held-out score is an independent measurement taken after this choice, not the reason for it.",
   },
   evaluation: {
     primary_metric: "f1",
@@ -286,6 +288,23 @@ export const CLASSIFICATION_RUN: ExperimentRunResponse = {
     },
     test_row_count: 36,
     is_unbiased: true,
+    diagnostics: [
+      {
+        code: "small_test_set",
+        severity: "warning",
+        message:
+          "Small held-out set: the final measurement was taken on 36 rows. One measurement on that many rows carries a wide margin of error, whatever it says.",
+        details: { test_row_count: 36, threshold: 50 },
+      },
+      {
+        code: "undefined_metric",
+        severity: "info",
+        message:
+          "Some metrics could not be computed for this run: roc_auc. They are reported as unavailable with a reason rather than filled in with a substitute.",
+        details: { unavailable: { roc_auc: "the model has no predict_proba" } },
+      },
+    ],
+    warning_count: 1,
   },
   explainability: {
     status: "available",
@@ -421,6 +440,7 @@ export const EXPERIMENT_LIST: ExperimentListResponse = {
 export const COMPARISON: ExperimentComparison = {
   task_type: "classification",
   primary_metric: "f1",
+  primary_metric_label: "F1",
   direction: "higher_is_better",
   higher_is_better: true,
   run_count: 2,
@@ -432,11 +452,20 @@ export const COMPARISON: ExperimentComparison = {
       name: "customers.csv · renewed",
       model_name: "logistic_regression",
       strategy: "cross_validation",
+      task_type: "classification",
+      primary_metric: "f1",
       selection_score: 0.8527877161598093,
       selection_score_std: 0.0161,
       test_score: 0.9444444444444444,
       baseline_score: 0,
       improvement: 0.9444444444444444,
+      train_row_count: 192,
+      test_row_count: 48,
+      feature_count: 7,
+      warning_count: 0,
+      is_unbiased: true,
+      rationale:
+        "Logistic Regression selected because it achieved the best cross-validation F1 over 3 folds (0.8528 \u00b1 0.0161) among 2 candidate models. The held-out score is an independent measurement taken after this choice, not the reason for it.",
     },
     {
       experiment_id: "exp_second_run_0002",
@@ -444,11 +473,20 @@ export const COMPARISON: ExperimentComparison = {
       name: "customers.json · renewed",
       model_name: "random_forest_classifier",
       strategy: "cross_validation",
+      task_type: "classification",
+      primary_metric: "f1",
       selection_score: 0.8114,
       selection_score_std: 0.0242,
       test_score: 0.9021,
       baseline_score: 0,
       improvement: 0.9021,
+      train_row_count: 192,
+      test_row_count: 48,
+      feature_count: 7,
+      warning_count: 2,
+      is_unbiased: true,
+      rationale:
+        "Random Forest selected because it achieved the best cross-validation F1 over 3 folds (0.8114 \u00b1 0.0242) among 2 candidate models. The held-out score is an independent measurement taken after this choice, not the reason for it.",
     },
   ],
   table: "…",
