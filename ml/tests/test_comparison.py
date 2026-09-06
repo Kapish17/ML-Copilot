@@ -185,7 +185,10 @@ def test_one_failure_does_not_stop_the_others(
     failure = comparison.failed()[0]
     assert failure.model_name == FAILING_MODEL
     assert failure.status is ModelStatus.FAILED
-    assert "always fails" in (failure.error or "")
+    # The reported failure names the exception type, never the estimator's
+    # message — see ml.errors.describe_failure.
+    assert "always fails" not in (failure.error or "")
+    assert "RuntimeError" in (failure.error or "")
     assert failure.error_type == "ModelTrainingError"
     assert failure.primary_metric_value is None
 

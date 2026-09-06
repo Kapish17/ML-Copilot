@@ -25,6 +25,33 @@ class MLError(Exception):
         self.details: dict[str, Any] = details or {}
 
 
+def describe_failure(exc: BaseException) -> str:
+    """Name a third-party failure without repeating what it was given.
+
+    scikit-learn, pandas and numpy write helpful messages by quoting the value
+    that broke — ``could not convert string to float: 'Acme Ltd'``,
+    ``Found unknown categories ['R&D'] in column 3``. Helpful in a debugger,
+    and a data leak anywhere this project puts it: a candidate's error is
+    stored in the experiment record, rendered into the retrieval index and
+    shown in the dashboard, none of which may carry a cell value.
+
+    So a failure from outside this project is reduced to its type. The type is
+    what a reader can act on (``ValueError`` versus ``MemoryError`` versus
+    ``NotFittedError``); the quoted value is what must not travel.
+
+    This is the same reduction :mod:`ml.artifacts.prediction` already applies
+    to a failed prediction, applied everywhere a foreign exception is recorded
+    rather than raised.
+
+    Args:
+        exc: The exception a third-party library raised.
+
+    Returns:
+        str: The exception's type name.
+    """
+    return type(exc).__name__
+
+
 class ConfigurationError(MLError):
     """The preprocessing configuration cannot be applied to the dataset."""
 

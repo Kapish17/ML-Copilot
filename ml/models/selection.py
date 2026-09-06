@@ -22,7 +22,7 @@ measurement, and the result says so.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from ml.models.comparison import (
@@ -203,9 +203,20 @@ def select_and_evaluate_best_model(
         # and scored on the test set. Refitting would change nothing.
         final_model = selected.trained_model
     else:
-        spec = selected.spec or ModelSpec(
-            model_name=selected.model_name,
-            primary_metric=comparison.primary_metric.key,
+        # The winner's own spec, but always judged by the metric the comparison
+        # ranked on. A caller may pass `ModelSpec(..., primary_metric="accuracy")`
+        # into a run whose `primary_metric` is "f1": the winner is then chosen
+        # by f1 and, without this, measured by accuracy — leaving one record
+        # whose selection score and held-out score are different metrics under
+        # a single label, and a generalisation-gap diagnostic computed across
+        # two scales. The spec's other choices (hyperparameters, seed) stand.
+        spec = (
+            replace(selected.spec, primary_metric=comparison.primary_metric.key)
+            if selected.spec is not None
+            else ModelSpec(
+                model_name=selected.model_name,
+                primary_metric=comparison.primary_metric.key,
+            )
         )
         final_model = train_model(prepared, spec, registry=active)
 

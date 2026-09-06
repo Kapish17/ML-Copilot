@@ -84,6 +84,15 @@ DEFAULT_CV_FOLDS = 5
 DEFAULT_MAX_CANDIDATE_MODELS = 6
 DEFAULT_MAX_EXPERIMENT_ROWS = 200_000
 DEFAULT_MAX_EXPERIMENT_FEATURE_COLUMNS = 200
+#: Ceiling on the features a model actually sees, counted *after* encoding.
+#:
+#: The column limit above counts what the file has; one-hot encoding decides
+#: what the model gets. Two hundred categorical columns at the fifty-category
+#: cap is ten thousand dense features — a legal upload of a couple of megabytes
+#: that becomes gigabytes once cross-validation copies the matrix per fold per
+#: model. This is the bound on the number that actually costs memory, checked
+#: once the encoder has said how many features there will be.
+DEFAULT_MAX_ENCODED_FEATURES = 2_000
 DEFAULT_MAX_EXPERIMENT_TAGS = 10
 #: SHAP limits, mirroring ``ml.explainability.config`` defaults.
 DEFAULT_EXPLANATION_REFERENCE_ROWS = 200
@@ -108,6 +117,22 @@ DEFAULT_MAX_PREDICTION_RECORDS = 500
 #: would hurt. **Multipart uploads are not subject to it**; they have their own
 #: larger limit and their own reader.
 DEFAULT_MAX_REQUEST_BODY_MB = 10
+
+# Ceilings on the limits themselves -----------------------------------------
+#
+# Every one of these bounds a *setting*, not a request. They exist because a
+# limit read from the environment can be set to a number that removes it, and
+# a removed limit that still looks configured is worse than no limit at all.
+# The values are generous — far above any honest use of a single-process,
+# synchronous service — and deliberately finite.
+MAX_CONFIGURABLE_UPLOAD_MB = 512
+MAX_CONFIGURABLE_REQUEST_BODY_MB = 512
+MAX_CONFIGURABLE_DATASET_ROWS = 10_000_000
+MAX_CONFIGURABLE_DATASET_COLUMNS = 10_000
+MAX_CONFIGURABLE_PREDICTION_RECORDS = 50_000
+MAX_CONFIGURABLE_EXPERIMENT_ROWS = 5_000_000
+MAX_CONFIGURABLE_ENCODED_FEATURES = 100_000
+MAX_CONFIGURABLE_CV_FOLDS = 50
 #: History listing.
 DEFAULT_EXPERIMENT_PAGE_LIMIT = 50
 DEFAULT_MAX_EXPERIMENT_PAGE_LIMIT = 200
@@ -130,16 +155,53 @@ def _env_origins(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
     raw = os.getenv(name)
     if raw is None:
         return default
-    return tuple(origin.strip() for origin in raw.split(",") if origin.strip())
+    origins = tuple(origin.strip() for origin in raw.split(",") if origin.strip())
+    if "*" in origins:
+        # A wildcard would let any page on the internet call this API from a
+        # visitor's browser. With authentication off that is every endpoint;
+        # with it on, a bearer key is not a cookie, so the browser would not
+        # attach it — meaning the wildcard buys nothing and costs the one
+        # protection a browser gives an unauthenticated deployment. Setting a
+        # wildcard is far more often a copied snippet than a decision, so it is
+        # refused with the alternative spelled out.
+        raise ValueError(
+            f"{name} must list explicit origins; '*' is not accepted. Set the "
+            "exact origins the dashboard is served from, or leave it empty to "
+            "disable cross-origin access entirely."
+        )
+    return origins
 
 
-def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+def _resolved_dir(value: str) -> Path:
+    """Turn a configured directory into one absolute, unambiguous path.
+
+    ``~`` is expanded and the path is made absolute, so a relative
+    ``EXPERIMENT_STORE_DIR=data/runs`` means the same directory however the
+    process was started. Without this the store moved with the working
+    directory: the same configuration pointed at different data depending on
+    where uvicorn was launched from, and a container restarted from a different
+    directory would come up with an empty history and no error.
+
+    The path is *not* required to exist — it is created on first write.
+    """
+    return Path(value).expanduser().resolve()
+
+
+def _env_int(
+    name: str, default: int, *, minimum: int = 1, maximum: int | None = None
+) -> int:
     """Read a positive integer from the environment.
 
     Args:
         name: Environment variable name.
         default: Value used when the variable is unset or blank.
         minimum: Smallest accepted value.
+        maximum: Largest accepted value, for limits where a big enough number
+            is indistinguishable from no limit at all. ``MAX_UPLOAD_MB=100000``
+            does not configure a hundred-gigabyte upload; it removes the
+            protection while leaving something in the settings that looks like
+            a protection. A typo of that shape is refused at startup, where an
+            operator can see it, rather than at 3am.
 
     Returns:
         int: The parsed value.
@@ -157,6 +219,12 @@ def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
         raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
     if value < minimum:
         raise ValueError(f"{name} must be >= {minimum}, got {value}")
+    if maximum is not None and value > maximum:
+        raise ValueError(
+            f"{name} must be <= {maximum}, got {value}. A limit that large is "
+            "not a limit; if the ceiling itself is wrong for your deployment, "
+            "change it in app/core/config.py where it is documented."
+        )
     return value
 
 
@@ -250,6 +318,7 @@ class Settings:
     max_candidate_models: int = DEFAULT_MAX_CANDIDATE_MODELS
     max_experiment_rows: int = DEFAULT_MAX_EXPERIMENT_ROWS
     max_experiment_feature_columns: int = DEFAULT_MAX_EXPERIMENT_FEATURE_COLUMNS
+    max_encoded_features: int = DEFAULT_MAX_ENCODED_FEATURES
     max_experiment_tags: int = DEFAULT_MAX_EXPERIMENT_TAGS
 
     # Explanation limits
@@ -281,6 +350,30 @@ class Settings:
         Raises:
             ValueError: If authentication is enabled without a usable key.
         """
+        # Fold settings have to be coherent with each other, not merely
+        # positive on their own: MIN_CV_FOLDS=8 with MAX_CV_FOLDS=5 accepts no
+        # fold count at all, and DEFAULT_CV_FOLDS outside the pair is a default
+        # every request has to override to be usable. Each is validated where
+        # it is read; nothing was checking them together.
+        if self.min_cv_folds > self.max_cv_folds:
+            raise ValueError(
+                f"MIN_CV_FOLDS ({self.min_cv_folds}) is greater than "
+                f"MAX_CV_FOLDS ({self.max_cv_folds}), so no fold count is "
+                "acceptable."
+            )
+        if not self.min_cv_folds <= self.default_cv_folds <= self.max_cv_folds:
+            raise ValueError(
+                f"DEFAULT_CV_FOLDS ({self.default_cv_folds}) must be between "
+                f"MIN_CV_FOLDS ({self.min_cv_folds}) and MAX_CV_FOLDS "
+                f"({self.max_cv_folds})."
+            )
+        if self.experiment_page_limit > self.max_experiment_page_limit:
+            raise ValueError(
+                f"EXPERIMENT_PAGE_LIMIT ({self.experiment_page_limit}) must not "
+                f"exceed MAX_EXPERIMENT_PAGE_LIMIT "
+                f"({self.max_experiment_page_limit})."
+            )
+
         if not self.api_auth_enabled:
             return
         key = self.api_auth_key
@@ -321,30 +414,56 @@ def get_settings() -> Settings:
         # or a stray space and a credential that fails to match for that reason
         # is an afternoon nobody gets back.
         api_auth_key=os.getenv("API_AUTH_KEY", "").strip(),
-        max_upload_bytes=_env_int("MAX_UPLOAD_MB", DEFAULT_MAX_UPLOAD_MB) * BYTES_PER_MB,
+        max_upload_bytes=_env_int("MAX_UPLOAD_MB", DEFAULT_MAX_UPLOAD_MB, maximum=MAX_CONFIGURABLE_UPLOAD_MB) * BYTES_PER_MB,
         max_request_body_bytes=(
-            _env_int("MAX_REQUEST_BODY_MB", DEFAULT_MAX_REQUEST_BODY_MB) * BYTES_PER_MB
+            _env_int(
+                "MAX_REQUEST_BODY_MB",
+                DEFAULT_MAX_REQUEST_BODY_MB,
+                maximum=MAX_CONFIGURABLE_REQUEST_BODY_MB,
+            ) * BYTES_PER_MB
         ),
         cors_allow_origins=_env_origins(
             "CORS_ALLOW_ORIGINS", DEFAULT_CORS_ALLOW_ORIGINS
         ),
-        max_dataset_rows=_env_int("MAX_DATASET_ROWS", DEFAULT_MAX_DATASET_ROWS),
-        max_dataset_columns=_env_int("MAX_DATASET_COLUMNS", DEFAULT_MAX_DATASET_COLUMNS),
+        max_dataset_rows=_env_int(
+            "MAX_DATASET_ROWS",
+            DEFAULT_MAX_DATASET_ROWS,
+            maximum=MAX_CONFIGURABLE_DATASET_ROWS,
+        ),
+        max_dataset_columns=_env_int(
+            "MAX_DATASET_COLUMNS",
+            DEFAULT_MAX_DATASET_COLUMNS,
+            maximum=MAX_CONFIGURABLE_DATASET_COLUMNS,
+        ),
         experiment_store_dir=(
-            Path(store_dir) if store_dir else DEFAULT_EXPERIMENT_STORE_DIR
+            _resolved_dir(store_dir) if store_dir else DEFAULT_EXPERIMENT_STORE_DIR
         ),
         model_artifact_dir=(
-            Path(artifact_dir) if artifact_dir else DEFAULT_MODEL_ARTIFACT_DIR
+            _resolved_dir(artifact_dir) if artifact_dir else DEFAULT_MODEL_ARTIFACT_DIR
         ),
         max_prediction_records=_env_int(
-            "MAX_PREDICTION_RECORDS", DEFAULT_MAX_PREDICTION_RECORDS
+            "MAX_PREDICTION_RECORDS",
+            DEFAULT_MAX_PREDICTION_RECORDS,
+            maximum=MAX_CONFIGURABLE_PREDICTION_RECORDS,
         ),
-        max_cv_folds=_env_int("MAX_CV_FOLDS", DEFAULT_MAX_CV_FOLDS, minimum=2),
+        max_cv_folds=_env_int(
+            "MAX_CV_FOLDS",
+            DEFAULT_MAX_CV_FOLDS,
+            minimum=2,
+            maximum=MAX_CONFIGURABLE_CV_FOLDS,
+        ),
         max_candidate_models=_env_int(
             "MAX_CANDIDATE_MODELS", DEFAULT_MAX_CANDIDATE_MODELS
         ),
         max_experiment_rows=_env_int(
-            "MAX_EXPERIMENT_ROWS", DEFAULT_MAX_EXPERIMENT_ROWS
+            "MAX_EXPERIMENT_ROWS",
+            DEFAULT_MAX_EXPERIMENT_ROWS,
+            maximum=MAX_CONFIGURABLE_EXPERIMENT_ROWS,
+        ),
+        max_encoded_features=_env_int(
+            "MAX_ENCODED_FEATURES",
+            DEFAULT_MAX_ENCODED_FEATURES,
+            maximum=MAX_CONFIGURABLE_ENCODED_FEATURES,
         ),
         explanation_rows=_env_int("EXPLANATION_ROWS", DEFAULT_EXPLANATION_ROWS),
     )

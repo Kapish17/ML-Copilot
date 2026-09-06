@@ -15,6 +15,7 @@ from agent.grounding import (
     coerce_length,
     evidence_from_observations,
     is_abstention,
+    observed_experiment_ids,
     unsupported_experiment_ids,
 )
 from agent.observations import Observation, ObservationStatus
@@ -146,6 +147,52 @@ def test_an_invented_experiment_id_is_detected() -> None:
     )
 
     assert invented == ("exp_invented_999",)
+
+
+def test_an_id_echoed_by_a_failed_call_is_still_invented() -> None:
+    """The laundering route: ask about an id that does not exist.
+
+    ``explain_experiment(experiment_id="exp_invented_999")`` fails, and the
+    failure honestly reports which id it could not find — carrying that id in
+    its output. Counting it as observed meant the very call that proved the id
+    does not exist was what made citing it legal. Citations were already
+    filtered to successful observations; results were not.
+    """
+    observations = [
+        Observation(
+            call_id="call-01",
+            tool_name="explain_experiment",
+            status=ObservationStatus.FAILED,
+            output={"experiment_id": "exp_invented_999"},
+            error="No experiment is stored under that identifier.",
+        )
+    ]
+
+    invented = unsupported_experiment_ids(
+        "The run exp_invented_999 scored 0.94.", observations
+    )
+
+    assert invented == ("exp_invented_999",)
+
+
+@pytest.mark.parametrize(
+    "status",
+    [ObservationStatus.FAILED, ObservationStatus.REJECTED, ObservationStatus.UNAVAILABLE],
+)
+def test_no_unsuccessful_status_contributes_a_result(
+    status: ObservationStatus,
+) -> None:
+    """One rule for every way a call can not produce a result."""
+    observations = [
+        Observation(
+            call_id="call-01",
+            tool_name="run_experiment",
+            status=status,
+            output={"experiment_id": "exp_echoed_001"},
+        )
+    ]
+
+    assert observed_experiment_ids(observations) == set()
 
 
 def test_an_observed_experiment_id_is_not_flagged() -> None:

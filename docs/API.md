@@ -210,7 +210,7 @@ on the untouched test set → SHAP → store.
 | `excluded_columns`, `identifier_columns` | optional, repeatable | Kept out of the feature set |
 | `scaling_strategy`, `numeric_imputation`, `categorical_imputation`, `add_missing_indicators`, `max_categorical_cardinality` | optional | Preprocessing overrides |
 | `explain` | optional, default `true` | Run SHAP on the winner |
-| `name`, `description`, `tags` | optional | Labels for later retrieval |
+| `name`, `description`, `tags` | optional | Labels for later retrieval. `name` defaults to `<filename> · <target>`, so an unnamed run **retains the uploaded filename** as its label — pass `name` if that is not wanted |
 
 **Returns** `ExperimentRunResponse` — the full stored record plus `execution`
 and `warnings`. The parts worth knowing:
@@ -266,6 +266,20 @@ interval and not a margin of error on the held-out number.
 `400 invalid_experiment_configuration` (a bad fold count, an unknown model, a
 metric that does not fit the task) and `409` when the dataset cannot support
 the requested run.
+
+`422 invalid_request` also covers a field this endpoint does not define —
+including a misspelled one. `target_colum=churn` is refused rather than
+ignored: dropping it silently would fall back to "the last column by
+convention" and return a complete, expensive experiment on the wrong column.
+
+`413 file_too_large` can come from the middleware as well as from the upload
+reader. A multipart body is bounded before it is parsed, because the whole body
+— every file part written to a temporary file — is read before route code runs.
+
+`413` carrying `max_encoded_features` in its details means the dataset is small
+enough to upload and too wide *after encoding* to train on: one-hot encoding
+turns each categorical value into a feature, and that limit bounds what the
+model actually sees. Exclude the widest categorical columns and run again.
 
 ### `GET /api/v1/experiments`
 

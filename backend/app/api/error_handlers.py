@@ -32,6 +32,7 @@ from app.core.agent_errors import (
     translate_agent_error,
 )
 from app.core.errors import MLCopilotError
+from app.core.logging import REQUEST_ID_HEADER
 from app.core.knowledge_errors import (
     LLMError,
     RagError,
@@ -180,8 +181,16 @@ async def handle_agent_error(request: Request, exc: AgentError) -> JSONResponse:
     )
 
 
+#: How much of a rejected value is echoed back. Pydantic quotes the offending
+#: input so a developer can see what was wrong with it, which is genuinely
+#: useful for a wrong type and useless past a line or two — and a *too long*
+#: string is echoed in full, which turns a bounded request into a response of
+#: the same size. Enough to recognise the value, not enough to be a payload.
+MAX_ECHOED_INPUT_CHARS = 200
+
+
 def _sanitise_validation_errors(errors: list[Any]) -> list[Any]:
-    """Strip the echoed value from "this field is not allowed" errors.
+    """Strip or shorten the echoed value in a validation complaint.
 
     Pydantic reports the offending value alongside the complaint, which helps
     a developer fix a wrong type. It does not help for ``extra_forbidden``:
@@ -189,11 +198,20 @@ def _sanitise_validation_errors(errors: list[Any]) -> list[Any]:
     value is exactly the kind of thing someone smuggles in — a credential, an
     endpoint, a prompt. Naming the field is the whole of the useful message;
     quoting what was in it only puts it back on the wire and into the logs.
+
+    Everything else keeps its value, cut to a length a person can read. A
+    two-thousand-character question rejected for being too long was otherwise
+    echoed in full — the request was bounded and the answer to it was not.
     """
     sanitised: list[Any] = []
     for error in errors:
         if isinstance(error, dict) and error.get("type") == "extra_forbidden":
             error = {key: value for key, value in error.items() if key != "input"}
+        elif isinstance(error, dict) and isinstance(error.get("input"), str):
+            value = error["input"]
+            if len(value) > MAX_ECHOED_INPUT_CHARS:
+                error = dict(error)
+                error["input"] = value[:MAX_ECHOED_INPUT_CHARS] + "…"
         sanitised.append(error)
     return sanitised
 
@@ -213,26 +231,54 @@ async def handle_validation_error(
 async def handle_http_exception(
     _: Request, exc: StarletteHTTPException
 ) -> JSONResponse:
-    """Return the envelope for Starlette's own HTTP errors, e.g. 404 and 405."""
+    """Return the envelope for Starlette's own HTTP errors, e.g. 404 and 405.
+
+    The exception's own headers are carried through: a 405 without the ``Allow``
+    header it is required to send is a technically wrong answer, and dropping
+    the header was invisible because the envelope looked right.
+    """
     return build_error_response(
         status_code=exc.status_code,
         code=_HTTP_STATUS_CODES.get(exc.status_code, "http_error"),
         message=str(exc.detail),
+        headers=getattr(exc, "headers", None),
     )
 
 
+def request_id_for(request: Request) -> str | None:
+    """The id bound to this request, read from the ASGI scope.
+
+    Read from the scope rather than the contextvar because this is called from
+    the one place the contextvar is already gone: Starlette's unhandled-error
+    handler runs above every application middleware, and therefore after the
+    context has been reset. See :class:`app.api.middleware.RequestContextMiddleware`.
+    """
+    state = request.scope.get("state") or {}
+    value = state.get("request_id")
+    return value if isinstance(value, str) and value else None
+
+
 async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
-    """Log an unexpected failure and answer with a generic message."""
+    """Log an unexpected failure and answer with a generic message.
+
+    A 500 is the failure a person is most likely to report, and the only way
+    anyone can find it in the log afterwards is the request id — so the id is
+    put back on both the log line and the response here, where the middleware
+    that normally does it can no longer reach.
+    """
+    request_id = request_id_for(request)
     logger.exception(
         "Unhandled %s while processing %s %s",
         type(exc).__name__,
         request.method,
         request.url.path,
+        extra={"request_id": request_id} if request_id else None,
     )
     return build_error_response(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         code="internal_error",
         message=INTERNAL_ERROR_MESSAGE,
+        headers={REQUEST_ID_HEADER: request_id} if request_id else None,
     )
 
 

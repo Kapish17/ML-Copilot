@@ -126,17 +126,46 @@ def test_the_dependabot_file_exists_and_parses() -> None:
     assert isinstance(config["updates"], list) and config["updates"]
 
 
-def test_it_watches_python_javascript_and_the_actions_themselves() -> None:
-    """Three ecosystems, one entry each.
+def test_it_watches_python_javascript_the_actions_and_the_base_images() -> None:
+    """Four ecosystems, one entry each.
 
-    The third is the one people forget. A workflow pinned to
-    `actions/checkout@v4` is pinned to a *moving* tag, and nothing else in this
-    repository would ever tell you a new major exists.
+    The last two are the ones people forget. A workflow pinned to
+    `actions/checkout@v4` is pinned to a *moving* tag; and a base image is the
+    largest dependency in the repository by volume and the only one that
+    appears in no manifest at all — a CVE in the image's OpenSSL shows up in
+    neither `pip-audit` nor `npm audit`, so without the `docker` entry nothing
+    here would ever mention it.
     """
     ecosystems = [u["package-ecosystem"] for u in dependabot()["updates"]]
 
-    assert sorted(ecosystems) == ["github-actions", "npm", "pip"]
+    assert sorted(ecosystems) == ["docker", "github-actions", "npm", "pip"]
     assert len(ecosystems) == len(set(ecosystems)), "an ecosystem is configured twice"
+
+
+def test_every_dockerfile_in_the_repository_is_watched() -> None:
+    """Computed from a walk of the checkout, like the Python manifests.
+
+    A third image added later — a worker, a proxy — is a directory this test
+    finds and the configuration has to name.
+    """
+    docker_entry = next(
+        update
+        for update in dependabot()["updates"]
+        if update["package-ecosystem"] == "docker"
+    )
+    watched = {
+        directory.strip("/")
+        for directory in docker_entry.get("directories", [])
+        or [docker_entry.get("directory", "")]
+    }
+
+    found = {
+        path.parent.relative_to(REPOSITORY_ROOT).as_posix()
+        for path in REPOSITORY_ROOT.glob("*/Dockerfile")
+    }
+
+    assert found, "the repository should contain Dockerfiles"
+    assert found <= watched, f"unwatched Dockerfile directories: {found - watched}"
 
 
 def test_every_python_manifest_in_the_repository_is_watched() -> None:

@@ -1,6 +1,7 @@
 /** Experiment endpoints: running, listing, fetching and comparing. */
 
 import { getJson, postForm, postJson, type RequestOptions } from "./client";
+import { ApiError, CLIENT_ERROR_CODES } from "./errors";
 import type {
   ExperimentCapabilities,
   ExperimentComparison,
@@ -73,16 +74,55 @@ export function listExperiments(
   return getJson<ExperimentListResponse>("/api/v1/experiments", query, options);
 }
 
-/** Fetch one stored experiment in full. */
-export function getExperiment(
+/**
+ * The sections the experiment page traverses rather than merely displays.
+ *
+ * A missing string renders as an empty string; a missing *section* is a
+ * `.map` of undefined inside a render, which throws and takes the page with
+ * it. These are the four the detail page iterates.
+ */
+const REQUIRED_RECORD_SECTIONS = [
+  "dataset",
+  "preprocessing",
+  "selection",
+  "evaluation",
+] as const;
+
+/**
+ * Fetch one stored experiment in full.
+ *
+ * The response is checked for the sections the page will traverse. `requestJson`
+ * already refuses a body that is not an object, which catches a proxy's HTML
+ * error page — it cannot catch a *JSON* body of the wrong shape, and that is
+ * the one a version skew or a partial deployment actually produces. Without
+ * this the page threw mid-render; with it the caller gets the same
+ * `malformed_response` every other unreadable answer produces, and the page
+ * shows the error state it already has.
+ */
+export async function getExperiment(
   experimentId: string,
   options: RequestOptions = {},
 ): Promise<ExperimentRecord> {
-  return getJson<ExperimentRecord>(
+  const record = await getJson<ExperimentRecord>(
     `/api/v1/experiments/${encodeURIComponent(experimentId)}`,
     undefined,
     options,
   );
+
+  const missing = REQUIRED_RECORD_SECTIONS.filter((section) => {
+    const value = (record as unknown as Record<string, unknown>)[section];
+    return value === null || typeof value !== "object";
+  });
+  if (missing.length > 0) {
+    throw new ApiError(
+      CLIENT_ERROR_CODES.MALFORMED,
+      "The backend returned an experiment this app could not read.",
+      200,
+      { missing_sections: missing },
+    );
+  }
+
+  return record;
 }
 
 /** Rank two or more experiments that share a task and a metric. */

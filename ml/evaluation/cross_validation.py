@@ -33,7 +33,7 @@ import pandas as pd
 from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.pipeline import Pipeline
 
-from ml.errors import InvalidFoldCountError
+from ml.errors import InvalidFoldCountError, describe_failure
 from ml.evaluation.metrics import (
     EvaluationMetrics,
     MetricDefinition,
@@ -106,18 +106,20 @@ def validate_fold_count(
             )
         smallest = int(counts.min())
         if smallest < folds:
+            # Counts, never labels. The rarest class's *name* is a value from
+            # the target column, and the full distribution is the whole column
+            # — this error is returned to an API caller, so it says how many
+            # rows the smallest class has and how many classes there are, and
+            # leaves the reader to look at their own data for the rest.
             raise InvalidFoldCountError(
-                f"Class '{counts.idxmin()}' has only {smallest} training row(s), "
-                f"which is fewer than the {folds} folds requested. Reduce the "
-                "number of folds or collect more examples of that class.",
+                f"The rarest class has only {smallest} training row(s), which "
+                f"is fewer than the {folds} folds requested. Reduce the number "
+                "of folds or collect more examples of that class.",
                 details={
                     "reason": "class_smaller_than_folds",
                     "folds": folds,
-                    "smallest_class": str(counts.idxmin()),
                     "smallest_class_count": smallest,
-                    "class_counts": {
-                        str(label): int(count) for label, count in counts.items()
-                    },
+                    "class_count": int(counts.size),
                 },
             )
 
@@ -413,10 +415,13 @@ def _run_fold(
             score_labels=score_labels,
         )
     except Exception as exc:  # noqa: BLE001 - a fold failure must not stop the run
+        # The type, not the message: a fold's error is stored in the experiment
+        # record and rendered into the retrieval index, and sklearn writes its
+        # messages by quoting the value that broke. See ml.errors.describe_failure.
         return FoldResult(
             fold=fold_number,
             status=FoldStatus.FAILED,
-            error=str(exc),
+            error=describe_failure(exc),
             error_type=type(exc).__name__,
             **sizes,
         )

@@ -37,6 +37,7 @@ from ml.errors import (
     InvalidExplanationRowError,
     InvalidTrainedModelError,
     MissingFeatureColumnsError,
+    describe_failure,
 )
 from ml.explainability.config import ExplanationConfig, limit_rows
 from ml.explainability.permutation import (
@@ -260,7 +261,10 @@ def explain_global(
                 warnings=(*notes, *shap_notes),
             )
         except ShapUnavailable as exc:
-            notes.append(f"SHAP was unavailable, so the fallback was used: {exc}")
+            notes.append(
+                "SHAP was unavailable, so the fallback was used "
+                f"({describe_failure(exc)})."
+            )
     else:
         notes.append(f"SHAP was unavailable, so the fallback was used: {plan.reason}")
 

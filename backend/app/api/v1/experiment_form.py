@@ -19,7 +19,8 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import Depends, Form
+from fastapi import Depends, Form, Request
+from fastapi.exceptions import RequestValidationError
 
 from app.services.experiments import ExperimentOptions
 from app.services.experiments.options import (
@@ -30,7 +31,42 @@ from app.services.experiments.options import (
 )
 
 
-def experiment_options(
+#: Every field this endpoint defines, plus the file part itself. Anything else
+#: in the body is refused.
+#:
+#: Silence used to be the answer here, and silence is expensive on this
+#: endpoint: ``target_colum=churn`` — one character short — was accepted, the
+#: target fell back to "the last column by convention", and the caller got a
+#: complete, expensive, *wrong* experiment with a warning they had no reason to
+#: read. The agent endpoint already refused unknown fields; this one is the
+#: endpoint where being wrong costs a training run.
+ALLOWED_FORM_FIELDS: frozenset[str] = frozenset(
+    {
+        "file",
+        "target_column",
+        "models",
+        "primary_metric",
+        "strategy",
+        "folds",
+        "test_size",
+        "random_state",
+        "excluded_columns",
+        "identifier_columns",
+        "scaling_strategy",
+        "numeric_imputation",
+        "categorical_imputation",
+        "add_missing_indicators",
+        "max_categorical_cardinality",
+        "explain",
+        "name",
+        "description",
+        "tags",
+    }
+)
+
+
+async def experiment_options(
+    request: Request,
     target_column: Annotated[
         str | None,
         Form(
@@ -153,7 +189,34 @@ def experiment_options(
         Form(description="Labels for grouping and later retrieval."),
     ] = None,
 ) -> ExperimentOptions:
-    """Assemble the experiment configuration from the submitted form."""
+    """Assemble the experiment configuration from the submitted form.
+
+    Raises:
+        RequestValidationError: If the body carries a field this endpoint does
+            not define — a misspelled one included. Rendered as the usual 422
+            by the shared handler.
+    """
+    # Already parsed and cached by the time this runs, so reading it again
+    # costs nothing.
+    submitted = set((await request.form()).keys())
+    unknown = sorted(submitted - ALLOWED_FORM_FIELDS)
+    if unknown:
+        raise RequestValidationError(
+            [
+                {
+                    "type": "extra_forbidden",
+                    "loc": ("body", unknown[0]),
+                    "msg": (
+                        "Unknown field(s): "
+                        + ", ".join(unknown)
+                        + ". Only the declared fields of this endpoint are "
+                        "accepted."
+                    ),
+                    "input": None,
+                }
+            ]
+        )
+
     return ExperimentOptions(
         target_column=target_column,
         models=tuple(models or ()),

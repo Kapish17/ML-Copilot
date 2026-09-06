@@ -230,7 +230,10 @@ def looks_like_injection_attempt(context: EvidenceContext) -> bool:
         "new instructions:",
     )
     for item in context.items:
-        lowered = item.content.lower()
+        # The title is as attacker-controlled as the body — an experiment is
+        # named by whoever ran it — so it is scanned too. Missing that was how
+        # a payload could sit in a passage the flag never looked at.
+        lowered = f"{item.content}\n{item.source_title}\n{item.source_reference}".lower()
         if any(marker in lowered for marker in markers):
             return True
     return False

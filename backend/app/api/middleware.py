@@ -48,6 +48,13 @@ logger = logging.getLogger(__name__)
 #: request is not at fault, only the label it suggested.
 VALID_REQUEST_ID = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
 
+#: Room for a multipart request's boundaries, part headers and the handful of
+#: small text fields an upload carries beside the file. Added to the upload
+#: limit so a file that is exactly at the limit is not refused for the
+#: envelope around it — the reader in ``app.services.datasets.validation``
+#: remains the authority on how big the *file* may be.
+MULTIPART_ENVELOPE_ALLOWANCE = 1024 * 1024
+
 
 def resolve_request_id(headers: Headers) -> str:
     """Return the id to use for this request.
@@ -83,6 +90,14 @@ class RequestContextMiddleware:
 
         request_id = resolve_request_id(Headers(scope=scope))
         token = bind_request_id(request_id)
+        # Also on the scope, because the id has to outlive this middleware.
+        # Starlette's own ServerErrorMiddleware sits *above* every middleware
+        # added by the application, so the handler for an unhandled exception
+        # runs after `finally` here has unbound the contextvar and after the
+        # response has stopped passing through `send_with_request_id`. The
+        # scope survives both, which is what lets a 500 — the one failure a
+        # person actually needs to quote — still carry its id.
+        scope.setdefault("state", {})["request_id"] = request_id
         started = time.perf_counter()
         status_code: int | None = None
 
@@ -141,10 +156,15 @@ class RequestBodyLimitMiddleware:
     ``MAX_UPLOAD_MB`` applied to the body shape that does not go through the
     upload reader.
 
-    **What it does not touch.** Multipart requests — the dataset uploads — are
-    passed straight through. They have their own, larger limit and their own
-    streaming reader in ``app.services.datasets.validation``, and a second
-    ceiling here would only be a confusing way to change that limit.
+    **Multipart too, at the upload limit.** A dataset upload has its own
+    ceiling in ``app.services.datasets.validation``, but that check runs inside
+    the route — which is to say *after* Starlette has parsed the whole
+    multipart body and written every file part to a temporary file. A client
+    sending 100 GB with no ``Content-Length`` therefore filled the disk before
+    anything looked at the size. So multipart is bounded here as well, at
+    ``MAX_UPLOAD_MB`` plus a small allowance for the envelope: the reader's own
+    limit still decides what a *file* may be, and this one only stops the
+    stream that never intended to end.
 
     Two checks, because one is not enough:
 
@@ -155,10 +175,30 @@ class RequestBodyLimitMiddleware:
        lies about its length does not get further than one that is honest.
     """
 
-    def __init__(self, app: ASGIApp, max_bytes: int) -> None:
-        """Wrap the application, refusing bodies above ``max_bytes``."""
+    def __init__(
+        self, app: ASGIApp, max_bytes: int, max_upload_bytes: int | None = None
+    ) -> None:
+        """Wrap the application, refusing bodies above the applicable ceiling.
+
+        Args:
+            app: The application below this middleware.
+            max_bytes: Ceiling for an ordinary (JSON) body.
+            max_upload_bytes: Ceiling for the file a multipart request carries.
+                The envelope allowance is added to it. Defaults to
+                ``max_bytes`` when not given, which is what a caller
+                constructing this middleware without uploads wants.
+        """
         self.app = app
         self.max_bytes = max_bytes
+        self.max_upload_bytes = (
+            max_bytes if max_upload_bytes is None else max_upload_bytes
+        )
+
+    def _limit_for(self, content_type: str) -> int:
+        """The ceiling that applies to this request's body."""
+        if content_type.startswith("multipart/form-data"):
+            return self.max_upload_bytes + MULTIPART_ENVELOPE_ALLOWANCE
+        return self.max_bytes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Handle one ASGI event stream."""
@@ -167,14 +207,11 @@ class RequestBodyLimitMiddleware:
             return
 
         headers = Headers(scope=scope)
-        content_type = headers.get("content-type", "")
-        if content_type.startswith("multipart/form-data"):
-            await self.app(scope, receive, send)
-            return
+        limit = self._limit_for(headers.get("content-type", ""))
 
         declared = _declared_length(headers)
-        if declared is not None and declared > self.max_bytes:
-            await self._refuse(scope, send)
+        if declared is not None and declared > limit:
+            await self._refuse(scope, send, limit)
             return
 
         received = 0
@@ -186,7 +223,7 @@ class RequestBodyLimitMiddleware:
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
-                if received > self.max_bytes:
+                if received > limit:
                     exceeded = True
                     # An empty final chunk, so the application below sees a
                     # short body and fails its own validation rather than
@@ -203,9 +240,9 @@ class RequestBodyLimitMiddleware:
 
         await self.app(scope, counted_receive, guarded_send)
         if exceeded:
-            await self._refuse(scope, send)
+            await self._refuse(scope, send, limit)
 
-    async def _refuse(self, scope: Scope, send: Send) -> None:
+    async def _refuse(self, scope: Scope, send: Send, limit: int) -> None:
         """Answer with the project's one error envelope, and nothing else.
 
         Written here rather than raised, because an exception thrown from
@@ -219,9 +256,9 @@ class RequestBodyLimitMiddleware:
                     "code": "request_body_too_large",
                     "message": (
                         "The request body is larger than this service accepts. "
-                        f"The limit is {self.max_bytes // (1024 * 1024)} MB."
+                        f"The limit is {limit:,} bytes."
                     ),
-                    "details": {"max_bytes": self.max_bytes},
+                    "details": {"max_bytes": limit},
                 }
             }
         ).encode("utf-8")

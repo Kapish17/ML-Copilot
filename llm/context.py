@@ -60,6 +60,16 @@ _DELIMITER_PATTERN = re.compile(
 )
 _DELIMITER_REPLACEMENT = "(delimiter removed)"
 
+#: How much of a header value is kept. Long enough for any real filename or
+#: experiment name, short enough that a title cannot become the prompt.
+#:
+#: The body is deliberately *not* scrubbed of field-shaped lines such as
+#: ``citation:``: this project's own documentation describes the prompt format
+#: line by line, and mangling it on retrieval would damage real evidence to
+#: defend against confusion the citation validator already catches — a citation
+#: the model was not shown is rejected whatever the passage claims.
+MAX_HEADER_VALUE_CHARS = 200
+
 
 @dataclass(frozen=True)
 class ContextItem:
@@ -75,12 +85,21 @@ class ContextItem:
     truncated: bool = False
 
     def render(self) -> str:
-        """Render this passage as a labelled block."""
+        """Render this passage as a labelled block.
+
+        The header values are as untrusted as the passage body. A title comes
+        from a document's filename or from an experiment's *name*, and an
+        experiment is named by whoever ran it — so a title containing a
+        newline could otherwise write its own ``content:`` line, close the
+        evidence block, or open what looks like a system message. Every header
+        value is therefore neutralised the same way the body is and forced onto
+        one line, which is all a header was ever meant to be.
+        """
         header = (
             f"[SOURCE {self.index}]\n"
-            f"citation: {self.citation}\n"
-            f"source_type: {self.source_type}\n"
-            f"source_title: {self.source_title}\n"
+            f"citation: {_header_value(self.citation)}\n"
+            f"source_type: {_header_value(self.source_type)}\n"
+            f"source_title: {_header_value(self.source_title)}\n"
             f"score: {self.score:.3f}\n"
         )
         if self.truncated:
@@ -182,6 +201,19 @@ class EvidenceContext:
             "allowed_citations": list(self.allowed_citations),
             "items": [item.as_dict() for item in self.items],
         }
+
+
+def _header_value(text: str) -> str:
+    """Reduce an untrusted value to something that can only be a header.
+
+    Delimiters defanged, field-shaped lines defanged, all whitespace collapsed
+    to single spaces so the value cannot span lines, and the length capped.
+    """
+    collapsed = " ".join(str(text).split())
+    safe = _DELIMITER_PATTERN.sub(_DELIMITER_REPLACEMENT, collapsed)
+    if len(safe) > MAX_HEADER_VALUE_CHARS:
+        safe = safe[:MAX_HEADER_VALUE_CHARS].rstrip() + "…"
+    return safe
 
 
 def neutralise_delimiters(text: str) -> str:

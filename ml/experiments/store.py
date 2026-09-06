@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
-from ml.errors import IncomparableExperimentsError
+from ml.errors import IncomparableExperimentsError, InvalidMetricError
 from ml.evaluation.metrics import MetricDirection, get_metric
 from ml.experiments.run import ExperimentRun
 from ml.features.types import TaskType
@@ -97,7 +97,20 @@ def shared_metric_direction(runs: Sequence[ExperimentRun]) -> MetricDirection:
             "(" + ", ".join(sorted(tasks)) + ").",
             details={"task_types": sorted(tasks)},
         )
-    return get_metric(metric, TaskType(tasks.pop())).direction
+    task = tasks.pop()
+    # A stored record's task and metric are strings written by an older
+    # version of this code. If either no longer names something this version
+    # defines, that is a comparison that cannot be made — not a crash on a
+    # listing, which is where this function is reached from.
+    try:
+        return get_metric(metric, TaskType(task)).direction
+    except (ValueError, InvalidMetricError) as exc:
+        raise IncomparableExperimentsError(
+            "These runs cannot be ranked together: one of them was judged by "
+            f"'{metric}' on a '{task}' task, which this version does not "
+            "define.",
+            details={"primary_metric": metric, "task_type": task},
+        ) from exc
 
 
 def sort_runs(

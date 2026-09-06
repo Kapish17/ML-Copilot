@@ -76,7 +76,11 @@ from typing import Any, Mapping, Protocol, runtime_checkable
 from sklearn.pipeline import Pipeline
 
 from ml.artifacts.schema import ModelArtifactMetadata
-from ml.errors import ModelArtifactNotFoundError, ModelArtifactUnreadableError
+from ml.errors import (
+    InvalidExperimentIdError,
+    ModelArtifactNotFoundError,
+    ModelArtifactUnreadableError,
+)
 from ml.experiments.identity import validate_experiment_id
 
 logger = logging.getLogger(__name__)
@@ -219,7 +223,10 @@ class LocalModelArtifactStore:
         root = self._root.resolve()
         candidate = (root / experiment_id).resolve()
         if candidate != root and root not in candidate.parents:
-            raise ModelArtifactUnreadableError(
+            # The caller's identifier is wrong, which is a 400 — the same
+            # class the experiment store raises for the identical case. Calling
+            # it "unreadable" made a malformed request look like a server fault.
+            raise InvalidExperimentIdError(
                 f"Experiment id '{experiment_id}' resolves outside the model "
                 "store directory.",
                 details={"experiment_id": experiment_id},
@@ -265,6 +272,16 @@ class LocalModelArtifactStore:
                     "The trained model could not be serialised.",
                     details={"reason": type(exc).__name__},
                 ) from exc
+            written = temporary.stat().st_size
+            if written > MAX_MODEL_BYTES:
+                # Writing it would leave a file `load` refuses on sight — a
+                # model that exists, reports "available" until it is opened,
+                # and fails at the moment someone tries to predict with it.
+                # Better to have no model and say so.
+                raise ModelArtifactUnreadableError(
+                    "The trained model is larger than this service will store.",
+                    details={"bytes": written, "max_bytes": MAX_MODEL_BYTES},
+                )
             os.replace(temporary, model_path)
         finally:
             temporary.unlink(missing_ok=True)
@@ -365,7 +382,16 @@ class LocalModelArtifactStore:
 
         size = model_path.stat().st_size
         recorded = _recorded_size(payload)
-        if recorded is not None and size != recorded:
+        if recorded is None:
+            # Every manifest this application writes records the size and the
+            # digest. One that does not was not written by this application,
+            # and skipping the check for it would mean the integrity checks are
+            # strongest on the files that need them least: an attacker-supplied
+            # manifest could simply omit the fields that verify the model.
+            return ArtifactStatus(
+                experiment_id, STATE_CORRUPTED, REASON_MANIFEST_INVALID, metadata
+            )
+        if size != recorded:
             return ArtifactStatus(
                 experiment_id,
                 STATE_CORRUPTED,
@@ -453,7 +479,18 @@ class LocalModelArtifactStore:
             )
 
         expected = _recorded_digest(directory / MANIFEST_FILENAME)
-        if expected is not None and _digest_of(model_path) != expected:
+        if expected is None:
+            # Refused rather than loaded unverified: this check is the only
+            # thing standing between `joblib.load` and a file someone else
+            # wrote, and a check that can be turned off by deleting a manifest
+            # field is not a check. See the module docstring on the trust
+            # boundary — only artifacts this application wrote are ever loaded.
+            raise ModelArtifactUnreadableError(
+                "The stored model has no recorded digest, so it cannot be "
+                "verified before loading.",
+                details={"experiment_id": experiment_id},
+            )
+        if _digest_of(model_path) != expected:
             raise ModelArtifactUnreadableError(
                 "The stored model does not match the digest recorded when it "
                 "was written.",

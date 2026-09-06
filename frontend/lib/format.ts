@@ -73,9 +73,19 @@ export function directionLabel(direction: MetricDirection): string {
     : "Lower is better";
 }
 
-/** Format a metric value, or an em dash when there is none. */
-export function formatMetric(value: number | null | undefined): string {
-  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+/**
+ * Format a metric value, or an em dash when there is none.
+ *
+ * Guarded with `typeof` rather than a null check. These helpers are called on
+ * values that came over the network: a backend version this build has not seen,
+ * a proxy that rewrote a body, a field that arrived as the string `"0.84"`, all
+ * type-check clean at compile time and none of them have `.toFixed`. A dash is
+ * a correct answer for "no number here"; a thrown TypeError inside a render
+ * takes down the whole page, which is what this file's callers are least able
+ * to recover from.
+ */
+export function formatMetric(value: unknown): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "—";
   const magnitude = Math.abs(value);
   if (magnitude !== 0 && magnitude < 0.001) return value.toExponential(2);
   if (magnitude >= 1000) {
@@ -84,21 +94,21 @@ export function formatMetric(value: number | null | undefined): string {
   return value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
 }
 
-/** Format a count with thousands separators. */
-export function formatCount(value: number | null | undefined): string {
-  if (value === null || value === undefined) return "—";
+/** Format a count with thousands separators. See `formatMetric` on the guard. */
+export function formatCount(value: unknown): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "—";
   return value.toLocaleString();
 }
 
 /** Format a percentage the backend already expressed as 0–100. */
-export function formatPercent(value: number | null | undefined): string {
-  if (value === null || value === undefined) return "—";
+export function formatPercent(value: unknown): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "—";
   return `${value.toFixed(value < 10 ? 2 : 1)}%`;
 }
 
 /** Format a signed contribution, so its direction is visible in the number. */
-export function formatSigned(value: number | null | undefined): string {
-  if (value === null || value === undefined) return "—";
+export function formatSigned(value: unknown): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "—";
   const rendered = formatMetric(Math.abs(value));
   return value < 0 ? `−${rendered}` : `+${rendered}`;
 }

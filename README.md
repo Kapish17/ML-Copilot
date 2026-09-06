@@ -590,6 +590,18 @@ reading.
   distribution. A record is validated against the model's *schema*, so a value
   of the right type but far outside the training range is accepted and
   predicted on.
+- **Four things about an uploaded dataset are kept on purpose**, and it is
+  worth knowing which: the column names, the target's class labels, up to fifty
+  category values per encoded column (as one-hot feature names), and the
+  filename — which becomes the run's default label unless you pass `name`.
+  Everything else is released with the request.
+  [`docs/PRODUCTION_READINESS.md`](docs/PRODUCTION_READINESS.md#what-survives-a-request-and-what-does-not)
+  gives the reasoning and the bound for each; `backend/tests/test_privacy.py`
+  proves it with marker data.
+- **Container hardening stops at `no-new-privileges`.** `cap_drop: ALL`, a
+  read-only root filesystem and a memory limit are recommended in the
+  production-readiness document rather than shipped, because this repository
+  has no Docker daemon to prove the containers still boot with them.
 - **Runs recorded before persistence existed have no model.** They report
   `model_not_available` rather than an artifact conjured after the fact.
 - **No hyperparameter optimisation.** Six scikit-learn estimators at their

@@ -212,7 +212,8 @@ def test_a_failing_model_does_not_stop_the_others(
     assert failure.cross_validation is not None
     assert len(failure.cross_validation.failed_folds) == 3
     assert failure.cross_validation.errors
-    assert "always fails" in (failure.error or "")
+    assert "always fails" not in (failure.error or "")
+    assert "RuntimeError" in (failure.error or "")
     assert comparison.entries[-1] is failure, "failures rank last"
 
 

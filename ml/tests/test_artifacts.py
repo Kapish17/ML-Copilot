@@ -22,6 +22,7 @@ traversal attempt is refused, and a substituted file fails its digest.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -484,12 +485,16 @@ def test_an_artifact_that_is_not_a_pipeline_is_refused_at_load(saved) -> None:
     directory = saved.directory_for(EXPERIMENT_ID)
     joblib.dump({"not": "a pipeline"}, directory / MODEL_FILENAME)
 
-    # Rewrite the manifest's record of the file so the cheap checks pass and
-    # this test reaches the one it is about.
+    # Rewrite the manifest's record of the file — size *and* digest — so the
+    # cheap checks pass and this test reaches the one it is about. Dropping the
+    # digest instead would no longer work: an artifact whose digest is not
+    # recorded is refused before it is opened, which is its own test below.
     manifest = directory / MANIFEST_FILENAME
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     payload["model_file"]["bytes"] = (directory / MODEL_FILENAME).stat().st_size
-    payload["model_file"].pop("sha256", None)
+    payload["model_file"]["sha256"] = hashlib.sha256(
+        (directory / MODEL_FILENAME).read_bytes()
+    ).hexdigest()
     manifest.write_text(json.dumps(payload), encoding="utf-8")
 
     assert saved.status(EXPERIMENT_ID).state == STATE_AVAILABLE

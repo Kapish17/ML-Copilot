@@ -189,9 +189,16 @@ class ExecutionState:
         return tuple(found)
 
     def experiment_ids(self) -> tuple[str, ...]:
-        """Every experiment this run created or read, in order of appearance."""
+        """Every experiment this run created or read, in order of appearance.
+
+        Successful observations only. A failed call echoes the id it was asked
+        about, and reporting that as a run this session touched would put an
+        id in front of a reader that leads nowhere.
+        """
         found: list[str] = []
         for observation in self.observations:
+            if not observation.succeeded:
+                continue
             identifier = observation.output.get("experiment_id")
             if isinstance(identifier, str) and identifier and identifier not in found:
                 found.append(identifier)

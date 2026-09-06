@@ -147,11 +147,17 @@ def validate_header(header: list[str], settings: Settings) -> None:
     validate_columns(header, settings)
 
 
-def parse_csv(text: str) -> pd.DataFrame:
+def parse_csv(text: str, *, row_limit: int | None = None) -> pd.DataFrame:
     """Parse decoded CSV text into a DataFrame.
 
     Args:
         text: Decoded file content.
+        row_limit: The most rows this dataset is allowed to have. One row more
+            than that is read, so the caller's own check still fires and still
+            reports a limit was exceeded — but a file claiming ten million
+            rows stops costing memory at the limit rather than at its own
+            size. Without it, the row check ran on a frame that was already
+            fully built, which is the wrong order for a guard.
 
     Returns:
         pandas.DataFrame: The parsed dataset.
@@ -166,6 +172,7 @@ def parse_csv(text: str) -> pd.DataFrame:
             sep=CSV_DELIMITER,
             low_memory=False,
             skip_blank_lines=True,
+            nrows=None if row_limit is None else row_limit + 1,
         )
     except pd.errors.EmptyDataError as exc:
         raise EmptyDatasetError("The file contains no data to profile.") from exc
@@ -203,6 +210,6 @@ def load_csv(content: bytes, settings: Settings) -> pd.DataFrame:
     text = decode_content(content)
     header = read_header(text)
     validate_header(header, settings)
-    frame = parse_csv(text)
+    frame = parse_csv(text, row_limit=settings.max_dataset_rows)
     validate_frame(frame, settings)
     return frame

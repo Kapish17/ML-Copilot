@@ -56,6 +56,16 @@ services:
       dockerfile: backend/Dockerfile
     image: ml-copilot-backend:local
     restart: unless-stopped
+    # A process that cannot gain privileges it was not started with. Both
+    # images already run as an unprivileged user; this closes the one route
+    # back — a setuid binary in the base image — and costs nothing, because
+    # nothing here execs one. It is the half of container hardening that can
+    # be asserted from a configuration test; `cap_drop` and a read-only root
+    # filesystem are the other half and are recommended, not shipped, because
+    # this repository has no way to prove they still boot. See
+    # docs/PRODUCTION_READINESS.md.
+    security_opt:
+      - no-new-privileges:true
     ports:
       # Published because the browser calls this directly.
       #
@@ -151,6 +161,9 @@ services:
         NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
     image: ml-copilot-frontend:local
     restart: unless-stopped
+    # As on the backend, and for the same reason.
+    security_opt:
+      - no-new-privileges:true
     ports:
       # Loopback by default, for the reason given on the backend's port.
       - "${BIND_ADDRESS:-127.0.0.1}:${FRONTEND_PORT:-3000}:3000"

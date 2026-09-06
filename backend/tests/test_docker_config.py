@@ -316,6 +316,28 @@ def test_no_service_is_privileged_or_mounts_the_host() -> None:
         assert not service.get("pid"), name
 
 
+def test_no_service_can_gain_privileges_it_was_not_started_with() -> None:
+    """Both images run as an unprivileged user; this closes the way back.
+
+    `no-new-privileges` stops a setuid binary in the base image from raising
+    the process's privileges. Nothing in either image execs one, which is
+    exactly why the option costs nothing and is worth setting: the day
+    something does, this is what makes it not matter.
+
+    `cap_drop` and a read-only root filesystem are the rest of this hardening
+    and are *recommended in the documentation rather than shipped*, because
+    this repository has no Docker daemon to prove the containers still boot
+    with them. Shipping an unverified change to how a container starts would
+    be trading a real demo for a theoretical gain.
+    """
+    services = compose_config()["services"]
+
+    assert services, "the compose file should define services"
+    for name, service in services.items():
+        options = service.get("security_opt") or []
+        assert "no-new-privileges:true" in options, name
+
+
 def test_the_frontend_waits_for_a_healthy_backend() -> None:
     """Ordering is on the healthcheck, not on the process having started."""
     depends = compose_config()["services"]["frontend"]["depends_on"]
@@ -545,6 +567,26 @@ def test_every_path_the_backend_copies_exists_and_is_not_excluded() -> None:
             assert normalised != prefix and not normalised.startswith(
                 f"{prefix}/"
             ), f"COPY {source} is excluded by .dockerignore rule {prefix!r}"
+
+
+def test_the_image_carries_no_test_suite() -> None:
+    """The image runs the service; it never runs the tests.
+
+    `COPY backend/ ./backend/` took `backend/tests/` with it, and the same for
+    every other package — fixtures, factories and adversarial payloads, none of
+    which any production code path imports. Excluded with a glob rather than
+    four directory rules, so a package added later is covered without anyone
+    remembering.
+    """
+    text = ROOT_DOCKERIGNORE.read_text(encoding="utf-8")
+    rules = {
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    }
+
+    assert "*/tests/" in rules
+    assert "pytest.ini" in rules
 
 
 def test_the_backend_context_excludes_the_frontend_and_local_state() -> None:

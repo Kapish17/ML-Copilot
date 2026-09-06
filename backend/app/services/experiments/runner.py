@@ -499,7 +499,35 @@ class ExperimentRunner:
             if overrides
             else inferred.config
         )
-        return prepare_dataset(frame, config, decisions=inferred.decisions)
+        prepared = prepare_dataset(frame, config, decisions=inferred.decisions)
+        self._check_encoded_width(prepared)
+        return prepared
+
+    def _check_encoded_width(self, prepared: PreparedDataset) -> None:
+        """Refuse a dataset whose *encoded* width is too large to train on.
+
+        The column check earlier counts what the file has. This one counts what
+        the model gets, which is the number that costs memory: one-hot encoding
+        turns a categorical column into one feature per category, and
+        cross-validation then copies that matrix per fold, per candidate. A
+        two-megabyte upload of two hundred categorical columns is a legal file
+        and several gigabytes of dense matrix.
+
+        Checked here, immediately after preprocessing has said how wide the
+        result is and before any model is fitted — the first moment the real
+        number exists, and the last moment before it is expensive.
+        """
+        width = len(prepared.feature_names)
+        limit = self._settings.max_encoded_features
+        if width <= limit:
+            return
+        raise DatasetTooLargeError(
+            f"After encoding, this dataset has {width} features, more than the "
+            f"{limit} an experiment may train on. Categorical columns with many "
+            "distinct values expand into one feature each; exclude the widest "
+            "of them, or reduce the number of columns.",
+            details={"encoded_feature_count": width, "max_encoded_features": limit},
+        )
 
     def _validate_candidates(
         self, options: ExperimentOptions, prepared: PreparedDataset

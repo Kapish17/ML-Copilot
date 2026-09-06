@@ -163,7 +163,15 @@ class ExcelAdapter(BaseDatasetAdapter):
             validate_columns(header, settings)
 
             try:
-                frame = workbook.parse(sheet_name=sheet, header=0)
+                # One row past the limit, so `validate_frame` still refuses an
+                # oversized sheet — but a 26 KB workbook that expands to four
+                # hundred thousand rows stops costing memory at the limit
+                # rather than at whatever the file felt like containing.
+                frame = workbook.parse(
+                    sheet_name=sheet,
+                    header=0,
+                    nrows=settings.max_dataset_rows + 1,
+                )
             except Exception as exc:  # noqa: BLE001 - open-ended reader errors
                 raise InvalidExcelError(
                     "The first worksheet could not be read as a table."

@@ -22,7 +22,7 @@ import numpy as np
 from sklearn.base import clone
 from sklearn.pipeline import Pipeline
 
-from ml.errors import InsufficientDataError, ModelTrainingError
+from ml.errors import InsufficientDataError, ModelTrainingError, describe_failure
 from ml.evaluation.metrics import evaluate_predictions, resolve_primary_metric
 from ml.features.types import TaskType
 from ml.models.baselines import BaselineResult, compare_to_baseline, evaluate_baseline
@@ -166,8 +166,11 @@ def train_model(
     try:
         pipeline.fit(prepared.X_train_raw, prepared.y_train)
     except Exception as exc:  # noqa: BLE001 - any estimator failure is reported alike
+        # The estimator's own message quotes the value that broke it, and
+        # this error is reported to a caller and stored against the candidate.
         raise ModelTrainingError(
-            f"Model '{definition.identifier}' failed while training: {exc}",
+            f"Model '{definition.identifier}' failed while training "
+            f"({describe_failure(exc)}).",
             details={
                 "model_name": definition.identifier,
                 "error_type": type(exc).__name__,
@@ -182,7 +185,8 @@ def train_model(
         )
     except Exception as exc:  # noqa: BLE001 - as above
         raise ModelTrainingError(
-            f"Model '{definition.identifier}' failed while predicting: {exc}",
+            f"Model '{definition.identifier}' failed while predicting "
+            f"({describe_failure(exc)}).",
             details={
                 "model_name": definition.identifier,
                 "error_type": type(exc).__name__,

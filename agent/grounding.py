@@ -126,9 +126,19 @@ def is_abstention(text: str) -> bool:
 
 
 def observed_experiment_ids(observations: Sequence[Observation]) -> set[str]:
-    """Every experiment identifier the run actually produced or read."""
+    """Every experiment identifier the run actually produced or read.
+
+    Only from observations that **succeeded**. A failed call echoes the
+    argument it was given — asking to explain ``exp_does_not_exist`` returns
+    "no such experiment", carrying that id in its output — and counting that
+    as observed would let an invented id be laundered into an answer by the
+    very call that proved it does not exist. Citations are filtered the same
+    way, a few lines up; this is the same rule for results.
+    """
     found: set[str] = set()
     for observation in observations:
+        if not observation.succeeded:
+            continue
         identifier = observation.output.get("experiment_id")
         if isinstance(identifier, str) and identifier:
             found.add(identifier)

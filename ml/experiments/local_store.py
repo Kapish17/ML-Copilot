@@ -34,7 +34,12 @@ import secrets
 import shutil
 from pathlib import Path
 
-from ml.errors import ExperimentError, ExperimentNotFoundError, InvalidExperimentIdError
+from ml.errors import (
+    ExperimentError,
+    ExperimentNotFoundError,
+    InvalidExperimentIdError,
+    MalformedExperimentError,
+)
 from ml.experiments.identity import validate_experiment_id
 from ml.experiments.run import ExperimentRun
 from ml.experiments.serialization import json_dumps, json_loads
@@ -162,7 +167,22 @@ class LocalExperimentStore:
                 f"No experiment is stored under '{experiment_id}'.",
                 details={"experiment_id": experiment_id, "root": str(self._root)},
             )
-        return ExperimentRun.from_dict(json_loads(path.read_text(encoding="utf-8")))
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, ValueError) as exc:
+            # Not decodable, not readable, permissions changed under us. These
+            # are not ExperimentError, so without this they would escape `list`
+            # and `verify` — the two methods whose whole promise is that one
+            # bad file cannot hide the rest of the history — and surface as a
+            # 500 on a listing the other records could have answered.
+            raise MalformedExperimentError(
+                f"The record for '{experiment_id}' could not be read.",
+                details={
+                    "experiment_id": experiment_id,
+                    "reason": type(exc).__name__,
+                },
+            ) from exc
+        return ExperimentRun.from_dict(json_loads(text))
 
     def _stored_ids(self) -> list[str]:
         """Return the identifiers of every directory holding a run file."""

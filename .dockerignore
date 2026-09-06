@@ -35,6 +35,13 @@ ENV/
 build/
 dist/
 
+# Test suites. The image runs the service; it never runs the tests, and their
+# fixtures and factories are the largest part of the source that no production
+# code path imports. A glob rather than four directory rules, so a package
+# added later is covered without anyone remembering to add it here.
+*/tests/
+pytest.ini
+
 # Test, lint and type-check caches
 .pytest_cache/
 .mypy_cache/

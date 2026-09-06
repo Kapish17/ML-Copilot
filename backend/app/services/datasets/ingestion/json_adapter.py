@@ -222,6 +222,11 @@ class JSONAdapter(BaseDatasetAdapter):
             DatasetTooLargeError: If the result exceeds a configured limit.
         """
         records = extract_records(_decode(content))
+        # One record past the limit: enough for `validate_frame` to refuse the
+        # document, few enough that flattening a million records into columns
+        # is not the thing that decides whether this request survives.
+        if len(records) > settings.max_dataset_rows:
+            records = records[: settings.max_dataset_rows + 1]
 
         try:
             frame = pd.json_normalize(records, sep=NESTED_SEPARATOR)

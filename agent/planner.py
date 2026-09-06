@@ -276,7 +276,9 @@ class LLMPlanner:
             question,
             tool_catalogue=render_tool_catalogue(tool_definitions),
             observations=render_observations(
-                observations, limit=self._config.max_context_chars
+                observations,
+                limit=self._config.max_context_chars,
+                per_observation_limit=self._config.max_observation_chars,
             ),
             remaining_tool_calls=remaining_tool_calls,
             context=context,
@@ -302,7 +304,9 @@ class LLMPlanner:
         prompt = build_answer_prompt(
             question,
             observations=render_observations(
-                observations, limit=self._config.max_context_chars
+                observations,
+                limit=self._config.max_context_chars,
+                per_observation_limit=self._config.max_observation_chars,
             ),
             allowed_citations=allowed_citations,
             plan_summary=plan_summary or (),

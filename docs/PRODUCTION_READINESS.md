@@ -22,7 +22,11 @@ This document is the checklist. Anything unticked is stated as unticked.
 | ⚠️ | **Lightweight API authentication.** One shared key, `Authorization: Bearer <key>`, compared in constant time over SHA-256 digests. Required on the eleven endpoints that upload, train, read stored experiments, predict, or reach a language model; the five liveness and capability endpoints stay open. **Off by default** so the demo needs no secret, and enabling it without a key is a start-up failure rather than a service that reports itself protected and is not. Marked ⚠️ because it is a key, not identity — see the limitations below. | `backend/app/api/security.py` |
 | ✅ | **The key stays server-side.** Never a `NEXT_PUBLIC_` variable, never a Docker build argument, never passed to the frontend service, never in an image layer, never in the OpenAPI schema, never echoed in a response and never written to a log. A rejected request logs `Authentication failed` and nothing else. A test walks the frontend source, the built bundle, both Dockerfiles, the resolved Compose configuration, `.env.example` and every Markdown file looking for it. | `backend/tests/test_authentication.py` |
 | ✅ | **No browser-shipped API key.** A browser application cannot hold a shared secret — anything in the bundle is readable by every visitor — so the dashboard holds none and says so: its header reads *"API key required — this dashboard cannot hold one"* when the backend reports `authentication_required`. | `frontend/components/layout/SystemStatus.tsx` |
-| ✅ | **Explicit CORS.** An origin list from configuration, never `*`. Credentials off. Empty list installs no cross-origin middleware at all. | `backend/app/main.py` |
+| ✅ | **Explicit CORS.** An origin list from configuration, never `*` — a wildcard is **refused at startup**, not merely discouraged, and it buys nothing back here anyway: the credential is a bearer token, which a browser does not attach on its own. Credentials off. Empty list installs no cross-origin middleware at all. | `backend/app/core/config.py` |
+| ✅ | **A limit cannot be configured away.** Every size limit read from the environment has a ceiling of its own, checked at startup. `MAX_UPLOAD_MB=100000` does not configure a hundred-gigabyte upload — it removes the protection while leaving something in the settings that still looks like one, which is worse than having no limit at all. Incoherent combinations are refused the same way: a fold range with no acceptable value in it, a default outside its own range. | `backend/app/core/config.py` |
+| ✅ | **Containers cannot gain privileges.** `no-new-privileges` on both services, on top of the non-root users. `cap_drop: ALL` and a read-only root filesystem are the rest of this hardening and are *recommended below rather than shipped*, because this repository has no Docker daemon to prove the containers still boot with them. | `docker-compose.yml` |
+| ✅ | **The image carries no test suite.** `COPY backend/ ./backend/` took the tests with it — fixtures, factories and adversarial payloads that no production code path imports. Excluded from the build context by a glob, so a package added later is covered without anyone remembering. | `.dockerignore` |
+| ✅ | **Base images are watched too.** A CVE in the base image's OpenSSL appears in no requirements file and in neither `pip-audit` nor `npm audit`. Dependabot's `docker` ecosystem is what says it exists. | `.github/dependabot.yml` |
 | ✅ | **No secret reaches the frontend.** The only build-time variable is `NEXT_PUBLIC_API_BASE_URL`, a public URL. Anything a Next.js build inlines is served to every visitor, so nothing else may be one. | `frontend/Dockerfile` |
 | ✅ | **No secret in source, images or logs.** The credential is read from the environment at the moment of use. Only the *variable name* and a boolean are ever exposed or logged. `.env.example` holds no real value. | `llm/config.py` |
 | ✅ | **Non-root containers.** Backend runs as uid 10001 owning only its two data directories, so the process cannot modify its own code. Frontend runs as `node`. | both Dockerfiles |
@@ -41,7 +45,7 @@ This document is the checklist. Anything unticked is stated as unticked.
 | ✅ | **CI needs no secret.** `contents: read`, nothing read from `secrets.`, so it works unchanged on a fork. | `.github/workflows/ci.yml` |
 | ❌ | **Identity and authorisation.** The API key admits a caller; it does not say *who*. No users, no roles, no sessions, no expiry, and no revocation short of changing the key and restarting. Everyone holding it is the same caller and the log cannot tell them apart. | — |
 | ❌ | **TLS.** The stack speaks plain HTTP, and **a bearer token is a password sent on every request** — over plain HTTP anyone on the path reads it once and has it forever. Terminate TLS in front: `Client ──HTTPS──▶ reverse proxy ──HTTP──▶ FastAPI`. No proxy is included here. | — |
-| ⚠️ | **Resource protection is per request, not per caller.** Every expensive path is bounded: upload size (`MAX_UPLOAD_MB`), **any JSON body** (`MAX_REQUEST_BODY_MB`, enforced in middleware because a body is parsed before route code could object — multipart uploads are exempt and keep their own limit), parsed shape (`MAX_DATASET_ROWS`, `MAX_DATASET_COLUMNS`), what an experiment may run on (`MAX_EXPERIMENT_ROWS`, `MAX_CV_FOLDS`, `MAX_CANDIDATE_MODELS`), what SHAP may explain (`EXPLANATION_ROWS`), a prediction batch (`MAX_PREDICTION_RECORDS`, with a hard schema ceiling above it so an absurd batch is refused before a list that size is built), the agent's ceilings (`AGENT_MAX_TOOL_CALLS`, `AGENT_MAX_ITERATIONS`, `AGENT_MAX_CONTEXT_CHARS` — a request may lower these and never raise them — plus `AGENT_MAX_WORKFLOW_STEPS` and `AGENT_MAX_TOOL_REPEATS`, which bound a *plan* before a step of it runs, and `AGENT_MAX_RUN_SECONDS` on the wall clock), and retrieval's `RAG_MAX_TOP_K` and `RAG_MAX_QUERY_LENGTH`. Rows and bytes are bounded separately because one is not the other: five hundred records each carrying a very long string is legal under a row limit. **What none of them bounds is a rate**: nothing stops one holder of the key from sending the same bounded request a thousand times. | `backend/app/core/config.py`, `backend/app/api/middleware.py` |
+| ⚠️ | **Resource protection is per request, not per caller.** Every expensive path is bounded: upload size (`MAX_UPLOAD_MB`), **any JSON body** (`MAX_REQUEST_BODY_MB`, enforced in middleware because a body is parsed before route code could object — multipart uploads are exempt and keep their own limit), parsed shape (`MAX_DATASET_ROWS`, `MAX_DATASET_COLUMNS`), what an experiment may run on (`MAX_EXPERIMENT_ROWS`, `MAX_CV_FOLDS`, `MAX_CANDIDATE_MODELS`), what SHAP may explain (`EXPLANATION_ROWS`), a prediction batch (`MAX_PREDICTION_RECORDS`, with a hard schema ceiling above it so an absurd batch is refused before a list that size is built), the agent's ceilings (`AGENT_MAX_TOOL_CALLS`, `AGENT_MAX_ITERATIONS`, `AGENT_MAX_CONTEXT_CHARS` — a request may lower these and never raise them — plus `AGENT_MAX_WORKFLOW_STEPS` and `AGENT_MAX_TOOL_REPEATS`, which bound a *plan* before a step of it runs, and `AGENT_MAX_RUN_SECONDS` on the wall clock), and retrieval's `RAG_MAX_TOP_K` and `RAG_MAX_QUERY_LENGTH`. Three of those bounds were added by the hardening pass because the limit existed and the enforcement did not: a **multipart** body is now bounded in the same middleware (Starlette parses the whole body to temporary files before route code runs, so the upload reader's own check was reached only after the bytes had landed — a client that never stopped sending filled the disk); the **row** limits are applied while parsing rather than after, so an oversized file stops costing memory at the limit rather than at its own size; and `MAX_ENCODED_FEATURES` bounds the width the model actually sees, because one-hot encoding decides that and the column limit cannot see it. Rows and bytes are bounded separately because one is not the other: five hundred records each carrying a very long string is legal under a row limit. **What none of them bounds is a rate**: nothing stops one holder of the key from sending the same bounded request a thousand times. | `backend/app/core/config.py`, `backend/app/api/middleware.py` |
 | ❌ | **Rate limiting.** Deliberately absent. Doing it properly across replicas needs shared state, and adding Redis to a single-container local tool would be more attack surface than it removes. | — |
 | ❌ | **Secret management.** The credential comes from a `.env` file. No vault, no rotation, no per-tenant keys. | — |
 | ❌ | **Static analysis and image scanning.** The audits read dependency manifests, not this project's own code or its built images. | — |
@@ -59,13 +63,52 @@ This document is the checklist. Anything unticked is stated as unticked.
 | ✅ | **Experiment persistence.** Atomic writes — serialise, write to a temporary file, `fsync`, `os.replace` — so an interrupted write leaves no half-record, not even an empty directory. Records live on a named volume. | `ml/experiments/local_store.py` |
 | ✅ | **The index repairs itself.** Rebuilt incrementally at every container start: each document is hashed and the unchanged ones skipped, so it is a real build on a fresh volume and a sub-second no-op afterwards. Indexing failure is not fatal — the API starts and reports retrieval as unavailable. | `backend/docker-entrypoint.sh` |
 | ✅ | **Graceful degradation.** With no credential, profiling, experiments, cross-validation, SHAP, history and retrieval all work; only answer generation and the agent report themselves unavailable, and the dashboard says so in its header instead of failing. | `/knowledge/status`, `/agent/status` |
-| ✅ | **Request correlation.** Every response carries `X-Request-ID`, and every log line the request produces carries the same id. | `backend/app/api/middleware.py` |
+| ✅ | **Request correlation, including on a 500.** Every response carries `X-Request-ID` and every log line the request produces carries the same id — and that now includes an *unhandled* failure, which is the one a person actually reports. Starlette's error handler runs above every middleware the application adds, so the id had already been unbound and the response no longer passed through the code that stamps it: a 500 came back with no correlation id at all. The id is put on the ASGI scope, which outlives both. | `backend/app/api/middleware.py`, `backend/app/api/error_handlers.py` |
+| ✅ | **One unreadable record cannot hide a history.** `list` skips a bad record and `verify` reports it — for the failures the code anticipated. A file that is not UTF-8, or that cannot be read at all, raised something neither guard caught, and turned a listing nine good records could have answered into a 500. Every read failure is now a typed error carrying the id and the failure's *type*, never the file's path. | `ml/experiments/local_store.py` |
+| ✅ | **A record this version no longer understands is a refusal, not a crash.** A stored `task_type` or metric that a later version dropped made a metric-sorted listing raise a bare `ValueError` past the same guard. | `ml/experiments/store.py` |
+| ✅ | **The dashboard survives a response it cannot read.** A route error boundary, a shape check on the one response the detail page traverses, and formatting helpers that return an em dash for anything that is not a finite number. A field arriving as a string where a number belongs used to throw mid-render and leave a blank page. | `frontend/app/error.tsx`, `frontend/lib/api/experiments.ts` |
 | ⚠️ | **Bounded, but synchronous.** Upload size, row and column ceilings, fold and model counts and agent budgets are all enforced. But a training run occupies its request for its whole duration. | `backend/app/core/config.py` |
 | ⚠️ | **The agent's time budget stops a run between steps, not during one.** `AGENT_MAX_RUN_SECONDS` is checked before each step and before each planning turn. Nothing here runs a tool in something it could abandon, so a single very slow experiment overruns the budget and the run stops after that step rather than during it. The per-call provider timeouts bound the language-model half. Marked ⚠️ because that is a real limitation of a synchronous design and not a cancellation. | `agent/state.py` |
 | ❌ | **Background execution.** No queue, no worker, no Celery, no Redis. A long run is a long request. | — |
 | ❌ | **Horizontal scaling.** Records and the index are local files on volumes attached to one container. Two backend replicas would not share them. | — |
 | ❌ | **Backups, retention, migration.** Nothing prunes old runs and nothing migrates a store between schema versions beyond refusing to read a version it does not know. | — |
 | ❌ | **Metrics and alerting.** Logs only. No Prometheus, no OpenTelemetry, no dashboards, no alerts. | — |
+
+---
+
+## What survives a request, and what does not
+
+An uploaded dataset is a loan: parsed in memory for one request and released.
+There is no upload directory, no temporary file and deliberately no Docker
+volume that could become one. What *is* kept is the record of the run — and
+the honest question is not "does the data leak" but "which parts of it are
+metadata".
+
+Four things travel by design. Each is a decision, each is bounded, and each is
+asserted in `backend/tests/test_privacy.py` with a marker string that could not
+occur by accident:
+
+| Kept | Why | Bound |
+| --- | --- | --- |
+| **Column names** | The schema is what a profile, a record and a prediction contract are *about*. | The header row. Never a cell. |
+| **Target class labels** | A prediction *is* a class label; hiding the vocabulary would make every prediction unreadable. | The distinct values of one column, capped by `MAX_CLASSIFICATION_CLASSES`. |
+| **One-hot feature names** | `segment_business` embeds a category value, because a feature importance a reader cannot map back to a column is useless. | Up to `max_categorical_cardinality` (50) values, and **only** for a column that became a feature. A column with more distinct values than the cap is excluded from the feature set entirely, so nothing of a free-text or identifier column appears at all. |
+| **The uploaded filename** | It becomes the run's default label — `customers.csv · renewed` — which is what makes a history readable. | Metadata the caller typed, not content from inside the file. A caller who does not want it passes `name`. Filenames carry client names and case numbers more often than anyone intends, so this one is worth knowing about. |
+
+Everything else is checked to be gone: no cell of a feature column in a
+record, a log, a rendered RAG document, a model manifest or an error envelope;
+no prediction record persisted anywhere; no prompt or completion logged; no API
+key in a response, a log or the OpenAPI schema.
+
+Two leaks were found and closed in the hardening pass. A fold-count refusal
+returned **the entire distribution of the target column** — every distinct
+label with its count — in the `details` of a 4xx, to whoever asked for five
+folds. And a failed candidate stored the estimator's own message, which
+scikit-learn and pandas write by quoting the value that broke: *could not
+convert string to float: 'Acme Ltd'*, stored in the record, rendered into the
+retrieval index and shown in the dashboard. A foreign exception is now recorded
+by its **type** (`ml.errors.describe_failure`), which is the part a reader can
+act on.
 
 ---
 
@@ -110,6 +153,21 @@ that looks excellent and means nothing.
 
 Stated plainly, in one place:
 
+- **Container hardening stops at what can be proved here.**
+  `no-new-privileges` is set on both services and asserted by a test. Two
+  further steps are recommended and deliberately *not* shipped, because this
+  repository has no Docker daemon and an unverified change to how a container
+  starts would trade a working demo for a theoretical gain. For a real
+  deployment, add to each service:
+
+  ```yaml
+      cap_drop: [ALL]
+      read_only: true
+      tmpfs: [/tmp]
+      mem_limit: 4g          # the backend trains models in-process
+  ```
+
+  and verify the stack still comes up healthy before relying on it.
 - **Authentication is one shared key, and it is off by default.** A stock
   `docker compose up` is open to anyone who can reach the port — which is why
   the stack binds loopback. With `API_AUTH_ENABLED=true` the eleven expensive

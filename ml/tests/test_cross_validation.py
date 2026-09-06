@@ -125,9 +125,16 @@ def test_a_class_smaller_than_the_fold_count_is_rejected() -> None:
 
     details = exc_info.value.details
     assert details["reason"] == "class_smaller_than_folds"
-    assert details["smallest_class"] == "rare"
     assert details["smallest_class_count"] < 5
-    assert "rare" in str(exc_info.value)
+    assert details["class_count"] == 2
+    # Counts, not labels. This error reaches an API caller, and the rarest
+    # class's name is a value from their target column; the full distribution
+    # would be the whole column.
+    # (The class in this fixture is named "rare", and the message legitimately
+    # says "the rarest class" — so the check is for the label as a *value*.)
+    assert "'rare'" not in str(exc_info.value)
+    assert "rare" not in json.dumps(details)
+    assert "smallest_class" not in details and "class_counts" not in details
 
 
 def test_a_workable_minority_class_is_accepted(
@@ -311,8 +318,12 @@ def test_a_failing_fold_does_not_stop_the_others(
     statuses = [fold.status for fold in fold_results]
     assert statuses == [FoldStatus.SUCCEEDED, FoldStatus.FAILED, FoldStatus.SUCCEEDED]
     failed = fold_results[1]
-    assert failed.error is not None and "failed" in failed.error
+    # The estimator's own message is not kept: sklearn writes its messages by
+    # quoting the value that broke, and a fold's error is stored in the record
+    # and indexed for retrieval. The type is what a reader can act on.
+    assert failed.error == "RuntimeError"
     assert failed.error_type == "RuntimeError"
+    assert "always fails" not in (failed.error or "")
     assert failed.metrics is None
     assert seconds >= 0
 

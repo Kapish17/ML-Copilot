@@ -191,8 +191,16 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     and what can it do?" without a request having to arrive first — which is
     exactly the question asked of a container that is up but behaving
     unexpectedly.
+
+    The settings are read from the application's own overrides when it has
+    them, falling back to the environment. Reading the environment
+    unconditionally made the line untrue of any application built with explicit
+    settings — it would announce ``api_auth_enabled=false`` for a service that
+    had authentication on — and a startup line nobody can trust is worse than
+    none, because it is the line read when something is already wrong.
     """
-    settings = get_settings()
+    override = application.dependency_overrides.get(get_settings)
+    settings = override() if override is not None else get_settings()
     configure_logging(settings.log_level)
 
     facts = _describe_startup(settings)
@@ -315,13 +323,19 @@ def create_app(
     if dataset_source is not None:
         application.dependency_overrides[get_dataset_source] = lambda: dataset_source
 
-    _allow_browser_origins(application, config)
-    # Below the request-id middleware, so an oversized body is still logged
-    # with an id and still answers with one — a caller who hits the limit gets
-    # a failure they can quote, like every other failure here.
+    # Added *before* the CORS middleware, which means it ends up *inside* it:
+    # Starlette applies middleware in reverse order of addition, so the last
+    # added is the outermost. A 413 written by this middleware has to pass back
+    # out through CORS to gain its `Access-Control-Allow-Origin` header —
+    # without that the dashboard sees an opaque cross-origin failure instead of
+    # the envelope explaining that the file was too big, which is the one case
+    # where a user most needs to be told what happened.
     application.add_middleware(
-        RequestBodyLimitMiddleware, max_bytes=config.max_request_body_bytes
+        RequestBodyLimitMiddleware,
+        max_bytes=config.max_request_body_bytes,
+        max_upload_bytes=config.max_upload_bytes,
     )
+    _allow_browser_origins(application, config)
     # Added last, so it sits outside the CORS middleware and every response —
     # including a preflight that CORS answers on its own — carries a request id
     # and produces one log line.

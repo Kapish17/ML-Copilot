@@ -279,7 +279,17 @@ def render_tool_catalogue(definitions: Sequence[dict[str, Any]]) -> str:
     return f"{TOOLS_OPEN}\n" + "\n".join(blocks) + f"\n{TOOLS_CLOSE}"
 
 
-def render_observations(entries: Sequence[dict[str, Any]], *, limit: int) -> str:
+#: Marks where one observation was cut, so the model can see it is not the
+#: whole thing rather than reading a truncated list as complete.
+OBSERVATION_TRUNCATION_MARKER = "\n[... observation truncated ...]"
+
+
+def render_observations(
+    entries: Sequence[dict[str, Any]],
+    *,
+    limit: int,
+    per_observation_limit: int | None = None,
+) -> str:
     """Render what has been observed so far, delimited and bounded.
 
     Args:
@@ -288,6 +298,12 @@ def render_observations(entries: Sequence[dict[str, Any]], *, limit: int) -> str
             the *oldest* observations are dropped and the omission is stated —
             silently losing the evidence an answer rests on would be worse
             than saying it is gone.
+        per_observation_limit: Characters any *single* observation may run to.
+            Without it the block limit can be exceeded by one large result:
+            the loop below always keeps at least one block, whatever its size,
+            because dropping every observation would leave the model nothing.
+            A tool returning an unusually large payload would therefore set the
+            size of the prompt, which is the one thing a budget exists to stop.
     """
     if not entries:
         return (
@@ -296,7 +312,10 @@ def render_observations(entries: Sequence[dict[str, Any]], *, limit: int) -> str
         )
 
     rendered = [
-        neutralise_delimiters(json.dumps(entry, indent=2, default=str))
+        _bounded(
+            neutralise_delimiters(json.dumps(entry, indent=2, default=str)),
+            per_observation_limit,
+        )
         for entry in entries
     ]
 
@@ -320,6 +339,13 @@ def render_observations(entries: Sequence[dict[str, Any]], *, limit: int) -> str
         + "\n\n".join(kept)
         + f"\n{OBSERVATIONS_CLOSE}"
     )
+
+
+def _bounded(text: str, limit: int | None) -> str:
+    """Cut one rendered observation at ``limit``, saying that it was cut."""
+    if limit is None or len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + OBSERVATION_TRUNCATION_MARKER
 
 
 #: The longest a rendered context value may be. Context is facts, and a fact
@@ -450,6 +476,7 @@ __all__ = [
     "CONTEXT_OPEN",
     "DELIMITER_REPLACEMENT",
     "MAX_CONTEXT_VALUE_CHARS",
+    "OBSERVATION_TRUNCATION_MARKER",
     "OBSERVATIONS_CLOSE",
     "OBSERVATIONS_OPEN",
     "PLANNER_SYSTEM_PROMPT",
