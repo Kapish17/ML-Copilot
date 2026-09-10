@@ -12,11 +12,13 @@ persistent record of every run.
 > **Explanations describe model behaviour and associations; they do not
 > establish causal relationships.**
 
-**Not implemented:** hyperparameter optimisation (no Optuna), **MLflow**, any
-database (no PostgreSQL), model persistence, XGBoost or LightGBM. Experiment
-tracking is implemented, but against a local JSON store written by this
-package — trained models and SHAP explainers themselves live in memory for the
-lifetime of the process and are never written to disk.
+**Not implemented:** hyperparameter optimisation (no Optuna), **MLflow** or any
+external model registry, any database (no PostgreSQL), XGBoost or LightGBM.
+Experiment tracking is implemented, but against a local JSON store written by
+this package. Model persistence is implemented — a successful run's fitted
+pipeline is written to a local artifact store with a manifest (`ml/artifacts/`)
+— but SHAP explainers themselves are not persisted: they live in memory for the
+lifetime of the process.
 
 The stored records are read by the retrieval layer in `rag/`, which makes them
 searchable, and the training and explanation functions here are what the
@@ -103,12 +105,12 @@ ml/
 │   ├── local_store.py   LocalExperimentStore — one JSON file per run
 │   ├── builder.py       create_experiment_run: composing existing results
 │   ├── comparison.py    Comparing runs on a metric they share
-│   └── runs/            Stored history (git-ignored, created on first save)
+│   ├── runs/            Stored history (git-ignored, created on first save)
+│   └── models/          Persisted model artifacts (git-ignored; MODEL_ARTIFACT_DIR)
 ├── artifacts/
 │   ├── schema.py        The artifact manifest: feature schema, classes, metrics
 │   ├── store.py         ModelArtifactStore protocol; LocalModelArtifactStore
-│   ├── prediction.py    Validating records against a manifest, and predicting
-│   └── models/          Persisted artifacts (git-ignored, created on first save)
+│   └── prediction.py    Validating records against a manifest, and predicting
 ├── tests/               Synthetic-data tests, including leakage proofs
 └── requirements.txt
 ```
@@ -292,8 +294,10 @@ the reason is reported in `prepared.stratification_note`:
 - a class has only one row,
 - the test half is too small to hold every class.
 
-Cross-validation is not implemented. The splitting functions are small and
-pure so a cross-validation strategy can reuse them later.
+These splitting functions are small and pure, which is what lets
+`ml/evaluation/cross_validation.py` reuse them: cross-validation runs *inside*
+the training portion produced here, so the held-out half stays untouched. See
+"Cross-validation and model selection" below.
 
 ## Leakage prevention
 
@@ -326,7 +330,7 @@ Measured, never corrected. `prepared.target_overall`, `target_train` and
 `target_test` report class counts, percentages, majority and minority classes
 and the imbalance ratio (or descriptive statistics for regression). No SMOTE,
 no oversampling, no undersampling — the class distribution a caller sees is the
-one the data has. Commit 5/6 can act on these numbers.
+one the data has. Model selection and explainability act on these numbers.
 
 ## Result object
 
@@ -752,7 +756,8 @@ extreme rows can be explained without moving a single imputation value.
 
 ### Why feature names matter
 
-Because the preprocessing step carries Commit 3's names, the explanation talks
+Because the preprocessing step carries the transformed feature names, the
+explanation talks
 about `contract_Month-to-month` and `missingindicator_age` rather than `x0` and
 `x7`. That is the difference between a result a person can act on and a table
 of numbers, and it is what makes the output usable by a future LLM layer.
@@ -797,8 +802,8 @@ Two honest limits come with it:
 
 For a **binary** problem the result names the predicted class, the explained
 class and the positive class separately, so none has to be inferred. The
-positive class follows the convention set in Commit 4 — the last of the
-estimator's sorted classes. Some models produce one SHAP output per class;
+positive class follows this package's convention — the last of the estimator's
+sorted classes. Some models produce one SHAP output per class;
 others produce a single margin for the positive class, in which case explaining
 the negative class is the exact negation of those values, and the result says
 so in its warnings.
@@ -1137,11 +1142,11 @@ from ml.experiments import LocalExperimentStore, create_experiment_run
 
 run = create_experiment_run(
     frame,                       # the dataset, for its fingerprint only
-    prepared,                    # PreparedDataset (Commit 3)
-    outcome,                     # ModelSelectionResult (Commit 5)
+    prepared,                    # PreparedDataset, from ml.preprocessing
+    outcome,                     # ModelSelectionResult, from ml.models
     name="renewal baseline",
-    explanation=explanation,     # GlobalExplanation (Commit 6), optional
-    profile=profile,             # dataset profile (Commit 2), optional
+    explanation=explanation,     # GlobalExplanation, optional
+    profile=profile,             # dataset profile, optional
     tags=("baseline",),
     source_format="csv",
 )
@@ -1396,8 +1401,10 @@ external dataset or touches the network.
 - `list` reads every record from disk on each call. That is fine for the
   directory sizes a project accumulates by hand and would not be for thousands.
 - History is per machine and per directory; nothing is shared or synchronised.
-- A record cannot rebuild the model it describes, because no artefact is
-  stored. Reproduction means re-running the recorded configuration.
+- A record on its own cannot rebuild the model it describes: the estimator
+  lives in the separate artifact store, keyed by experiment id. If the artifact
+  was never written, or has been removed, reproduction means re-running the
+  recorded configuration.
 - Comparison is single-metric by design and refuses mixed metrics rather than
   inventing a common scale.
 - Deleting a run deletes its directory; there is no soft delete or history of

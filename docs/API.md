@@ -715,8 +715,10 @@ fingerprint, shape, column names and `persisted: false`.
 ### `GET /api/v1/agent/status`
 
 What the agent can do right now: `agent_available`, the registered `tools`,
-whether dataset upload is supported, the supported formats, and the four
-budget ceilings.
+whether dataset upload is supported, the supported formats, and the seven
+budget ceilings — `max_tool_calls`, `max_iterations`, `max_workflow_steps`,
+`max_tool_repeats`, `max_run_seconds`, `max_context_chars` and
+`max_answer_length`.
 
 ---
 

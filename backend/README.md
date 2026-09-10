@@ -33,12 +33,14 @@ backend/
 │   ├── api/
 │   │   ├── dependencies.py    Settings, services and the experiment store
 │   │   ├── error_handlers.py  Exceptions → the shared error envelope
+│   │   ├── middleware.py      Request id, body limits, request logging
+│   │   ├── security.py        The optional API-key dependency
 │   │   └── v1/
 │   │       ├── router.py           Mounts the v1 routers under /api/v1
 │   │       ├── datasets.py         POST /api/v1/datasets/profile
 │   │       ├── experiments.py      The experiment endpoints
 │   │       ├── experiment_form.py  The multipart request contract
-│   │       ├── knowledge.py        POST /search and POST /ask
+│   │       ├── knowledge.py        /api/v1/search and /api/v1/ask
 │   │       ├── agent.py            The agent endpoints
 │   │       └── agent_form.py       The multipart request contract
 │   ├── core/
@@ -46,15 +48,16 @@ backend/
 │   │   ├── errors.py          Typed domain errors with codes and statuses
 │   │   ├── ml_errors.py       ML-layer exceptions → codes and HTTP statuses
 │   │   ├── knowledge_errors.py  RAG and LLM exceptions → codes and statuses
-│   │   └── agent_errors.py    Agent exceptions and failed runs → codes and statuses
-│   ├── models/                Persistence models (empty — no database yet)
+│   │   ├── agent_errors.py    Agent exceptions and failed runs → codes and statuses
+│   │   └── logging.py         Structured logging and the request-id context
 │   ├── schemas/
 │   │   ├── system.py          Schemas for `/` and `/health`
 │   │   ├── errors.py          The error envelope
 │   │   ├── dataset.py         Dataset profile response models
 │   │   ├── experiment.py      Experiment request and response models
 │   │   ├── knowledge.py       Search and ask request and response models
-│   │   └── agent.py           Agent request and response models
+│   │   ├── agent.py           Agent request and response models
+│   │   └── prediction.py      Prediction request and response models
 │   ├── services/
 │   │   ├── datasets/
 │   │   │   ├── ingestion/     Format detection and the per-format adapters
@@ -76,6 +79,7 @@ backend/
 │   │   ├── experiments/
 │   │   │   ├── options.py     The validated description of one request
 │   │   │   ├── runner.py      ExperimentRunner — the orchestration
+│   │   │   ├── prediction.py  Loading a stored model and predicting with it
 │   │   │   └── history.py     Reading, filtering and comparing runs
 │   │   ├── knowledge/
 │   │   │   ├── filters.py     Request fields → the RAG metadata filter
@@ -87,21 +91,25 @@ backend/
 │   │       ├── errors.py      The refusals only an HTTP caller cares about
 │   │       └── service.py     AgentService — one question, one bounded run
 │   └── main.py                Application factory and system routes
-├── tests/
-│   ├── factories.py           In-memory CSV builders used by the tests
+├── tests/                     (25 test modules; the fixtures and the themes)
+│   ├── factories.py           In-memory dataset builders used by the tests
 │   ├── conftest.py            Client, settings, store and service fixtures
 │   ├── test_main.py           System endpoints
-│   ├── test_dataset_validation.py
-│   ├── test_dataset_loader.py
-│   ├── test_dataset_profiler.py
-│   ├── test_dataset_quality.py
-│   ├── test_dataset_target.py
-│   ├── test_dataset_service.py
+│   ├── test_dataset_*.py      Validation, loading, profiling, quality, target
 │   ├── test_api_datasets.py       Profiling contract and error handling
 │   ├── test_api_experiments.py    Experiment endpoints, end to end
+│   ├── test_api_multi_format.py   CSV, Excel and JSON through the same path
 │   ├── test_api_knowledge.py      Search and ask, security and architecture
-│   ├── test_api_agent.py          The agent endpoint, security and architecture
-│   ├── test_api_agent_dataset.py  The dataset-aware endpoint, and the loan it makes
+│   ├── test_api_agent*.py         The agent endpoints and the dataset loan
+│   ├── test_prediction.py         Predicting from a stored model
+│   ├── test_authentication.py     The optional API key, and what it guards
+│   ├── test_privacy.py            Dataset values must not leak anywhere
+│   ├── test_hardening.py          Limits, malformed input, resource bounds
+│   ├── test_observability.py      Request ids and what the logs may contain
+│   ├── test_dependency_security.py  Pinning and the supply chain
+│   ├── test_docker_config.py      Compose, images and `.env.example`
+│   ├── test_documentation.py      Documentation that cannot go stale silently
+│   ├── test_ci_workflow.py        The workflow file itself
 │   └── test_experiment_service.py Service layer and architecture rules
 ├── requirements.txt      Runtime dependencies (what the container installs)
 ├── requirements-dev.txt  Adds the test dependencies
@@ -170,8 +178,6 @@ backend/
   are read once and cached; the vector store is opened, and the provider's SDK
   and credential are loaded, only when a request needs them. The application
   starts with no API key and no index — a fact a test asserts.
-- The empty package (`models`) is a real package with a docstring describing its
-  intended role. It is a placeholder for a later commit, not dead code.
 
 ## Endpoints
 
@@ -179,7 +185,7 @@ backend/
 | --- | --- | --- |
 | `GET` | `/` | Service name, version, environment and docs URL |
 | `GET` | `/health` | Liveness check |
-| `POST` | `/api/v1/datasets/profile` | Profile an uploaded CSV |
+| `POST` | `/api/v1/datasets/profile` | Profile an uploaded CSV, Excel or JSON dataset |
 | `POST` | `/api/v1/experiments/run` | Run a complete experiment and store it |
 | `GET` | `/api/v1/experiments` | List stored experiments, filtered and sorted |
 | `GET` | `/api/v1/experiments/capabilities` | Models, metrics and limits a request may use |
@@ -331,8 +337,8 @@ unbuilt index is a `503` and not an empty `200`.
 ### Experiment history
 
 Runs are stored as local JSON files (see `ml/README.md`). **MLflow is not
-implemented, and neither is any database.** The listing endpoint reuses
-Commit 7's `ExperimentQuery`:
+implemented, and neither is any database.** The listing endpoint reuses the
+experiment store's own `ExperimentQuery`:
 
 ```bash
 curl "http://127.0.0.1:8000/api/v1/experiments?task_type=classification\
@@ -640,9 +646,8 @@ JSON response                             schemas/agent.py
 
 **Uploaded datasets are processed in memory for the request and are never
 persisted as raw data by the agent.** The file is validated and parsed by the
-same ingestion path `POST /api/v1/datasets/profile` has used since Commit 2 —
-one set of limits, not a second — held for the length of the call, and released
-when it returns.
+same ingestion path `POST /api/v1/datasets/profile` uses — one set of limits,
+not a second — held for the length of the call, and released when it returns.
 
 - Nothing is written to disk. The experiment store is the only thing this
   request writes at all, and what it writes is a record: fingerprint, shape,
@@ -664,8 +669,8 @@ schema accepts and not names anything looks up. The submitted name is reduced
 to a bare name and kept as display text on the response; no filesystem
 operation uses it.
 
-What identifies the data is Commit 7's content fingerprint, which is also what
-any experiment from it is filed under — so a run can be found again long after
+What identifies the data is its content fingerprint, which is also what any
+experiment from it is filed under — so a run can be found again long after
 the data is gone.
 
 ### Dataset contents are data
@@ -706,8 +711,8 @@ well as the values.
 
 ### Testing it offline
 
-The suite drives the **real** `LLMPlanner` with Commit 10's `FakeLLMProvider`
-returning decision objects, so the production path is what runs: FastAPI → the
+The suite drives the **real** `LLMPlanner` with the `llm` layer's own
+`FakeLLMProvider` returning decision objects, so the production path is what runs: FastAPI → the
 agent service → the orchestrator → the registry → the real retrieval index,
 the real experiment runner and the real SHAP layer → grounding → JSON. A
 fabricated citation, an exhausted budget and a provider timeout are each one
@@ -846,18 +851,22 @@ structured result out, no filesystem, pandas, sklearn or provider detail in the
 answer. A future agent would call the services directly and get the same
 grounded `Answer` object the endpoint serialises.
 
-A fifth top-level package, `agent/`, now orchestrates these services: it lets a
+A fifth top-level package, `agent/`, orchestrates these services: it lets a
 language model choose which of them a question needs, within a bounded loop
 over an explicit tool allowlist. It depends on this service's *functions*
 through structural protocols and imports nothing from `app`, so the dependency
-still runs one way — and this package does not import `agent/` either, because
-**no agent HTTP endpoint is implemented**. `POST /api/v1/agent/ask` belongs to
-a later commit; a test asserts that nothing under `app/` imports the agent yet.
+still runs one way. The agent is reached over HTTP through
+`POST /api/v1/agent/ask` and `POST /api/v1/agent/ask-with-dataset`, which are
+thin adapters in `app/api/v1/agent.py`: they build the tool registry from the
+same services the rest of the API uses and serialise the agent's own result
+type. The agent package itself still knows nothing about HTTP.
 
-**No LangChain, LangGraph, autonomous tool calling outside the registered
-tools, streaming, conversation memory or frontend is implemented**, and neither
-is Qdrant, MLflow, Optuna, XGBoost, LightGBM, a database, authentication or
-rate limiting.
+**Not implemented:** LangChain, LangGraph, AutoGen, CrewAI or any agent
+framework; autonomous tool calling outside the registered tools; arbitrary code
+execution; streaming; conversation memory; multi-agent systems. Also absent
+from the project: Qdrant, MLflow, Optuna, XGBoost, LightGBM, a database
+(records and artifacts are files on disk), OAuth or user accounts, rate-limiting
+infrastructure, and background workers.
 
 See `ml/README.md`, `rag/README.md`, `llm/README.md` and `agent/README.md`.
 

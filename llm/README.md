@@ -14,8 +14,8 @@ cannot.
 **Not implemented:** LangChain, LangGraph, AutoGen, CrewAI or any agent
 framework; multi-agent systems; model fine-tuning; streaming; conversation
 memory. Also still absent from the project: MLflow, Optuna, Qdrant,
-PostgreSQL, XGBoost, LightGBM, a frontend, authentication, rate limiting, and
-dataset ingestion beyond CSV.
+PostgreSQL, XGBoost, LightGBM, rate-limiting infrastructure, and dataset
+ingestion beyond CSV, Excel (`.xlsx`) and JSON.
 
 This layer's provider abstraction is also what the agent plans through, and
 what `POST /api/v1/agent/ask` reaches a model by — see "The agent" below, and

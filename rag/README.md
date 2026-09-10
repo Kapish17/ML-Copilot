@@ -104,7 +104,6 @@ rag/
 ├── retrieval/
 │   ├── results.py         RetrievalResult / RetrievalResponse
 │   └── service.py         RetrievalService — embed, filter, rank, attribute
-├── prompts/               Placeholder for the LLM commit (empty)
 ├── tests/
 └── requirements.txt
 ```

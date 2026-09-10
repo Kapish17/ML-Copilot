@@ -524,8 +524,11 @@ docker compose up --build
 - Both images define their own `HEALTHCHECK`, so `docker compose up --wait`
   blocks until the application actually answers rather than until a process
   exists.
-- Both ports are published on `127.0.0.1` by default. This API has no
-  authentication; `BIND_ADDRESS=0.0.0.0` is the deliberate opt-in.
+- Both ports are published on `127.0.0.1` by default, and
+  `BIND_ADDRESS=0.0.0.0` is the deliberate opt-in. API-key authentication is
+  optional and **off by default** (`API_AUTH_ENABLED=false`), so binding to a
+  reachable address without also setting `API_AUTH_ENABLED=true` and
+  `API_AUTH_KEY` publishes an unauthenticated API.
 
 `NEXT_PUBLIC_API_BASE_URL` is inlined at **build** time, because the browser is
 what reads it. It must therefore be a URL the browser can resolve —

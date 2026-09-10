@@ -19,11 +19,11 @@ below.
 persisted as raw data by the agent.**
 
 **Not implemented:** LangChain, LangGraph, AutoGen, CrewAI or any agent
-framework; multi-agent systems; streaming; conversation memory; a frontend.
-Also still absent from the project: MLflow, Optuna, Qdrant, PostgreSQL,
-XGBoost, LightGBM, authentication, background workers, and dataset ingestion
-beyond CSV, Excel (`.xlsx`) and JSON — Parquet, SQL, databases, cloud storage
-and URL ingestion are not implemented.
+framework; multi-agent systems; streaming; conversation memory; arbitrary code
+execution; autonomous browsing. Also still absent from the project: MLflow,
+Optuna, Qdrant, PostgreSQL, XGBoost, LightGBM, background workers, and dataset
+ingestion beyond CSV, Excel (`.xlsx`) and JSON — Parquet, SQL, databases, cloud
+storage and URL ingestion are not implemented.
 
 ## What it is, and why it is bounded
 
@@ -106,10 +106,9 @@ while the budget holds:
 budget spent → a partial result naming the limit that stopped it
 ```
 
-The loop this agent has always had, unchanged. It runs when there is no plan —
-including for any planner written against the older contract, because
-`plan_workflow` is an **optional** method the orchestrator asks for and carries
-on without.
+This is the fallback, and it runs whenever there is no plan — including for a
+planner that does not implement planning at all, because `plan_workflow` is an
+**optional** method the orchestrator asks for and carries on without.
 
 It always terminates too. Every path through the body either records an
 observation — which costs tool budget — or returns. There is no branch that
@@ -144,8 +143,8 @@ four registrations, no discovery, no plugin scan.
 
 The services live in `app.services`, `rag` and `ml`. If this package imported
 them, the agent would depend on the web layer and — through it — on pandas,
-scikit-learn and SHAP, and the later HTTP endpoint would close a loop between
-the backend and the agent.
+scikit-learn and SHAP, and the HTTP endpoint would close a loop between the
+backend and the agent.
 
 So the collaborators are declared structurally in `agent/tools/base.py`: a tool
 asks for something with the right method, and the caller supplies the real
@@ -376,8 +375,8 @@ anywhere in the result.
 
 ## Grounding
 
-Commit 10's rule, applied to a wider set of evidence: **a citation is valid
-exactly when this run retrieved it.** The extraction and validation are
+The `llm` layer's rule, applied to a wider set of evidence: **a citation is
+valid exactly when this run retrieved it.** The extraction and validation are
 literally `llm.grounding.extract_citations` and
 `llm.grounding.validate_citations` — there is deliberately not a second
 implementation, because two would eventually disagree and the one that
@@ -441,10 +440,15 @@ missing explanation is stated as a warning. Nothing is filled in.
 
 ## The explainability limitation
 
-Commit 7 decided not to persist fitted models. An experiment record holds the
-dataset fingerprint, the configuration, the scores and — if one was computed at
-run time — a stored global importance summary. It does not hold the estimator.
-**Nothing in this commit changes that.** No model is written to disk.
+An experiment *record* holds the dataset fingerprint, the configuration, the
+scores and — if one was computed at run time — a stored global importance
+summary. It does not hold the estimator. The application does separately
+persist a successful run's fitted pipeline as an artifact, and
+`POST /api/v1/experiments/{id}/predict` loads it; **this package deliberately
+does not reach that store.** Loading an artifact means deserialising a pickle,
+and `agent/` holds the tightest boundary in the project: it imports no
+filesystem access, no scikit-learn and nothing from the backend, and it is
+handed the models it may explain rather than going to find them.
 
 So `explain_experiment` answers in three ways, and the difference is the point:
 
@@ -464,10 +468,11 @@ one optional flag — `retain_artifacts` — which changes nothing about what is
 *stored*; it only decides whether the caller keeps a reference after the call
 returns.
 
-Live explanations of historical experiments would need real model persistence:
-artefact storage, versioning, and the security question of loading a pickled
-estimator. That is a deliberate future decision with costs, not something this
-tool should quietly introduce.
+Live explanations of historical experiments would mean loading a stored
+artifact and running SHAP against it. That is a genuine feature, and it belongs
+on the side of the boundary that already owns the artifact store and its
+provenance checks — not inside the agent, which would have to grow a filesystem
+and a deserialiser to do it.
 
 ## Chain-of-thought
 
@@ -521,6 +526,9 @@ parameters into the state.
 | --- | --- | --- |
 | `AGENT_MAX_TOOL_CALLS` | `6` | Tool calls one question may cause |
 | `AGENT_MAX_ITERATIONS` | `8` | Planning turns one question may take |
+| `AGENT_MAX_WORKFLOW_STEPS` | `5` | Longest plan accepted, before any step runs |
+| `AGENT_MAX_TOOL_REPEATS` | `2` | Times one plan may name the same tool |
+| `AGENT_MAX_RUN_SECONDS` | `180` | Wall clock for one whole run |
 | `AGENT_MAX_CONTEXT_CHARS` | `24000` | Observed text one run may accumulate |
 | `AGENT_MAX_ANSWER_LENGTH` | `4000` | Longest answer returned |
 | `AGENT_MAX_OBSERVATION_CHARS` | `6000` | Longest single observation shown |
@@ -544,8 +552,8 @@ pytest agent/tests -m "not slow"   # skip the real ML pipeline while iterating
 directly rather than waited for: a request for a tool that does not exist, a
 response that is a Python snippet, an answer citing a source that was never
 retrieved. It satisfies the same protocol as `LLMPlanner`, so the code path
-under test is the real one. `LLMPlanner` itself is tested against Commit 10's
-`FakeLLMProvider` — a real `LLMProvider` implementation — so the production
+under test is the real one. `LLMPlanner` itself is tested against the `llm`
+layer's `FakeLLMProvider` — a real `LLMProvider` implementation — so the production
 path is covered too.
 
 The integration tests use the **real** layers: a retrieval index built from
@@ -656,8 +664,8 @@ profiling endpoint already uses, registered under a fixed name for the length
 of one call, and released when the call returns. It is not written to disk, not
 added to the retrieval index, not visible to another request, and not returned:
 what comes back about it is the shape, the column names, the display filename,
-and Commit 7's content fingerprint — which is also how any experiment from it
-is filed, so a run can be found again long after the data is gone.
+and its content fingerprint — which is also how any experiment from it is
+filed, so a run can be found again long after the data is gone.
 
 Three things follow from the design rather than from a filter:
 
@@ -705,6 +713,7 @@ agent/
 ├── errors.py          The refusals and breakdowns of orchestration itself
 ├── schemas.py         Typed argument declarations and their validation
 ├── plans.py           The two decisions a planner may make, and parsing one
+├── workflow.py        A whole plan: parsing it, and validating it once
 ├── prompts.py         What the planner and answerer are told to distrust
 ├── planner.py         LLMPlanner, over the provider abstraction
 ├── planners/
