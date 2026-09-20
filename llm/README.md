@@ -61,6 +61,7 @@ llm/
 ├── providers/
 │   ├── base.py            The LLMProvider contract
 │   ├── openai_provider.py Any OpenAI-compatible chat API; lazy
+│   ├── gemini_provider.py Google's Gemini API, via `google-genai`; lazy
 │   └── fake.py            Deterministic, scriptable, for tests
 ├── tests/
 └── requirements.txt
@@ -86,15 +87,16 @@ Three obligations every implementation carries:
   and used; it is never stored on the provider, put in a message, echoed in an
   error or written to a log.
 
-### The provider implemented
+### The providers implemented
 
-The **OpenAI SDK's chat-completions API**. That API rather than a
-vendor-specific one is the point: the same implementation, with `LLM_BASE_URL`
-pointed elsewhere, talks to OpenAI, Azure OpenAI, vLLM, Ollama, LM Studio,
-OpenRouter and Together. One provider covers hosted models and a model running
-on the developer's own machine.
+**`openai`** — the **OpenAI SDK's chat-completions API**. That API rather than
+a vendor-specific one is the point: the same implementation, with
+`LLM_BASE_URL` pointed elsewhere, talks to OpenAI, Azure OpenAI, vLLM, Ollama,
+LM Studio, OpenRouter and Together. One provider covers hosted models and a
+model running on the developer's own machine.
 
 ```bash
+export LLM_PROVIDER=openai                   # the default; may be omitted
 export LLM_API_KEY=...                       # OpenAI
 # or, for a local model:
 export LLM_BASE_URL=http://localhost:11434/v1
@@ -106,7 +108,28 @@ The default model is `gpt-4o-mini`. That is a *default*, not a promise — no
 model is available until a key and an endpoint are configured, and the provider
 says so rather than pretending.
 
-The second provider, `fake`, is deterministic and in-process. It is a real
+**`gemini`** — Google's **Gemini API**, through the official `google-genai`
+SDK (`pip install google-genai`; not the older, deprecated
+`google-generativeai`). Added as a free-tier alternative to OpenAI: at the
+time of writing, Gemini's flash models are usable within the Gemini API's
+free tier, inside Google's published rate and quota limits — see
+<https://ai.google.dev/gemini-api/docs/pricing> for current figures, since
+that is Google's quota to change, not this project's to promise.
+
+```bash
+export LLM_PROVIDER=gemini
+export LLM_API_KEY=...                       # a Gemini API key
+# LLM_MODEL defaults to gemini-2.5-flash when unset for this provider
+```
+
+`LLM_BASE_URL` is meaningful for `openai` and optional for `gemini` — the
+official SDK talks to Google's own endpoint with nothing to configure, and the
+field exists there only for someone routing Gemini traffic through a proxy of
+their own. Switching between the two providers is a configuration change:
+`RAGAnswerService`, the agent, grounding and the frontend depend on
+`LLMProvider` and never on which implementation was built.
+
+The third provider, `fake`, is deterministic and in-process. It is a real
 implementation of the same protocol, not a mock, and it is what makes the
 grounding rules testable: you cannot reliably make a hosted model fabricate a
 citation on demand, and you should not need a network, a credential or a budget
@@ -357,11 +380,11 @@ quotable copy of the corpus into every log that captures a response.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `LLM_PROVIDER` | `openai` | `openai` or `fake` |
-| `LLM_MODEL` | `gpt-4o-mini` | Model identifier |
+| `LLM_PROVIDER` | `openai` | `openai`, `gemini` or `fake` |
+| `LLM_MODEL` | `gpt-4o-mini` for `openai`, `gemini-2.5-flash` for `gemini` | Model identifier. An explicit value always wins; left unset, the default depends on `LLM_PROVIDER` so switching providers does not silently keep the other one's model name |
 | `LLM_API_KEY` | — | The credential. Read at generation time, never stored |
 | `LLM_API_KEY_ENV` | `LLM_API_KEY` | Which variable holds the key |
-| `LLM_BASE_URL` | — | Endpoint override for an OpenAI-compatible service |
+| `LLM_BASE_URL` | — | Endpoint override for an OpenAI-compatible service. Optional and normally unused for `gemini` |
 | `LLM_TEMPERATURE` | `0.0` | Zero, so a grounded answer does not vary between runs |
 | `LLM_MAX_OUTPUT_TOKENS` | `900` | Upper bound on the answer |
 | `LLM_TIMEOUT_SECONDS` | `30` | How long to wait |
@@ -520,5 +543,11 @@ imports of every module.
   matches on term overlap rather than meaning (see `rag/README.md`), so a
   question phrased in words the documents do not use will retrieve poorly and
   the honest result is `insufficient_evidence`.
-- **One provider.** Anthropic, Gemini and Bedrock would each need their own
-  implementation of the interface, which is exactly what the interface is for.
+- **Two providers.** OpenAI-compatible and Gemini. Anthropic and Bedrock would
+  each need their own implementation of the interface, which is exactly what
+  the interface is for.
+- **Gemini's free tier is Google's to change.** This project reads whatever
+  `LLM_MODEL` names and reports whatever Google's API returns; it does not
+  track, enforce or guarantee any particular rate, quota or "free" status —
+  see <https://ai.google.dev/gemini-api/docs/pricing> for what currently
+  applies.

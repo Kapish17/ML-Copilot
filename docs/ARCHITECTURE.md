@@ -37,7 +37,7 @@ tests that parse the import statements rather than by convention:
 ```
 backend/app  ──▶  ml     ──▶  (pandas, scikit-learn, shap)
      │        ──▶  rag    ──▶  (numpy, scikit-learn)
-     │        ──▶  llm    ──▶  (openai)
+     │        ──▶  llm    ──▶  (openai, or google-genai)
      └────────▶  agent   ──▶  (nothing)
 ```
 
@@ -382,10 +382,14 @@ Details: [rag/README.md](../rag/README.md).
 
 ## LLM layer
 
-A provider abstraction over the OpenAI-compatible chat-completions shape. One
-implementation therefore reaches OpenAI, Azure OpenAI, vLLM, Ollama, LM Studio
-and OpenRouter by pointing `LLM_BASE_URL` at them — a model on a laptop works
-the same as a hosted one.
+A provider abstraction, selected by `LLM_PROVIDER`, over two implementations.
+`openai_provider.py` speaks the OpenAI-compatible chat-completions shape, so
+it also reaches Azure OpenAI, vLLM, Ollama, LM Studio and OpenRouter by
+pointing `LLM_BASE_URL` at them — a model on a laptop works the same as a
+hosted one. `gemini_provider.py` speaks to Google's Gemini API through the
+official `google-genai` SDK, chosen with `LLM_PROVIDER=gemini`, primarily as
+a free-tier alternative to OpenAI. Neither RAG, grounding, the agent nor the
+frontend knows which one is running.
 
 Nothing is imported at package-import time and no client is built until a
 generation is actually requested, so the layer imports and the whole test suite

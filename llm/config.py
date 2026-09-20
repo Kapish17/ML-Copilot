@@ -29,10 +29,16 @@ from llm.errors import LLMConfigurationError
 #: itself and against anything that speaks the same API — Azure OpenAI, vLLM,
 #: Ollama, LM Studio, OpenRouter — by pointing ``base_url`` at it.
 PROVIDER_OPENAI = "openai"
+#: Google's Gemini API, through the official ``google-genai`` SDK. Useful as a
+#: free-tier alternative to OpenAI: Gemini's flash models are, at the time of
+#: writing, free to call within Google's published rate and quota limits — see
+#: ``llm/providers/gemini_provider.py`` and this project's README for current
+#: figures, since a quota is Google's to change, not this project's to promise.
+PROVIDER_GEMINI = "gemini"
 #: The deterministic in-process provider used by the tests. Never contacts
 #: anything.
 PROVIDER_FAKE = "fake"
-AVAILABLE_PROVIDERS = (PROVIDER_OPENAI, PROVIDER_FAKE)
+AVAILABLE_PROVIDERS = (PROVIDER_OPENAI, PROVIDER_GEMINI, PROVIDER_FAKE)
 
 DEFAULT_PROVIDER = PROVIDER_OPENAI
 
@@ -41,6 +47,22 @@ DEFAULT_PROVIDER = PROVIDER_OPENAI
 #: available until a key and an endpoint are configured, and the provider says
 #: so rather than pretending.
 DEFAULT_MODEL = "gpt-4o-mini"
+#: The default Gemini model, used only when ``LLM_PROVIDER=gemini`` and no
+#: ``LLM_MODEL`` is set. A small, fast "flash" model that is, at the time of
+#: writing, included in the Gemini API's free tier. Like ``DEFAULT_MODEL``,
+#: this is a default and not a promise — Google names, retires and renames
+#: models on its own schedule, and ``LLM_MODEL`` overrides it with no code
+#: change required.
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+#: Which default model applies to which provider, so that asking for Gemini
+#: with no ``LLM_MODEL`` set does not silently default to an OpenAI model
+#: name (and vice versa). Looked up in :func:`config_from_env` only; the
+#: dataclass field default below is unaffected and stays paired with
+#: ``DEFAULT_PROVIDER``.
+DEFAULT_MODEL_BY_PROVIDER: dict[str, str] = {
+    PROVIDER_OPENAI: DEFAULT_MODEL,
+    PROVIDER_GEMINI: DEFAULT_GEMINI_MODEL,
+}
 #: Environment variable the API key is read from, at generation time.
 DEFAULT_API_KEY_ENV = "LLM_API_KEY"
 #: Zero, because a grounded answer should not vary between identical runs.
@@ -287,11 +309,23 @@ def config_from_env(**overrides: object) -> LLMConfig:
     Reads settings only. The API key is **not** read here — the configuration
     records which variable holds it, and the provider reads that variable when
     it authenticates.
+
+    The model default depends on which provider is selected: an unset
+    ``LLM_MODEL`` resolves to that provider's own default (see
+    ``DEFAULT_MODEL_BY_PROVIDER``) rather than always falling back to
+    OpenAI's, so setting only ``LLM_PROVIDER=gemini`` does not quietly ask a
+    Gemini endpoint for ``gpt-4o-mini``. An explicit ``LLM_MODEL`` always wins.
     """
+    provider = os.getenv("LLM_PROVIDER", "").strip() or DEFAULT_PROVIDER
+    default_model = DEFAULT_MODEL_BY_PROVIDER.get(provider.lower(), DEFAULT_MODEL)
     values: dict[str, object] = {
-        "provider": os.getenv("LLM_PROVIDER", "").strip() or DEFAULT_PROVIDER,
-        "model": os.getenv("LLM_MODEL", "").strip() or DEFAULT_MODEL,
+        "provider": provider,
+        "model": os.getenv("LLM_MODEL", "").strip() or default_model,
         "api_key_env": os.getenv("LLM_API_KEY_ENV", "").strip() or DEFAULT_API_KEY_ENV,
+        # Optional for every provider, but especially so for Gemini: the
+        # official SDK talks to Google's own endpoint with no override
+        # needed, so this is only set when someone points it elsewhere (an
+        # OpenAI-compatible proxy, a self-hosted model, and so on).
         "base_url": os.getenv("LLM_BASE_URL", "").strip() or None,
         "temperature": _env_float("LLM_TEMPERATURE", DEFAULT_TEMPERATURE),
         "max_output_tokens": _env_int(

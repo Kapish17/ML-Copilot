@@ -16,3 +16,14 @@
 # generation is actually requested, so the layer imports — and the whole test
 # suite runs — with this installed but no API key configured.
 openai==3.6.0
+
+# Google's official Gen AI SDK — the one Google's own documentation currently
+# recommends, not the older, deprecated `google-generativeai` package. Used
+# by the Gemini provider, an alternative to OpenAI selected with
+# LLM_PROVIDER=gemini, primarily because Gemini's flash models are, at the
+# time of writing, usable within the Gemini API's free tier.
+#
+# Same laziness guarantee as the OpenAI SDK above: nothing is imported at
+# package-import time, and no client is built until a generation is actually
+# requested.
+google-genai==2.24.0

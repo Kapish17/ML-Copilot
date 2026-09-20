@@ -1,7 +1,8 @@
 """Language-model providers, and how one is chosen.
 
 ``base``             the :class:`LLMProvider` contract
-``openai_provider``  the real one: any OpenAI-compatible chat API
+``openai_provider``  any OpenAI-compatible chat API
+``gemini_provider``  Google's Gemini API, through the official SDK
 ``fake``             a deterministic, scriptable provider for tests
 
 Providers are resolved by name from an :class:`~llm.config.LLMConfig`, so the
@@ -15,7 +16,13 @@ read and no network call is made until a generation is actually requested.
 
 from __future__ import annotations
 
-from llm.config import PROVIDER_FAKE, PROVIDER_OPENAI, AVAILABLE_PROVIDERS, LLMConfig
+from llm.config import (
+    PROVIDER_FAKE,
+    PROVIDER_GEMINI,
+    PROVIDER_OPENAI,
+    AVAILABLE_PROVIDERS,
+    LLMConfig,
+)
 from llm.errors import LLMConfigurationError
 from llm.providers.base import LLMProvider
 from llm.providers.fake import FakeLLMProvider
@@ -45,6 +52,13 @@ def build_llm_provider(config: LLMConfig) -> LLMProvider:
         from llm.providers.openai_provider import OpenAIProvider
 
         return OpenAIProvider(config)
+
+    if name == PROVIDER_GEMINI:
+        # Same reasoning: importing this package must not pull in
+        # google-genai just because a Gemini provider might someday exist.
+        from llm.providers.gemini_provider import GeminiProvider
+
+        return GeminiProvider(config)
 
     if name == PROVIDER_FAKE:
         return FakeLLMProvider(model=config.model)

@@ -46,6 +46,7 @@ from llm.answers import Answer, AnswerMetadata, AnswerStatus, Citation
 from llm.config import (
     AVAILABLE_PROVIDERS,
     PROVIDER_FAKE,
+    PROVIDER_GEMINI,
     PROVIDER_OPENAI,
     LLMConfig,
     config_from_env,
@@ -80,6 +81,7 @@ __all__ = [
     "INSUFFICIENT_EVIDENCE_ANSWER",
     "INSUFFICIENT_EVIDENCE_MARKER",
     "PROVIDER_FAKE",
+    "PROVIDER_GEMINI",
     "PROVIDER_OPENAI",
     "SYSTEM_PROMPT",
     "Answer",

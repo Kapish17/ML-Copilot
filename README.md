@@ -207,7 +207,7 @@ decided.
            │            └─────┬──────┘
            │                  │
            ▼                  ▼
-   scikit-learn · SHAP   OpenAI-compatible API
+   scikit-learn · SHAP   OpenAI-compatible API, or Gemini
    pandas · joblib       (hosted or local)
 
    ─────────────────────────────────────────────────────────
@@ -251,7 +251,7 @@ Full detail, including the ingestion adapters, storage and deployment:
 | **Model lifecycle** | One check decides whether a stored model is `available`, `not_available` or `corrupted`, and every caller reads that one answer. The three are distinguished because their fixes differ. |
 | **Prediction** | `POST /api/v1/experiments/{id}/predict` runs new records through that exact stored pipeline. **Nothing is re-fitted.** A request carries feature values and never a path, and its records are held for one request and released. |
 | **Retrieval** | Semantic search over the project's own documentation and its run history, with structure-aware chunking, pre-ranking metadata filters and stable citations. The default embedding provider is stateless — no download, no key, identical vectors everywhere. |
-| **Grounded answers** | Evidence-first generation with validated citations, over any OpenAI-compatible endpoint — hosted, or a model on your laptop via `LLM_BASE_URL`. |
+| **Grounded answers** | Evidence-first generation with validated citations, over any OpenAI-compatible endpoint (hosted, or a model on your laptop via `LLM_BASE_URL`) or Gemini — chosen with `LLM_PROVIDER`. |
 | **Bounded agent** | Four registered tools, typed arguments, seven budget ceilings, four outcomes all returned as HTTP 200 with a status. No chain-of-thought is ever returned. |
 | **Planned workflows** | The agent plans the whole run up front — goal, ordered steps, one tool each, dependencies — and the plan is validated against the registry *before a step of it runs*. Dependencies may only point backwards, so a plan cannot loop. |
 | **Values between steps** | `run_experiment` → `explain_experiment` passes the experiment id through a closed reference the executor resolves from the observation — an allowlist of six scalar fields, no paths and no expressions. Nothing asks a language model to copy tool output into a tool argument. |
@@ -353,14 +353,38 @@ cd frontend && npm ci && npm run dev
 **Without an API key**, profiling, experiments, cross-validation, SHAP,
 prediction, history and retrieval search all work. Only answer generation and
 the agent need a credential, and the dashboard reports those two as unavailable
-in its header rather than failing. To enable them:
+in its header rather than failing. To enable them, set `LLM_PROVIDER` and the
+matching credential in `.env`:
 
 ```bash
-LLM_API_KEY=your-key-here     # in .env
+# OpenAI (default)
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-4o-mini
+LLM_API_KEY=your-openai-key
+
+# Gemini — a free-tier alternative
+LLM_PROVIDER=gemini
+LLM_MODEL=gemini-2.5-flash
+LLM_API_KEY=your-gemini-key
 ```
 
-`LLM_BASE_URL` points the same provider at any OpenAI-compatible endpoint, so a
-local model works without an external credential.
+Both are the same `LLMProvider` abstraction with a different implementation
+behind it (`llm/providers/openai_provider.py`, `llm/providers/gemini_provider.py`)
+— RAG, grounding, the agent and the frontend never know which one is running.
+`LLM_BASE_URL` additionally points the OpenAI provider at any OpenAI-compatible
+endpoint (Azure OpenAI, vLLM, Ollama, LM Studio, OpenRouter, a local model), so
+it works without an external credential too; Gemini talks to Google's own
+endpoint and does not need it.
+
+Gemini is worth knowing about specifically because, at the time of writing,
+its `gemini-2.5-flash` model can be used within the Gemini API's free tier —
+useful if you don't want to put a card on an OpenAI account just to try the
+Knowledge Assistant. That is Google's free tier, not this project's: it is
+subject to Google's own request-per-minute, token-per-minute and
+request-per-day limits, which change on Google's schedule — see
+<https://ai.google.dev/gemini-api/docs/pricing> for current figures, and
+`llm/README.md` for how errors from either provider (including a rate limit
+or an exhausted quota) are reported.
 
 ## Run with Docker
 
@@ -547,7 +571,7 @@ provider internal.
 | ML | scikit-learn 1.9 — `Pipeline`, `ColumnTransformer`, six estimators |
 | Explainability | SHAP 0.51, with permutation-importance fallback |
 | Retrieval | Local vector store behind a `VectorStore` interface; stateless hashed-n-gram embeddings by default, optional `all-MiniLM-L6-v2` |
-| Language model | Provider abstraction over the OpenAI-compatible chat API — OpenAI, Azure, vLLM, Ollama, LM Studio, OpenRouter |
+| Language model | Provider abstraction (`LLM_PROVIDER`) over the OpenAI-compatible chat API — OpenAI, Azure, vLLM, Ollama, LM Studio, OpenRouter — or Google's Gemini API |
 | Agent | Own package. No framework — no LangChain, LangGraph, AutoGen or CrewAI |
 | Frontend | Next.js 15.5, React 19, TypeScript, Tailwind |
 | Storage | Local JSON records, local joblib artifacts, a local index — on named volumes |

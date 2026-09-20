@@ -4,13 +4,21 @@ from __future__ import annotations
 
 import json
 import os
+from typing import Any
 
 import pytest
 
-from llm.config import AVAILABLE_PROVIDERS, LLMConfig, config_from_env
+from llm.config import (
+    AVAILABLE_PROVIDERS,
+    DEFAULT_GEMINI_MODEL,
+    DEFAULT_MODEL,
+    LLMConfig,
+    config_from_env,
+)
 from llm.errors import (
     LLMAuthenticationError,
     LLMConfigurationError,
+    LLMContextTooLargeError,
     LLMError,
     LLMProviderError,
     LLMRateLimitError,
@@ -26,6 +34,7 @@ from llm.messages import (
     redact,
 )
 from llm.providers import FakeLLMProvider, LLMProvider, build_llm_provider
+from llm.providers.gemini_provider import GeminiProvider
 from llm.providers.openai_provider import OpenAIProvider
 
 FAKE_KEY = "sk-test-not-a-real-key-0123456789"
@@ -47,10 +56,11 @@ def make_request(prompt: str = "What was the F1 score?") -> GenerationRequest:
 # --------------------------------------------------------------------------
 
 
-def test_both_providers_satisfy_the_interface() -> None:
+def test_every_provider_satisfies_the_interface() -> None:
     """Everything above the interface depends on it and nothing else."""
     assert isinstance(FakeLLMProvider(), LLMProvider)
     assert isinstance(OpenAIProvider(LLMConfig()), LLMProvider)
+    assert isinstance(GeminiProvider(LLMConfig(provider="gemini")), LLMProvider)
 
 
 def test_a_provider_is_chosen_by_configuration() -> None:
@@ -58,6 +68,9 @@ def test_a_provider_is_chosen_by_configuration() -> None:
     assert isinstance(build_llm_provider(LLMConfig(provider="fake")), FakeLLMProvider)
     assert isinstance(
         build_llm_provider(LLMConfig(provider="openai")), OpenAIProvider
+    )
+    assert isinstance(
+        build_llm_provider(LLMConfig(provider="gemini")), GeminiProvider
     )
 
 
@@ -472,3 +485,409 @@ def test_the_real_provider_is_used_only_when_asked_for() -> None:
     """The default configuration names it, but nothing is contacted."""
     assert LLMConfig().provider == "openai"
     assert os.getenv("LLM_API_KEY") is None or True, "no key is required to get here"
+
+
+# --------------------------------------------------------------------------
+# The Gemini provider
+# --------------------------------------------------------------------------
+#
+# Mirrors the OpenAI sections above wherever the same guarantee applies:
+# laziness, no credential leakage, typed failures. No test here contacts
+# Google — either the SDK's own client is never built (the laziness checks),
+# or it is replaced with an in-process fake before ``generate`` is called.
+
+
+def test_gemini_defaults_to_a_free_tier_flash_model_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Selecting Gemini must not quietly ask it for an OpenAI model name."""
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+
+    config = config_from_env()
+
+    assert config.provider == "gemini"
+    assert config.model == DEFAULT_GEMINI_MODEL
+    assert config.model != DEFAULT_MODEL
+
+
+def test_an_explicit_model_overrides_the_per_provider_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LLM_MODEL always wins over the provider's own default."""
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("LLM_MODEL", "gemini-2.0-flash")
+
+    assert config_from_env().model == "gemini-2.0-flash"
+
+
+def test_openai_still_defaults_the_way_it_always_did(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Gemini default must not leak backwards onto OpenAI."""
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+
+    assert config_from_env().model == DEFAULT_MODEL
+
+
+def test_constructing_the_gemini_provider_builds_nothing() -> None:
+    """No SDK client, no credential read, no network call at construction."""
+    provider = GeminiProvider(LLMConfig(provider="gemini"))
+
+    assert provider.is_loaded is False
+    assert provider.name == "gemini"
+
+
+def test_importing_the_package_does_not_import_the_gemini_sdk() -> None:
+    """The whole layer must import with the Gemini SDK never touched."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys, llm; print('google.genai' in sys.modules)",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parents[2],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "False"
+
+
+def test_gemini_generation_without_a_key_is_a_configuration_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing is attempted, and the message says which variable to set."""
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    provider = GeminiProvider(LLMConfig(provider="gemini", api_key_env="LLM_API_KEY"))
+
+    assert provider.is_ready is False
+    with pytest.raises(LLMConfigurationError) as exc_info:
+        provider.generate(make_request())
+
+    assert exc_info.value.details["api_key_env"] == "LLM_API_KEY"
+    assert "LLM_API_KEY" in exc_info.value.message
+
+
+def test_gemini_asks_the_sdk_to_retry_a_transient_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Left unset, google-genai makes exactly one attempt and gives up.
+
+    Verified directly against a real deployment: a ServerError a few seconds
+    into an ``ask`` turned straight into a 502 with no retry at all, because
+    ``HttpOptions.retry_options`` was never set. ``max_retries`` must reach
+    the SDK the same way it already reaches the OpenAI provider's client.
+    """
+    genai = pytest.importorskip("google.genai")
+    monkeypatch.setenv("LLM_TEST_KEY", FAKE_KEY)
+
+    captured: dict[str, Any] = {}
+
+    class _RecordingClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(genai, "Client", _RecordingClient)
+
+    provider = GeminiProvider(
+        LLMConfig(provider="gemini", api_key_env="LLM_TEST_KEY", max_retries=4)
+    )
+    provider._build_client()
+
+    retry_options = captured["http_options"].retry_options
+    assert retry_options is not None
+    # max_retries=4 means four retries *after* the first attempt, matching
+    # what LLM_MAX_RETRIES means everywhere else in this project.
+    assert retry_options.attempts == 5
+    assert 503 in retry_options.http_status_codes
+    assert 500 in retry_options.http_status_codes
+
+
+def test_the_gemini_key_is_never_stored_on_the_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """It is read at the moment of use and dropped."""
+    monkeypatch.setenv("LLM_TEST_KEY", FAKE_KEY)
+    provider = GeminiProvider(LLMConfig(provider="gemini", api_key_env="LLM_TEST_KEY"))
+
+    assert provider.is_ready is True
+    assert FAKE_KEY not in json.dumps(
+        {key: str(value) for key, value in vars(provider).items()}
+    )
+
+
+class _FakeUsage:
+    """Stands in for ``google.genai.types.GenerateContentResponseUsageMetadata``."""
+
+    def __init__(self, prompt: int = 120, completion: int = 40) -> None:
+        self.prompt_token_count = prompt
+        self.candidates_token_count = completion
+        self.total_token_count = prompt + completion
+
+
+class _FakeCandidate:
+    """Stands in for one ``google.genai.types.Candidate``."""
+
+    def __init__(self, finish_reason: str = "STOP") -> None:
+        self.finish_reason = finish_reason
+
+
+class _FakeGeminiResponse:
+    """Stands in for ``google.genai.types.GenerateContentResponse``."""
+
+    def __init__(
+        self,
+        text: str = "a grounded answer",
+        finish_reason: str = "STOP",
+        model_version: str = "gemini-2.5-flash",
+    ) -> None:
+        self._text = text
+        self.candidates = [_FakeCandidate(finish_reason)]
+        self.usage_metadata = _FakeUsage()
+        self.model_version = model_version
+
+    @property
+    def text(self) -> str:
+        return self._text
+
+
+class _BlockedGeminiResponse:
+    """A response with no readable text — e.g. a safety block.
+
+    The real SDK's ``response.text`` quick accessor raises ``ValueError`` in
+    this situation rather than returning an empty string, which is the case
+    ``_read_response`` must catch and not let escape as a raw SDK exception.
+    """
+
+    def __init__(self) -> None:
+        self.candidates = [_FakeCandidate("SAFETY")]
+        self.usage_metadata = _FakeUsage()
+        self.model_version = "gemini-2.5-flash"
+
+    @property
+    def text(self) -> str:
+        raise ValueError(
+            "The `response.text` quick accessor requires the response to "
+            "contain a valid `Part`, but none were returned."
+        )
+
+
+class _FakeGeminiModels:
+    """Stands in for ``client.models``."""
+
+    def __init__(self, response: object | None = None, error: Exception | None = None) -> None:
+        self._response = response
+        self._error = error
+        self.calls: list[dict] = []
+
+    def generate_content(self, **kwargs):
+        self.calls.append(kwargs)
+        if self._error is not None:
+            raise self._error
+        return self._response
+
+
+class _FakeGeminiClient:
+    """Stands in for ``google.genai.Client`` — never built, never contacted."""
+
+    def __init__(self, response: object | None = None, error: Exception | None = None) -> None:
+        self.models = _FakeGeminiModels(response=response, error=error)
+
+
+def _ready_gemini_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    response: object | None = None,
+    error: Exception | None = None,
+) -> GeminiProvider:
+    """A provider with a credential and an injected fake client.
+
+    Bypasses ``_build_client`` entirely — this project's fake stands in for
+    the SDK client the same way ``FakeLLMProvider`` stands in for a whole
+    provider, so no real client is ever built and no network is ever touched.
+    """
+    monkeypatch.setenv("LLM_TEST_KEY", FAKE_KEY)
+    provider = GeminiProvider(LLMConfig(provider="gemini", api_key_env="LLM_TEST_KEY"))
+    provider._client = _FakeGeminiClient(response=response, error=error)
+    return provider
+
+
+def test_gemini_generates_from_a_successful_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The common path: a real-shaped response, read into a GenerationResult."""
+    provider = _ready_gemini_provider(
+        monkeypatch, response=_FakeGeminiResponse(text="a grounded answer")
+    )
+
+    result = provider.generate(make_request("What was the F1 score?"))
+
+    assert result.text == "a grounded answer"
+    assert result.provider == "gemini"
+    assert result.model == "gemini-2.5-flash"
+    assert result.finish_reason == "stop"
+    assert result.prompt_tokens == 120
+    assert result.completion_tokens == 40
+    assert result.is_truncated is False
+
+
+def test_gemini_reports_truncation_in_this_project_s_own_vocabulary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MAX_TOKENS must read as "length", matching the OpenAI provider."""
+    provider = _ready_gemini_provider(
+        monkeypatch,
+        response=_FakeGeminiResponse(text="cut off partway", finish_reason="MAX_TOKENS"),
+    )
+
+    result = provider.generate(make_request())
+
+    assert result.finish_reason == "length"
+    assert result.is_truncated is True
+
+
+def test_gemini_sends_the_system_prompt_and_question_separately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The grounded prompt must actually reach the model, not be dropped."""
+    provider = _ready_gemini_provider(monkeypatch, response=_FakeGeminiResponse())
+
+    provider.generate(
+        GenerationRequest(
+            messages=build_messages("You are a grounded assistant.", "the question"),
+            model="gemini-2.5-flash",
+        )
+    )
+
+    call = provider._client.models.calls[-1]
+    assert call["config"].system_instruction == "You are a grounded assistant."
+    assert call["contents"][0].parts[0].text == "the question"
+    assert call["contents"][0].role == "user"
+
+
+def test_an_empty_gemini_response_is_reported_as_unusable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request that succeeded and produced nothing is its own failure."""
+    provider = _ready_gemini_provider(monkeypatch, response=_FakeGeminiResponse(text="   "))
+
+    with pytest.raises(LLMResponseError):
+        provider.generate(make_request())
+
+
+def test_a_safety_blocked_gemini_response_is_reported_as_unusable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SDK raises reading ``.text`` here; no raw SDK exception must escape."""
+    provider = _ready_gemini_provider(monkeypatch, response=_BlockedGeminiResponse())
+
+    with pytest.raises(LLMResponseError):
+        provider.generate(make_request())
+
+
+def test_the_gemini_provider_maps_sdk_exceptions_without_leaking_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each vendor exception becomes one of this project's errors.
+
+    Skipped where the SDK is not installed: the layer must work without it,
+    and this test is about the mapping rather than about the SDK.
+    """
+    genai_errors = pytest.importorskip("google.genai.errors")
+    provider = GeminiProvider(LLMConfig(provider="gemini", model="test-model"))
+
+    def client_error(code: int, message: str, status: str):
+        return genai_errors.ClientError(
+            code, {"error": {"code": code, "message": message, "status": status}}
+        )
+
+    cases = [
+        (client_error(401, "API key not valid", "UNAUTHENTICATED"), LLMAuthenticationError),
+        (
+            client_error(403, "permission denied", "PERMISSION_DENIED"),
+            LLMAuthenticationError,
+        ),
+        (
+            client_error(429, "Resource has been exhausted", "RESOURCE_EXHAUSTED"),
+            LLMRateLimitError,
+        ),
+        (client_error(404, "model not found", "NOT_FOUND"), LLMUnavailableError),
+        (
+            client_error(400, "unknown parameter 'foo'", "INVALID_ARGUMENT"),
+            LLMResponseError,
+        ),
+        (
+            genai_errors.ServerError(
+                503, {"error": {"code": 503, "message": "overloaded", "status": "UNAVAILABLE"}}
+            ),
+            LLMUnavailableError,
+        ),
+        (RuntimeError("a connection reset, or something else entirely"), LLMUnavailableError),
+    ]
+
+    for raised, expected in cases:
+        mapped = provider._translate(raised)
+        assert isinstance(mapped, expected), type(raised).__name__
+        assert isinstance(mapped, LLMError)
+        payload = json.dumps({"m": mapped.message, "d": mapped.details})
+        assert FAKE_KEY not in payload, type(raised).__name__
+
+
+def test_a_gemini_context_overflow_is_distinguished_from_a_bad_request() -> None:
+    """One is actionable by lowering a limit; the other is a bug."""
+    genai_errors = pytest.importorskip("google.genai.errors")
+    provider = GeminiProvider(LLMConfig(provider="gemini"))
+
+    overflow = provider._translate(
+        genai_errors.ClientError(
+            400,
+            {
+                "error": {
+                    "code": 400,
+                    "message": "The input token count exceeds the maximum number of tokens allowed",
+                    "status": "INVALID_ARGUMENT",
+                }
+            },
+        )
+    )
+    malformed = provider._translate(
+        genai_errors.ClientError(
+            400,
+            {"error": {"code": 400, "message": "unknown field 'foo'", "status": "INVALID_ARGUMENT"}},
+        )
+    )
+
+    assert isinstance(overflow, LLMContextTooLargeError)
+    assert "max_context_chars" in overflow.details
+    assert isinstance(malformed, LLMResponseError)
+
+
+def test_a_network_level_gemini_failure_without_an_sdk_exception_class() -> None:
+    """Timeouts and connection failures arrive as whatever httpx raises."""
+    provider = GeminiProvider(LLMConfig(provider="gemini"))
+
+    class ReadTimeout(Exception):
+        """Stands in for httpx.ReadTimeout without importing httpx here."""
+
+    class ConnectError(Exception):
+        """Stands in for httpx.ConnectError without importing httpx here."""
+
+    assert isinstance(provider._translate(ReadTimeout("timed out")), LLMTimeoutError)
+    assert isinstance(provider._translate(ConnectError("refused")), LLMUnavailableError)
+
+
+def test_gemini_and_openai_are_both_usable_side_by_side() -> None:
+    """Neither provider's presence should disturb the other's."""
+    openai_provider = build_llm_provider(LLMConfig(provider="openai"))
+    gemini_provider = build_llm_provider(LLMConfig(provider="gemini"))
+
+    assert openai_provider.name == "openai"
+    assert gemini_provider.name == "gemini"
+    assert type(openai_provider) is not type(gemini_provider)
