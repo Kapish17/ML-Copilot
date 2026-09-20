@@ -181,6 +181,9 @@ class ModelArtifactStore(Protocol):
     def delete(self, experiment_id: str) -> bool:
         """Remove an artifact. Returns whether anything was there."""
 
+    def delete_all(self) -> int:
+        """Remove every stored artifact. Returns how many were removed."""
+
 
 class LocalModelArtifactStore:
     """The filesystem implementation of :class:`ModelArtifactStore`."""
@@ -529,6 +532,17 @@ class LocalModelArtifactStore:
             return False
         shutil.rmtree(directory)
         return True
+
+    def delete_all(self) -> int:
+        """Remove every stored artifact.
+
+        Returns:
+            int: How many artifacts were removed.
+        """
+        ids = self.stored_ids()
+        for experiment_id in ids:
+            self.delete(experiment_id)
+        return len(ids)
 
     def stored_ids(self) -> list[str]:
         """Every experiment id with a stored artifact, sorted."""

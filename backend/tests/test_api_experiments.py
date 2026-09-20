@@ -1193,3 +1193,66 @@ def test_a_high_cardinality_column_is_excluded_with_a_reason(
         )
     else:
         assert_envelope(payload, status_code=422, code="empty_feature_set")
+
+
+# --------------------------------------------------------------------------
+# Deleting stored experiments
+#
+# History is never emptied by a reload, a restart or the passage of time —
+# these are the only two ways a record disappears, and both are explicit
+# caller actions.
+# --------------------------------------------------------------------------
+
+
+def test_deleting_a_run_removes_it_from_history(experiment_client: TestClient) -> None:
+    """A deleted run is gone from both the list and the detail endpoint."""
+    created = run_experiment(
+        experiment_client,
+        target_column="renewed",
+        models=["logistic_regression"],
+        folds=FOLDS,
+        name="to be deleted",
+    ).json()
+    experiment_id = created["experiment_id"]
+
+    delete_response = experiment_client.delete(f"{LIST_URL}/{experiment_id}")
+
+    assert delete_response.status_code == 200, delete_response.text
+    body = delete_response.json()
+    assert body == {"experiment_id": experiment_id, "deleted": True}
+
+    get_response = experiment_client.get(f"{LIST_URL}/{experiment_id}")
+    assert_envelope(get_response, status_code=404, code="experiment_not_found")
+
+    listing = experiment_client.get(LIST_URL, params={"dataset_fingerprint": created["dataset"]["fingerprint"]})
+    ids = [row["experiment_id"] for row in listing.json()["experiments"]]
+    assert experiment_id not in ids
+
+
+def test_deleting_an_unknown_experiment_is_404(experiment_client: TestClient) -> None:
+    """Deleting an id nothing is stored under fails loudly, not silently."""
+    response = experiment_client.delete(f"{LIST_URL}/exp_missing_20260101T000000Z_0000")
+
+    assert_envelope(response, status_code=404, code="experiment_not_found")
+
+
+def test_a_second_delete_of_the_same_id_is_404(experiment_client: TestClient) -> None:
+    """Deleting the same experiment twice is not idempotent by design.
+
+    The second call finds nothing there — that is a 404, the same answer as
+    deleting an id that was never stored, not a quiet success.
+    """
+    created = run_experiment(
+        experiment_client,
+        target_column="renewed",
+        models=["logistic_regression"],
+        folds=FOLDS,
+        name="deleted twice",
+    ).json()
+    experiment_id = created["experiment_id"]
+
+    first = experiment_client.delete(f"{LIST_URL}/{experiment_id}")
+    assert first.status_code == 200, first.text
+
+    second = experiment_client.delete(f"{LIST_URL}/{experiment_id}")
+    assert_envelope(second, status_code=404, code="experiment_not_found")

@@ -244,3 +244,14 @@ class LocalExperimentStore:
             return False
         shutil.rmtree(directory)
         return True
+
+    def delete_all(self) -> int:
+        """Remove every stored run.
+
+        Returns:
+            int: How many runs were removed.
+        """
+        ids = self._stored_ids()
+        for experiment_id in ids:
+            self.delete(experiment_id)
+        return len(ids)

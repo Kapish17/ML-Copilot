@@ -7,7 +7,12 @@ import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { Loading } from "@/components/common/Spinner";
 import { ExperimentComparisonView } from "@/components/experiments/ExperimentComparison";
 import { ExperimentHistoryTable } from "@/components/experiments/ExperimentHistoryTable";
-import { compareExperiments, listExperiments } from "@/lib/api/experiments";
+import {
+  clearExperiments,
+  compareExperiments,
+  deleteExperiment,
+  listExperiments,
+} from "@/lib/api/experiments";
 import type {
   ExperimentComparison,
   ExperimentHeadline,
@@ -29,6 +34,10 @@ export default function ExperimentsPage() {
   const [comparison, setComparison] = useState<ExperimentComparison | null>(null);
   const [comparing, setComparing] = useState(false);
   const [compareError, setCompareError] = useState<unknown>(null);
+
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<unknown>(null);
+  const [clearing, setClearing] = useState(false);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -52,6 +61,48 @@ export default function ExperimentsPage() {
         ? current.filter((id) => id !== experimentId)
         : [...current, experimentId],
     );
+  }
+
+  /**
+   * Remove one stored run. This — never a reload, never a restart — is the
+   * only thing that empties an entry out of history.
+   */
+  async function onDelete(experimentId: string) {
+    if (!window.confirm("Delete this experiment? This cannot be undone.")) return;
+    setDeleteError(null);
+    setDeletingId(experimentId);
+    try {
+      await deleteExperiment(experimentId);
+      setSelected((current) => current.filter((id) => id !== experimentId));
+      setComparison(null);
+      load();
+    } catch (error) {
+      setDeleteError(error);
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
+  /** Remove every stored run. Irreversible, and only ever explicit. */
+  async function onClearAll() {
+    if (
+      !window.confirm(
+        "Delete ALL stored experiment history? This cannot be undone.",
+      )
+    )
+      return;
+    setDeleteError(null);
+    setClearing(true);
+    try {
+      await clearExperiments();
+      setSelected([]);
+      setComparison(null);
+      load();
+    } catch (error) {
+      setDeleteError(error);
+    } finally {
+      setClearing(false);
+    }
   }
 
   async function onCompare() {
@@ -94,6 +145,14 @@ export default function ExperimentsPage() {
             >
               {comparing ? "Comparing…" : "Compare selected"}
             </Button>
+            <Button
+              variant="ghost"
+              disabled={!runs || runs.length === 0 || clearing}
+              onClick={onClearAll}
+              className="text-red-700 hover:bg-red-50"
+            >
+              {clearing ? "Clearing…" : "Clear all"}
+            </Button>
           </div>
         }
       >
@@ -105,11 +164,20 @@ export default function ExperimentsPage() {
             onRetry={load}
           />
         )}
+        {!loading && deleteError != null && (
+          <ErrorBanner
+            error={deleteError}
+            title="That did not delete"
+            onRetry={() => setDeleteError(null)}
+          />
+        )}
         {!loading && !listError && runs && (
           <ExperimentHistoryTable
             experiments={runs}
             selected={selected}
             onToggle={toggle}
+            onDelete={onDelete}
+            deletingId={deletingId}
           />
         )}
       </Card>

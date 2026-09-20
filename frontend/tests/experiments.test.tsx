@@ -426,6 +426,58 @@ describe("experiment history", () => {
     );
     expect(screen.getByText(/no experiments stored yet/i)).toBeInTheDocument();
   });
+
+  it("has no delete column when onDelete is not supplied", () => {
+    render(
+      <ExperimentHistoryTable
+        experiments={EXPERIMENT_LIST.experiments}
+        selected={[]}
+        onToggle={vi.fn()}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: /Delete customers.csv · renewed/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("asks the caller to delete the run whose button was clicked", async () => {
+    const onDelete = vi.fn();
+    render(
+      <ExperimentHistoryTable
+        experiments={EXPERIMENT_LIST.experiments}
+        selected={[]}
+        onToggle={vi.fn()}
+        onDelete={onDelete}
+      />,
+    );
+
+    const button = screen.getByRole("button", {
+      name: /Delete customers.csv · renewed/,
+    });
+    await userEvent.click(button);
+
+    expect(onDelete).toHaveBeenCalledWith(
+      "exp_e36e7bbf5267_20260902T054517Z_503e",
+    );
+  });
+
+  it("disables and labels only the row currently being deleted", () => {
+    render(
+      <ExperimentHistoryTable
+        experiments={EXPERIMENT_LIST.experiments}
+        selected={[]}
+        onToggle={vi.fn()}
+        onDelete={vi.fn()}
+        deletingId="exp_e36e7bbf5267_20260902T054517Z_503e"
+      />,
+    );
+
+    expect(screen.getByText("Deleting…")).toBeInTheDocument();
+    const pendingButton = screen.getByRole("button", {
+      name: /Delete customers.csv · renewed/,
+    });
+    expect(pendingButton).toBeDisabled();
+  });
 });
 
 describe("experiment comparison", () => {

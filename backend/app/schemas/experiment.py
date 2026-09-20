@@ -289,6 +289,19 @@ class ExperimentRunResponse(ExperimentRecord):
     execution: ExperimentExecution
 
 
+class ExperimentDeleteResponse(BaseModel):
+    """Confirmation that one stored experiment was removed."""
+
+    experiment_id: str
+    deleted: bool = True
+
+
+class ExperimentClearResponse(BaseModel):
+    """Confirmation of a bulk removal of every stored experiment."""
+
+    deleted_count: int
+
+
 class ExperimentHeadline(BaseModel):
     """A one-line view of a run, for listings."""
 

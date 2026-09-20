@@ -30,7 +30,7 @@ from app.services.experiments import (
     ExperimentRunner,
     run_experiment,
 )
-from ml.errors import ConfigurationError, InvalidFoldCountError
+from ml.errors import ConfigurationError, ExperimentNotFoundError, InvalidFoldCountError
 from ml.experiments import LocalExperimentStore
 from tests.factories import learnable_classification_csv, regression_csv
 
@@ -205,6 +205,64 @@ def test_a_run_is_readable_through_the_history_service(
     assert history.get(result.record.experiment_id).to_dict() == result.record.to_dict()
     assert len(history.list(task_type="classification")) == 1
     assert history.list(task_type="regression") == ()
+
+
+def test_deleting_a_run_removes_it_from_history(
+    settings: Settings, runner: ExperimentRunner
+) -> None:
+    """A deleted run is gone from ``get`` and from ``list`` alike."""
+    store = LocalExperimentStore(settings.experiment_store_dir)
+    result = runner.run_frame(
+        frame_from(learnable_classification_csv()),
+        ExperimentOptions(
+            target_column="renewed", models=("logistic_regression",), folds=3
+        ),
+    )
+    history = ExperimentHistoryService(settings, store)
+    experiment_id = result.record.experiment_id
+
+    history.delete(experiment_id)
+
+    with pytest.raises(ExperimentNotFoundError):
+        history.get(experiment_id)
+    assert history.list() == ()
+
+
+def test_deleting_an_unknown_run_is_reported_as_not_found(settings: Settings) -> None:
+    """Deleting something that was never stored is a 404, not a silent no-op."""
+    history = ExperimentHistoryService(
+        settings, LocalExperimentStore(settings.experiment_store_dir)
+    )
+
+    with pytest.raises(ExperimentNotFoundError):
+        history.delete("exp_missing_20260101T000000Z_0000")
+
+
+def test_clearing_removes_every_stored_run(
+    settings: Settings, runner: ExperimentRunner
+) -> None:
+    """Reload and restart never do this; only an explicit ``clear`` call does.
+
+    Two runs prove the count and the emptiness both hold, not just one.
+    """
+    store = LocalExperimentStore(settings.experiment_store_dir)
+    runner.run_frame(
+        frame_from(learnable_classification_csv()),
+        ExperimentOptions(
+            target_column="renewed", models=("logistic_regression",), folds=3
+        ),
+    )
+    runner.run_frame(
+        frame_from(regression_csv()),
+        ExperimentOptions(target_column="price", models=("linear_regression",), folds=3),
+    )
+    history = ExperimentHistoryService(settings, store)
+    assert len(history.list()) == 2
+
+    removed = history.clear()
+
+    assert removed == 2
+    assert history.list() == ()
 
 
 def test_comparing_fewer_than_two_runs_is_refused(settings: Settings) -> None:

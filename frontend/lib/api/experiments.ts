@@ -1,6 +1,6 @@
 /** Experiment endpoints: running, listing, fetching and comparing. */
 
-import { getJson, postForm, postJson, type RequestOptions } from "./client";
+import { deleteJson, getJson, postForm, postJson, type RequestOptions } from "./client";
 import { ApiError, CLIENT_ERROR_CODES } from "./errors";
 import type {
   ExperimentCapabilities,
@@ -123,6 +123,40 @@ export async function getExperiment(
   }
 
   return record;
+}
+
+/** Confirmation of a single delete. */
+export interface ExperimentDeleteResponse {
+  experiment_id: string;
+  deleted: boolean;
+}
+
+/** Confirmation of a bulk delete. */
+export interface ExperimentClearResponse {
+  deleted_count: number;
+}
+
+/**
+ * Permanently remove one stored experiment and its fitted model.
+ *
+ * The only way a record leaves history: a page reload, a backend restart or
+ * the passage of time never do this on their own.
+ */
+export function deleteExperiment(
+  experimentId: string,
+  options: RequestOptions = {},
+): Promise<ExperimentDeleteResponse> {
+  return deleteJson<ExperimentDeleteResponse>(
+    `/api/v1/experiments/${encodeURIComponent(experimentId)}`,
+    options,
+  );
+}
+
+/** Permanently remove every stored experiment and fitted model. Irreversible. */
+export function clearExperiments(
+  options: RequestOptions = {},
+): Promise<ExperimentClearResponse> {
+  return deleteJson<ExperimentClearResponse>("/api/v1/experiments", options);
 }
 
 /** Rank two or more experiments that share a task and a metric. */

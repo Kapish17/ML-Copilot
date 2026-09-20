@@ -71,6 +71,8 @@ PROTECTED_ROUTES = {
     ("GET", "/api/v1/experiments/{experiment_id}"),
     ("GET", "/api/v1/experiments/{experiment_id}/model"),
     ("POST", "/api/v1/experiments/{experiment_id}/predict"),
+    ("DELETE", "/api/v1/experiments/{experiment_id}"),
+    ("DELETE", "/api/v1/experiments"),
     ("POST", "/api/v1/experiments/compare"),
     ("POST", "/api/v1/search"),
     ("POST", "/api/v1/ask"),
@@ -691,6 +693,12 @@ def test_every_protected_route_actually_calls_the_dependency(
                 "/api/v1/experiments/exp_whatever/predict",
                 json={"records": [{"a": 1}]},
             )
+        ),
+        ("DELETE", "/api/v1/experiments/{experiment_id}"): (
+            lambda: secured_client.delete("/api/v1/experiments/exp_whatever")
+        ),
+        ("DELETE", "/api/v1/experiments"): lambda: secured_client.delete(
+            "/api/v1/experiments"
         ),
         ("POST", "/api/v1/search"): lambda: secured_client.post(
             SEARCH_URL, json={"query": "x"}

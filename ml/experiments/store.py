@@ -195,3 +195,7 @@ class ExperimentStore(Protocol):
     def delete(self, experiment_id: str) -> bool:
         """Remove a run, returning whether there was one to remove."""
         ...
+
+    def delete_all(self) -> int:
+        """Remove every stored run, returning how many were removed."""
+        ...

@@ -25,9 +25,14 @@ if [ "${RAG_AUTO_INDEX:-1}" = "1" ]; then
         || echo "entrypoint: indexing failed; the API will start and report search as unavailable"
 fi
 
-echo "entrypoint: starting uvicorn on ${API_HOST:-0.0.0.0}:${API_PORT:-8000}"
+# Render (and several other platform-as-a-service hosts) assigns the port at
+# runtime through $PORT and expects the process to bind to exactly that one;
+# it is not knowable at image-build time, so it must win over API_PORT, whose
+# own default keeps `docker compose up` working unchanged with no $PORT set.
+LISTEN_PORT="${PORT:-${API_PORT:-8000}}"
+echo "entrypoint: starting uvicorn on ${API_HOST:-0.0.0.0}:${LISTEN_PORT}"
 exec uvicorn app.main:app \
     --host "${API_HOST:-0.0.0.0}" \
-    --port "${API_PORT:-8000}" \
+    --port "${LISTEN_PORT}" \
     --app-dir /app/backend \
     "$@"

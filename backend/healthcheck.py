@@ -28,7 +28,9 @@ TIMEOUT_SECONDS = 4
 
 def main() -> int:
     """Return 0 when the API reports itself healthy, 1 otherwise."""
-    port = os.environ.get("API_PORT", "8000")
+    # Must agree with docker-entrypoint.sh's own precedence, or this asks
+    # the wrong port whenever $PORT (Render, and other PaaS hosts) is set.
+    port = os.environ.get("PORT", os.environ.get("API_PORT", "8000"))
     url = f"http://127.0.0.1:{port}/health"
     try:
         with urllib.request.urlopen(url, timeout=TIMEOUT_SECONDS) as response:

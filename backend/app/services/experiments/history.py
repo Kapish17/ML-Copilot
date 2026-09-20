@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from app.core.config import Settings
-from ml.errors import ConfigurationError
+from ml.errors import ConfigurationError, ExperimentNotFoundError
 from ml.experiments import (
     ExperimentComparison,
     ExperimentQuery,
@@ -126,6 +126,38 @@ class ExperimentHistoryService:
                 },
             )
         return compare_experiments([self._store.get(item) for item in unique])
+
+    def delete(self, experiment_id: str) -> None:
+        """Remove one stored experiment.
+
+        Reload, restart and the passage of time must never empty the history
+        on their own — this is the only path that removes a record, and it is
+        reached only when a caller explicitly asks for this one id.
+
+        Args:
+            experiment_id: The run's identifier.
+
+        Raises:
+            InvalidExperimentIdError: If the identifier is malformed or would
+                point outside the store.
+            ExperimentNotFoundError: If nothing is stored under it.
+        """
+        if not self._store.delete(experiment_id):
+            raise ExperimentNotFoundError(
+                f"No experiment is stored under '{experiment_id}'.",
+                details={"experiment_id": experiment_id},
+            )
+
+    def clear(self) -> int:
+        """Remove every stored experiment.
+
+        Irreversible, and reached only from an explicit caller request —
+        never from a reload, a restart or a scheduled sweep.
+
+        Returns:
+            int: How many experiments were removed.
+        """
+        return self._store.delete_all()
 
     # -- Query parameter handling -----------------------------------------
 

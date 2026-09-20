@@ -22,6 +22,7 @@ from fastapi import APIRouter, File, Path, Query, UploadFile, status
 from app.api.dependencies import (
     ExperimentHistoryDep,
     ExperimentRunnerDep,
+    ModelArtifactStoreDep,
     PredictionServiceDep,
     SettingsDep,
 )
@@ -30,8 +31,10 @@ from app.api.v1.experiment_form import ExperimentOptionsDep
 from app.schemas.errors import ErrorResponse
 from app.schemas.experiment import (
     ExperimentCapabilitiesResponse,
+    ExperimentClearResponse,
     ExperimentComparisonResponse,
     ExperimentCompareRequest,
+    ExperimentDeleteResponse,
     ExperimentHeadline,
     ExperimentListResponse,
     ExperimentRecord,
@@ -335,6 +338,52 @@ def get_experiment(
     evaluation, the explanation and the environment.
     """
     return ExperimentRecord.model_validate(history.get(experiment_id).to_dict())
+
+
+@router.delete(
+    "/{experiment_id}",
+    dependencies=[Protected],
+    response_model=ExperimentDeleteResponse,
+    responses=_LOOKUP_ERRORS,
+    summary="Delete one stored experiment",
+)
+def delete_experiment(
+    history: ExperimentHistoryDep,
+    artifacts: ModelArtifactStoreDep,
+    experiment_id: Annotated[
+        str, Path(description="Identifier returned when the experiment ran.")
+    ],
+) -> ExperimentDeleteResponse:
+    """Permanently remove one stored experiment and its fitted model.
+
+    This is the only way a record disappears from history: a page reload, a
+    backend restart or the passage of time never empty it on their own. The
+    fitted model, if this run ever produced one, is removed alongside the
+    record; a run with no model is unaffected by that second step.
+    """
+    history.delete(experiment_id)
+    artifacts.delete(experiment_id)
+    return ExperimentDeleteResponse(experiment_id=experiment_id, deleted=True)
+
+
+@router.delete(
+    "",
+    dependencies=[Protected],
+    response_model=ExperimentClearResponse,
+    responses=UNAUTHORIZED_RESPONSE,
+    summary="Delete every stored experiment",
+)
+def clear_experiments(
+    history: ExperimentHistoryDep, artifacts: ModelArtifactStoreDep
+) -> ExperimentClearResponse:
+    """Permanently remove all stored experiment history and fitted models.
+
+    Irreversible, and reached only by this explicit call — never by a reload,
+    a restart, or the passage of time.
+    """
+    count = history.clear()
+    artifacts.delete_all()
+    return ExperimentClearResponse(deleted_count=count)
 
 
 _MODEL_ERRORS: dict[int | str, dict[str, object]] = {

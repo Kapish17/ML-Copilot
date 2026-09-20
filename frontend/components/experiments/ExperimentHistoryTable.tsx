@@ -25,12 +25,18 @@ export interface ExperimentHistoryTableProps {
   experiments: ExperimentHeadline[];
   selected: string[];
   onToggle: (experimentId: string) => void;
+  /** Delete one run. Omit to hide the column entirely (e.g. a read-only view). */
+  onDelete?: (experimentId: string) => void;
+  /** The run currently being deleted, so its row can show a pending state. */
+  deletingId?: string | null;
 }
 
 export function ExperimentHistoryTable({
   experiments,
   selected,
   onToggle,
+  onDelete,
+  deletingId,
 }: ExperimentHistoryTableProps) {
   if (experiments.length === 0) {
     return (
@@ -61,6 +67,11 @@ export function ExperimentHistoryTable({
           */}
           <Th numeric>Selection score</Th>
           <Th numeric>Held-out score</Th>
+          {onDelete && (
+            <Th>
+              <span className="sr-only">Delete</span>
+            </Th>
+          )}
         </tr>
       }
     >
@@ -116,6 +127,19 @@ export function ExperimentHistoryTable({
                 {directionLabel(direction).toLowerCase()}
               </span>
             </Td>
+            {onDelete && (
+              <Td className="text-right">
+                <button
+                  type="button"
+                  onClick={() => onDelete(run.experiment_id)}
+                  disabled={deletingId === run.experiment_id}
+                  aria-label={`Delete ${run.name}`}
+                  className="rounded-md px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400 disabled:cursor-not-allowed disabled:text-ink-400"
+                >
+                  {deletingId === run.experiment_id ? "Deleting…" : "Delete"}
+                </button>
+              </Td>
+            )}
           </tr>
         );
       })}

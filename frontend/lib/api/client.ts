@@ -151,6 +151,14 @@ export function postJson<T>(
   });
 }
 
+/** DELETE a resource and read a JSON confirmation body. */
+export function deleteJson<T>(
+  path: string,
+  options: RequestOptions = {},
+): Promise<T> {
+  return requestJson<T>(path, { method: "DELETE", signal: options.signal });
+}
+
 /**
  * POST a multipart form — the only way a file reaches the backend.
  *

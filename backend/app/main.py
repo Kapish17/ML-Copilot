@@ -120,7 +120,7 @@ def _allow_browser_origins(application: FastAPI, settings: Settings) -> None:
         CORSMiddleware,
         allow_origins=origins,
         allow_credentials=False,
-        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
         # `X-Request-ID` is accepted so a caller may supply its own, and
         # exposed so a browser can read the one the server chose. It is an
         # opaque per-request label — not a session, not a user identifier, and
