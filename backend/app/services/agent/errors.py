@@ -50,4 +50,25 @@ class AgentUnavailableError(AgentServiceError):
     status_code = 503
 
 
-__all__ = ["AgentBudgetError", "AgentServiceError", "AgentUnavailableError"]
+class AgentTooManyRequestsError(AgentServiceError):
+    """Too many agent runs are already in flight for this process.
+
+    A lightweight, in-process safeguard (see
+    :mod:`app.services.agent.throttle`) against turning one accidental
+    double-click, duplicate browser tab, or eager client retry into several
+    concurrent calls against a free-tier language-model quota that is already
+    scarce. Raised before the orchestrator is entered — like
+    :class:`AgentUnavailableError` — so a request that will not get to run
+    right now does not spend a planning call finding that out.
+    """
+
+    code = "agent_too_many_requests"
+    status_code = 429
+
+
+__all__ = [
+    "AgentBudgetError",
+    "AgentServiceError",
+    "AgentTooManyRequestsError",
+    "AgentUnavailableError",
+]

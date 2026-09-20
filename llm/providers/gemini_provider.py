@@ -161,9 +161,26 @@ class GeminiProvider:
             # caller. ``max_retries`` is retries *after* the first attempt,
             # matching what the rest of this project's configuration means by
             # the name, so the attempt count here is one more than that.
+            #
+            # **429 is deliberately not in this list.** A 5xx here is a
+            # transient load blip that a short backoff usually clears; a 429
+            # against a free-tier quota (Gemini's free tier is a handful of
+            # requests per minute) is far more often a quota that is already
+            # exhausted for the current window, where retrying immediately —
+            # which is all this SDK-level retry does; it does not read a
+            # ``Retry-After`` header or otherwise wait for the window to
+            # reopen — just spends a second, third and fourth request against
+            # a limit that has already said no. That turns one user question
+            # into several counted requests without a realistic chance of one
+            # succeeding, which is the opposite of free-tier friendly. A 429
+            # is instead raised once, immediately, as
+            # :class:`~llm.errors.LLMRateLimitError` (see ``_translate``
+            # below), and the caller — the agent's planner, ultimately the API
+            # — reports it as a clear, friendly "try again in a moment"
+            # rather than retrying it here.
             "retry_options": types.HttpRetryOptions(
                 attempts=self._config.max_retries + 1,
-                http_status_codes=(408, 429, 500, 502, 503, 504),
+                http_status_codes=(408, 500, 502, 503, 504),
             ),
         }
         # Optional, and only for someone routing Gemini traffic elsewhere —

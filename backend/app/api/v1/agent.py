@@ -205,6 +205,16 @@ _ASK_ERRORS: dict[int | str, dict[str, object]] = {
             "`POST /api/v1/search` continues to work without one."
         ),
     },
+    status.HTTP_429_TOO_MANY_REQUESTS: {
+        "model": ErrorResponse,
+        "description": (
+            "Too many agent runs are already in flight for this process — a "
+            "lightweight, in-process safeguard against a duplicate or "
+            "accidental concurrent request spending more of a free-tier "
+            "language-model quota than the question needed. No planner was "
+            "asked for anything. Wait a moment and retry."
+        ),
+    },
 }
 
 

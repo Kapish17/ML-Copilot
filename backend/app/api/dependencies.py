@@ -20,7 +20,7 @@ from agent.tools import build_default_registry
 from agent.tools.artifacts import ExperimentArtifactCache
 from agent.tools.datasets import InMemoryDatasetSource
 from app.core.config import Settings, get_settings
-from app.services.agent import AgentService
+from app.services.agent import AgentConcurrencyLimiter, AgentService, limiter_from_env
 from app.services.datasets import DatasetProfilingService
 from app.services.experiments import (
     ExperimentHistoryService,
@@ -310,6 +310,21 @@ def get_agent_config() -> AgentConfig:
 AgentConfigDep = Annotated[AgentConfig, Depends(get_agent_config)]
 
 
+@lru_cache(maxsize=1)
+def get_agent_throttle() -> AgentConcurrencyLimiter:
+    """Provide the process-wide guard against too many concurrent agent runs.
+
+    Cached, and deliberately so: the whole point of a semaphore is that every
+    request shares the *same* one. A per-request instance would count nothing
+    against anything else and throttle nothing. See
+    :mod:`app.services.agent.throttle`.
+    """
+    return limiter_from_env()
+
+
+AgentThrottleDep = Annotated[AgentConcurrencyLimiter, Depends(get_agent_throttle)]
+
+
 def get_agent_artifacts() -> ExperimentArtifactCache:
     """Provide the in-memory cache of fitted models for one run.
 
@@ -408,8 +423,19 @@ def get_agent_planner(
     No SDK is imported and no credential is read here. A planner whose
     provider has no key reports itself unready, which is what lets the
     application serve everything except this endpoint without one.
+
+    ``max_answer_tokens`` is tied to ``LLM_MAX_OUTPUT_TOKENS`` rather than
+    left at :class:`~agent.planner.LLMPlanner`'s own default: one configured
+    output-token ceiling for the whole application, instead of the agent's
+    final answer silently using a different number than the Knowledge
+    Assistant's, is one fewer place a free-tier token budget can drift.
     """
-    return LLMPlanner(provider, config=config, model=llm_config.model)
+    return LLMPlanner(
+        provider,
+        config=config,
+        model=llm_config.model,
+        max_answer_tokens=llm_config.max_output_tokens,
+    )
 
 
 AgentPlannerDep = Annotated[LLMPlanner, Depends(get_agent_planner)]
@@ -421,6 +447,7 @@ def get_agent_service(
     config: AgentConfigDep,
     artifacts: AgentArtifactsDep,
     datasets: DatasetServiceDep,
+    throttle: AgentThrottleDep,
 ) -> AgentService:
     """Provide the agent service both agent endpoints delegate to."""
     return AgentService(
@@ -429,6 +456,7 @@ def get_agent_service(
         config=config,
         artifacts=artifacts,
         dataset_formats=datasets.supported_formats(),
+        throttle=throttle,
     )
 
 

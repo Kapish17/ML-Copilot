@@ -1,8 +1,9 @@
 """Running the bounded agent for an HTTP request, as an application service.
 
 ``budgets``  what a request may ask for, and the one direction it may move
-``errors``   the two refusals only an HTTP caller cares about
+``errors``   the refusals only an HTTP caller cares about
 ``service``  ``AgentService`` — one question, one run
+``throttle`` an in-process guard against too many concurrent runs
 
 Nothing in this package imports FastAPI, so the same service is drivable from
 a script, a test or a future worker; the HTTP route is one caller among
@@ -15,6 +16,7 @@ from app.services.agent.budgets import LOWERABLE_BUDGETS, resolve_config
 from app.services.agent.errors import (
     AgentBudgetError,
     AgentServiceError,
+    AgentTooManyRequestsError,
     AgentUnavailableError,
 )
 from app.services.agent.service import (
@@ -22,14 +24,18 @@ from app.services.agent.service import (
     AgentRunFailedError,
     AgentService,
 )
+from app.services.agent.throttle import AgentConcurrencyLimiter, limiter_from_env
 
 __all__ = [
     "LOWERABLE_BUDGETS",
     "NOT_CONFIGURED_MESSAGE",
     "AgentBudgetError",
+    "AgentConcurrencyLimiter",
     "AgentRunFailedError",
     "AgentService",
     "AgentServiceError",
+    "AgentTooManyRequestsError",
     "AgentUnavailableError",
+    "limiter_from_env",
     "resolve_config",
 ]

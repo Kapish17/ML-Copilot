@@ -42,24 +42,33 @@ from typing import Any
 from agent.errors import AgentConfigurationError
 
 # -- Budgets ----------------------------------------------------------------
-#: Tool calls one run may make. Six is enough for the longest sensible chain —
-#: profile, run, explain, search, and room to recover from one failure — and
-#: small enough that a planner stuck in a loop is stopped in seconds.
-DEFAULT_MAX_TOOL_CALLS = 6
+#: Tool calls one run may make. Four covers the longest sensible chain this
+#: agent's own tools form — profile, run, explain, search — while keeping the
+#: *adaptive* fallback path's worst case (one planning call per turn, see
+#: ``max_iterations`` below) affordable on a free-tier language-model quota
+#: measured in single-digit requests per minute. The previous default of six
+#: existed to leave "room to recover from one failure"; on a 5-requests-per-
+#: minute budget that margin costs more in Gemini calls than the recovery is
+#: worth, so it is spent instead on the planned path staying cheap (two calls,
+#: see ``agent/orchestrator.py``) regardless of how many tool calls a plan uses.
+DEFAULT_MAX_TOOL_CALLS = 4
 #: Planning turns one run may take, whether or not a turn leads to a tool call.
 #:
-#: The two budgets are independent, and either may be the one that binds. The
-#: default leaves it to ``max_tool_calls``: eight turns is more than six calls
-#: can consume, so a run that spends its whole tool budget still has a turn
-#: left to write its answer. Setting this at or below ``max_tool_calls`` is
-#: allowed and makes *this* the binding limit — which is a legitimate way to
-#: cap a run by planning effort rather than by work done.
-DEFAULT_MAX_ITERATIONS = 8
+#: The two budgets are independent, and either may be the one that binds.
+#: **This is the number that matters most for Gemini call volume**: the
+#: adaptive fallback loop (``agent/orchestrator.py``'s ``_loop``) asks the
+#: planner once per iteration, so a run's worst case is ``max_iterations``
+#: planning calls plus one final answer call — independent of
+#: ``max_tool_calls``, which only bounds how many of those turns may also
+#: execute a tool. Five leaves one spare turn beyond the four tool calls above
+#: to decide to finish, while capping the worst case at six Gemini calls
+#: (five decisions + one answer) instead of the previous nine.
+DEFAULT_MAX_ITERATIONS = 5
 #: Steps one planned workflow may contain. Deliberately at or below
 #: ``max_tool_calls``: a plan that could not be executed within the call budget
 #: is not a plan worth starting, and refusing it up front is cheaper and
 #: clearer than running four steps of it and stopping.
-DEFAULT_MAX_WORKFLOW_STEPS = 5
+DEFAULT_MAX_WORKFLOW_STEPS = 4
 #: How many times one tool may appear in a single plan. Two, because there is
 #: one honest reason to repeat a tool — searching for two different things, or
 #: running an experiment on two datasets — and no honest reason to do it six
@@ -78,16 +87,24 @@ DEFAULT_MAX_TOOL_REPEATS = 2
 #: covers.
 DEFAULT_MAX_RUN_SECONDS = 180.0
 #: Characters of observation text one run may accumulate. Bounds both the
-#: prompt the planner sees and the state a caller receives.
-DEFAULT_MAX_CONTEXT_CHARS = 24_000
+#: prompt the planner sees and the state a caller receives. Lowered from
+#: 24,000: at four tool calls (see ``max_tool_calls`` above) the accumulated
+#: observations that actually occur rarely approach the old ceiling, and a
+#: smaller one keeps every planning and answer prompt cheaper without cutting
+#: into a real run's evidence.
+DEFAULT_MAX_CONTEXT_CHARS = 16_000
 #: Characters the final answer may run to.
 DEFAULT_MAX_ANSWER_LENGTH = 4_000
 
 # -- Per-observation limits -------------------------------------------------
 #: Characters of any single observation shown to the planner. A tool that
 #: returns something enormous is truncated rather than allowed to consume the
-#: whole context budget by itself.
-DEFAULT_MAX_OBSERVATION_CHARS = 6_000
+#: whole context budget by itself. Lowered from 6,000 alongside
+#: ``max_context_chars``: a concise, structured observation (a profile's
+#: summary, an experiment's scores, a handful of search results) fits well
+#: inside 4,000 characters, and a tool that would need more is one truncating
+#: raw content that does not belong in a prompt in the first place.
+DEFAULT_MAX_OBSERVATION_CHARS = 4_000
 
 # -- Planner ----------------------------------------------------------------
 #: Sampling temperature for planning. Zero by default: a planner that picks a

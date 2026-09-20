@@ -2,10 +2,9 @@
 
 ### AI Data Scientist — automated profiling, experimentation, explainability, RAG and agentic analysis
 
-[![CI](https://github.com/Kapish17/ML-Copilot/actions/workflows/ci.yml/badge.svg)](https://github.com/Kapish17/ML-Copilot/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11-blue)
 ![Node](https://img.shields.io/badge/node-22-green)
-![Tests](https://img.shields.io/badge/tests-2238%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-2441%20passing-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
 Upload a spreadsheet. Get back a profile of what is wrong with it, a
@@ -14,10 +13,25 @@ on data no model saw, a SHAP explanation of the winner, a stored model you can
 predict with, and an answer to *"which model performs best and why?"* that cites
 the run it came from.
 
+### Live demo
+
+| | |
+| --- | --- |
+| **Dashboard** | <https://ml-copilot-frontend.onrender.com> |
+| **Backend API** | <https://ml-copilot-backend.onrender.com> |
+| **Health check** | <https://ml-copilot-backend.onrender.com/health> |
+
+Deployed on Render's free tier — a single small instance of each service, no
+persistent disk. That trade-off, and exactly what it means for this
+application, is covered in [Deployment](#deployment) below. The free instance
+sleeps after 15 minutes of no traffic and takes about a minute to wake back up
+on the next request.
+
 **[Architecture](docs/ARCHITECTURE.md) · [API reference](docs/API.md) ·
 [Production readiness](docs/PRODUCTION_READINESS.md) ·
 [Release checklist](docs/RELEASE_CHECKLIST.md) ·
-[CI workflow](.github/workflows/ci.yml) · [Demo data](examples/README.md)**
+[Render deployment guide](docs/RENDER_DEPLOYMENT.md) ·
+[Demo data](examples/README.md)**
 
 ```bash
 docker compose up --build     # then open http://localhost:3000/dashboard
@@ -33,9 +47,11 @@ docker compose up --build     # then open http://localhost:3000/dashboard
 [Architecture](#architecture) · [Feature matrix](#feature-matrix) ·
 [Design highlights](#design-highlights) · [Security](#security) ·
 [Quick start](#quick-start) · [Run with Docker](#run-with-docker) ·
+[Deployment](#deployment) ·
 [The five-minute demo](#the-five-minute-demo) · [API examples](#api-examples) ·
 [Tech stack](#tech-stack) · [Project structure](#project-structure) ·
 [Testing](#testing) · [CI and dependency security](#ci-and-dependency-security) ·
+[What this project demonstrates](#what-this-project-demonstrates) ·
 [Limitations](#limitations) · [License](#license)
 
 ## What it is
@@ -421,13 +437,76 @@ which authentication stops being optional.
 | Retrieval index | yes | rebuilt at next start |
 | **Uploaded datasets** | **never stored at all** | — |
 
-> The Compose file and both Dockerfiles are validated in CI by Docker itself,
-> and `scripts/smoke-test.sh` runs 28 checks against a live stack. **The
-> container build and stack smoke test were not executed while writing this
-> document** — this development environment has no Docker daemon, so
-> `docker compose config -q` (which parses and validates the file) is the most
-> that could be run here. See
-> [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md).
+> The Compose file and both Dockerfiles are meant to be validated in CI by
+> Docker itself, and `scripts/smoke-test.sh` runs 28 checks against a live
+> stack — but there is currently no CI workflow committed to this repository
+> (see [Testing](#testing)), so neither runs automatically today.
+> `docker compose config -q` (which parses and validates the file without a
+> daemon) passes; the full Python and frontend test suites pass locally. The
+> container build itself and `scripts/smoke-test.sh` were not run while
+> preparing this update — this development environment has no Docker daemon
+> available. See [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md).
+
+## Deployment
+
+A live instance runs on [Render](https://render.com)'s free tier — see
+[Live demo](#live-demo) for the URLs. Full step-by-step dashboard settings,
+chosen and verified against Render's own documentation rather than guessed,
+are in **[docs/RENDER_DEPLOYMENT.md](docs/RENDER_DEPLOYMENT.md)**; this
+section is the short version.
+
+**Two separate Web Services, both built from the committed Dockerfiles** —
+the same `backend/Dockerfile` and `frontend/Dockerfile` that `docker compose
+up --build` uses locally, not a different deployment-specific image:
+
+| | Backend | Frontend |
+| --- | --- | --- |
+| Dockerfile | `backend/Dockerfile` | `frontend/Dockerfile` |
+| Build context | repository root | `frontend/` |
+| Listens on | `$PORT` (falls back to `API_PORT`, default `8000`) | `$PORT` (default `3000`, baked in by the image) |
+| Health check | `GET /health` | `GET /dashboard` |
+
+The frontend's `NEXT_PUBLIC_API_BASE_URL` is a **build** argument, same as
+with Compose — it has to be the backend's real public URL, because it is
+inlined into the browser bundle before the browser ever makes a request.
+Render turns a dashboard-configured environment variable into a Docker build
+argument automatically, so this needs no separate build-args UI, only the one
+environment variable.
+
+**What's different from the local Compose setup, and why:**
+
+- **No persistent disk.** Render's free web services have an ephemeral
+  filesystem — every redeploy and every spin-down/spin-up cycle starts the
+  container fresh. `EXPERIMENT_STORE_DIR`, `MODEL_ARTIFACT_DIR` and
+  `RAG_INDEX_DIR` still point at the same in-container paths Compose uses
+  (`/data/...`), but nothing durable backs them on Render Free. **This is a
+  demo deployment, not a production one**: experiment history and trained
+  models survive a page reload and a visitor's whole session, but not a
+  redeploy or an idle spin-down. The retrieval index rebuilds itself
+  automatically either way — that was already true locally, since it is
+  rebuilt incrementally on every container start regardless of platform.
+  Durable history across redeploys would need an external store (a managed
+  Postgres, an object store) that this repository does not implement — see
+  [Limitations](#limitations).
+- **`LLM_PROVIDER=gemini`.** The deployed backend runs the Gemini provider
+  described above rather than OpenAI, because Gemini's flash models are
+  usable within Google's free tier — see [Quick start](#quick-start) for how
+  the two providers are configured and how their errors are reported.
+  `LLM_API_KEY` is set directly in Render's dashboard for the backend service
+  only; it is never a build argument and never reaches the frontend.
+- **`API_AUTH_ENABLED` stays `false`.** The CORS configuration deliberately
+  keeps a browser from ever sending an `Authorization` header (see
+  [Security](#security)), so turning authentication on would not protect the
+  live demo — it would just break the frontend calling it directly. The
+  practical consequence: the public URL is unauthenticated, same as a local
+  `docker compose up` with default settings.
+- **Free-instance resource limits.** The same fully-configurable limits
+  documented under [Run with Docker](#run-with-docker)
+  (`MAX_UPLOAD_MB`, `MAX_EXPERIMENT_ROWS`, `MAX_CV_FOLDS`, and the rest in
+  `backend/app/core/config.py`) are set tighter on Render than the
+  workstation-sized local defaults, sized for the free instance's resources
+  rather than for a million-row dataset. Exact values are in
+  [docs/RENDER_DEPLOYMENT.md](docs/RENDER_DEPLOYMENT.md).
 
 ## The five-minute demo
 
@@ -575,8 +654,8 @@ provider internal.
 | Agent | Own package. No framework — no LangChain, LangGraph, AutoGen or CrewAI |
 | Frontend | Next.js 15.5, React 19, TypeScript, Tailwind |
 | Storage | Local JSON records, local joblib artifacts, a local index — on named volumes |
-| Deployment | Docker Compose — two images, one command |
-| CI | GitHub Actions — tests, gates, dependency audits, Docker stack smoke test |
+| Deployment | Docker Compose locally; [Render](https://render.com) free tier for the live demo — see [Deployment](#deployment) |
+| CI | Not currently present (`.github/` is absent) — see [CI and dependency security](#ci-and-dependency-security) |
 
 ## Project structure
 
@@ -604,11 +683,10 @@ ml-copilot/
 ├── agent/              Bounded agent — registry, schemas, planner, workflow,
 │                       orchestrator, tools, grounding
 ├── docs/               ARCHITECTURE · API · PRODUCTION_READINESS ·
-│                       RELEASE_CHECKLIST · screenshots
+│                       RELEASE_CHECKLIST · RENDER_DEPLOYMENT · screenshots
 ├── examples/           Synthetic demo data in all three formats, and its generator
 ├── scripts/            demo.sh · smoke-test.sh
 ├── data/               Your own local datasets — contents git-ignored
-├── .github/            CI workflow and the Dependabot configuration
 ├── .env.example        Every setting, documented
 ├── docker-compose.yml
 ├── pytest.ini          All five suites, from the repository root
@@ -634,22 +712,32 @@ npm run lint                 # ESLint
 npm run typecheck            # tsc --noEmit
 ```
 
-**2,238 Python tests pass and 6 skip**, across five suites:
+**2,232 Python tests pass and 7 skip**, across five suites:
 
-| Suite | Tests |
+| Suite | Passing |
 | --- | --- |
-| `backend/tests` | 892 |
-| `ml/tests` | 647 |
-| `agent/tests` | 372 |
-| `rag/tests` | 189 |
-| `llm/tests` | 144 |
+| `backend/tests` | 865 |
+| `ml/tests` | 646 |
+| `agent/tests` | 375 |
+| `rag/tests` | 188 |
+| `llm/tests` | 158 |
 
-The six skips are deliberate opt-ins: the real sentence-transformer model, the
-real LLM provider, and the Docker-dependent Compose validations.
+The seven skips are deliberate opt-ins: the real sentence-transformer model,
+the real LLM provider, and the Docker-dependent Compose validations.
 
-**201 frontend tests pass** across nine Vitest files, covering the dataset,
+**209 frontend tests pass** across nine Vitest files, covering the dataset,
 experiment, prediction, agent, knowledge and navigation surfaces plus
 accessibility and error-boundary behaviour.
+
+**Two `backend/tests` files currently fail — honestly, not swept under the
+badge above.** `test_ci_workflow.py` and `test_dependency_security.py` check
+the *contents* of `.github/workflows/ci.yml` and `.github/dependabot.yml`.
+Neither file is present in this repository, so every assertion that reads
+them fails — 42 failing tests in total, none of them about the application
+itself. They exist to keep a CI workflow honest once one
+is added; until then they are a known, visible gap rather than a hidden one.
+Every other test file — the 2,232 passing above — exercises the application
+itself and needs no `.github/` directory to pass.
 
 Every test builds its data in memory. Nothing reads an external dataset,
 downloads a model or touches the network. Retrieval uses a deterministic fake
@@ -670,21 +758,71 @@ internal Compose hostname, a CORS mismatch, and an index that never got built.
 
 ## CI and dependency security
 
-Four GitHub Actions jobs on every push and pull request to `main`, with a
-`contents: read` token and **no secret of any kind** — so CI works unchanged on a
-fork. Python is pinned to 3.11 and Node to 22.
+**Not currently running.** `.github/workflows/ci.yml` and
+`.github/dependabot.yml` are not present in this repository — see
+[Testing](#testing). What follows is the workflow the test suite in
+`backend/tests/test_ci_workflow.py` and `backend/tests/test_dependency_security.py`
+is written to check for, kept here as the specification for the CI this
+project is designed to run, not a description of something currently
+executing on every push.
 
-| Job | What it proves |
+Once added, it would be four GitHub Actions jobs on every push and pull
+request to `main`, with a `contents: read` token and **no secret of any
+kind** — so CI works unchanged on a fork. Python pinned to 3.11 and Node to
+22.
+
+| Job | What it would prove |
 | --- | --- |
 | **Backend tests** | Five pytest suites, plus a compile pass over every module |
 | **Frontend tests** | `npm ci`, audit, lint, typecheck, Vitest, production build |
 | **Dependency audit** | `pip-audit --strict` over the production **and** development closures |
 | **Docker stack smoke test** | Builds both images, starts the stack, runs the live checks |
 
-Dependabot watches every Python, npm and GitHub Actions manifest weekly, with
-**no ignore rules and no automatic merging**. `npm audit --audit-level=high` runs
-immediately after `npm ci`; nothing is suppressed with `|| true`, a lowered
-threshold or `continue-on-error`, and the test suite asserts that.
+Dependabot would watch every Python, npm and GitHub Actions manifest weekly,
+with **no ignore rules and no automatic merging**. `npm audit --audit-level=high`
+would run immediately after `npm ci`; the test suite asserts that nothing in
+that specification is suppressed with `|| true`, a lowered threshold or
+`continue-on-error` — it just has nothing to check today, because there is no
+workflow file yet.
+
+## What this project demonstrates
+
+- **Full-stack architecture with a real boundary.** A Next.js presentation
+  layer that computes nothing, talking to a FastAPI backend over a typed JSON
+  API — no ML library, credential or filesystem access ever reaches the
+  browser.
+- **A correct ML evaluation pipeline**, not just a model that runs: split
+  before fitting, cross-validate on training rows only, select from CV scores,
+  measure the winner exactly once on held-out data, and keep those two numbers
+  visibly separate everywhere they're shown.
+- **Explainable AI treated as a claim to be checked**, not a feature to bolt
+  on — SHAP over the actual fitted pipeline, with the "this describes the
+  model, not the world" caveat carried through the API and the UI.
+- **Experiment tracking** as versioned, content-addressed JSON records with an
+  explicit delete/clear path — a page reload never empties it; only deleting a
+  run, clearing history, or the platform's own storage resetting (see
+  [Deployment](#deployment) for what that means on Render Free) does.
+- **Retrieval-augmented generation with grounding actually enforced**:
+  citations are checked against what was retrieved, and an answer citing
+  something it wasn't given is rejected rather than cleaned up.
+- **An LLM provider abstraction**, not a hard-coded SDK call — OpenAI and
+  Gemini are two interchangeable implementations of one `Protocol`, selected
+  by a single environment variable, with typed error handling and configured
+  retries for both.
+- **A bounded agent**, not a framework — an explicit tool registry, typed
+  arguments, a plan validated before it runs, and hard budgets, built without
+  LangChain, LangGraph, AutoGen or CrewAI.
+- **Docker as the actual deployment artifact**, not a formality — the same
+  two committed Dockerfiles run locally under Compose and in the live Render
+  deployment, with no separate "production" image.
+- **Automated tests across five Python packages and a TypeScript frontend**
+  (2,441 passing — see [Testing](#testing)), including architecture tests that
+  parse imports to enforce the dependency direction, not just behavioural
+  tests.
+- **Documentation that states its own limits**, including this section's
+  neighbor: what isn't built is listed as plainly as what is, and a stale or
+  broken claim — like the CI workflow this README used to imply was running —
+  gets corrected rather than left to be discovered.
 
 ## Limitations
 
@@ -737,8 +875,11 @@ reading.
   comparisons, and a check that has not fired is not evidence of health.
 - **No database and no vector database.** Records, artifacts and the index are
   local files. No PostgreSQL, no MLflow, no Qdrant.
-- **No horizontal scaling, no cloud deployment, no multi-architecture images.**
-  No Kubernetes and no Terraform.
+- **No horizontal scaling, no multi-architecture images, no infrastructure
+  as code.** No Kubernetes and no Terraform. A single free-tier instance of
+  each service runs on Render (see [Deployment](#deployment)) — that is a
+  demo deployment on someone else's ephemeral disk, not a scaled or durable
+  production one.
 - **No streaming, WebSockets or conversation memory.** Every question is
   independent.
 - **Three ingestion formats.** CSV, `.xlsx` and JSON. No Parquet, SQL, Google

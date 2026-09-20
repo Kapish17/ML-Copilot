@@ -610,6 +610,45 @@ def test_gemini_asks_the_sdk_to_retry_a_transient_failure(
     assert 500 in retry_options.http_status_codes
 
 
+def test_gemini_does_not_ask_the_sdk_to_retry_a_rate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """429 is excluded from the SDK's own automatic retry.
+
+    A transient 5xx is worth retrying immediately — the same request usually
+    succeeds moments later. A 429 against a free-tier quota (a handful of
+    requests per minute) is a different situation: the SDK's retry has no
+    visibility into *why* the quota was hit and would simply fire more
+    requests at an already-exhausted window, turning one user question into
+    several counted requests with no better chance of succeeding. That case is
+    instead surfaced once, immediately, as :class:`LLMRateLimitError` — see
+    ``GeminiProvider._translate`` — so a caller can show a friendly "try again
+    in a moment" rather than this layer spending the request budget itself.
+    """
+    genai = pytest.importorskip("google.genai")
+    monkeypatch.setenv("LLM_TEST_KEY", FAKE_KEY)
+
+    captured: dict[str, Any] = {}
+
+    class _RecordingClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(genai, "Client", _RecordingClient)
+
+    provider = GeminiProvider(
+        LLMConfig(provider="gemini", api_key_env="LLM_TEST_KEY", max_retries=4)
+    )
+    provider._build_client()
+
+    retry_options = captured["http_options"].retry_options
+    assert retry_options is not None
+    assert 429 not in retry_options.http_status_codes
+    # The transient statuses are still retried — only 429 was singled out.
+    assert 500 in retry_options.http_status_codes
+    assert 503 in retry_options.http_status_codes
+
+
 def test_the_gemini_key_is_never_stored_on_the_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

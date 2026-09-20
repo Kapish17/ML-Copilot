@@ -60,7 +60,8 @@ from app.core.agent_errors import translate_run_failure
 from app.core.errors import MLCopilotError
 from app.services.agent.budgets import resolve_config
 from app.services.agent.datasets import RequestDataset
-from app.services.agent.errors import AgentUnavailableError
+from app.services.agent.errors import AgentTooManyRequestsError, AgentUnavailableError
+from app.services.agent.throttle import AgentConcurrencyLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +119,7 @@ class AgentService:
         config: AgentConfig,
         artifacts: Any = None,
         dataset_formats: Sequence[str] = (),
+        throttle: AgentConcurrencyLimiter | None = None,
     ) -> None:
         """Wire the service to the agent's collaborators and the server's limits.
 
@@ -136,12 +138,17 @@ class AgentService:
             dataset_formats: The upload formats the dataset endpoint accepts,
                 for reporting in ``describe``. The agent itself never reads
                 them: a run does not vary with the format its data arrived in.
+            throttle: An in-process guard against too many concurrent runs —
+                see :mod:`app.services.agent.throttle`. ``None`` disables it,
+                which is never what production wiring does but keeps a
+                library caller or a test free to skip it entirely.
         """
         self._planner = planner
         self._registry_factory = registry_factory
         self._config = config
         self._artifacts = artifacts
         self._dataset_formats = tuple(dataset_formats)
+        self._throttle = throttle
 
     @property
     def config(self) -> AgentConfig:
@@ -224,11 +231,29 @@ class AgentService:
 
         Raises:
             AgentUnavailableError: If the agent is not configured.
+            AgentTooManyRequestsError: If too many agent runs are already in
+                flight for this process. Checked before the budget and before
+                any orchestrator is built, so a request that will not run
+                right now spends nothing finding that out.
             AgentBudgetError: If a requested budget exceeds the server's.
             AgentRunFailedError: If the run produced no answer at all.
         """
-        config = resolve_config(self._config, budgets)
-        result = self._build(config, dataset).run(question)
+        acquired = False
+        if self._throttle is not None:
+            acquired = self._throttle.try_acquire()
+            if not acquired:
+                raise AgentTooManyRequestsError(
+                    "The AI Data Scientist is already working on another "
+                    "request. Please wait a moment and try again.",
+                    details={"max_concurrent_requests": self._throttle.max_concurrent},
+                )
+
+        try:
+            config = resolve_config(self._config, budgets)
+            result = self._build(config, dataset).run(question)
+        finally:
+            if acquired:
+                self._throttle.release()
 
         if result.status is AgentStatus.FAILED:
             logger.info(
@@ -287,6 +312,9 @@ class AgentService:
             "max_run_seconds": self._config.max_run_seconds,
             "max_context_chars": self._config.max_context_chars,
             "max_answer_length": self._config.max_answer_length,
+            "max_concurrent_requests": (
+                self._throttle.max_concurrent if self._throttle is not None else None
+            ),
         }
 
 

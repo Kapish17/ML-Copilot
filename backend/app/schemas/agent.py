@@ -487,6 +487,15 @@ class AgentStatusResponse(BaseModel):
     )
     max_context_chars: int
     max_answer_length: int
+    max_concurrent_requests: int | None = Field(
+        None,
+        description=(
+            "How many agent runs this process will attempt at once. A "
+            "request beyond this is refused immediately with "
+            "'agent_too_many_requests' rather than spending a planning call. "
+            "None when the safeguard is disabled."
+        ),
+    )
 
 
 __all__ = [

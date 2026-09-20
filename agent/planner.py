@@ -58,6 +58,20 @@ PROVIDER_FAILURES: dict[str, str] = {
     "LLMContextTooLargeError": "the request exceeded its context window",
 }
 
+#: The one failure that gets its own, complete message rather than being
+#: dropped into the generic "The agent could not reach its language-model
+#: provider: ..." sentence above. A rate limit or an exhausted quota is not a
+#: broken provider — it is an expected, temporary condition of running on a
+#: free tier, and a caller should be told to wait and retry, not shown
+#: language that reads like an outage. Retrying it here would not help either
+#: (see ``llm/providers/gemini_provider.py``'s retry configuration): this
+#: message is shown after the one attempt (plus any transient-failure
+#: retries the provider already made) has already failed with a rate limit.
+RATE_LIMIT_MESSAGE = (
+    "Gemini's free-tier request limit has been reached temporarily. Please "
+    "wait a moment and try again."
+)
+
 #: The stable code reported beside each of those.
 PROVIDER_CODES: dict[str, str] = {
     "LLMTimeoutError": "timeout",
@@ -211,12 +225,24 @@ class LLMPlanner:
             logger.warning(
                 "Planner provider failed (%s): %s", type(exc).__name__, exc
             )
+            failure_type = type(exc).__name__
+            if failure_type == "LLMRateLimitError":
+                # A dedicated, friendly message rather than the generic
+                # "could not reach its language-model provider" sentence: a
+                # free-tier rate limit is an expected, temporary condition,
+                # not an outage, and the difference matters to whoever reads
+                # this in a client.
+                message = RATE_LIMIT_MESSAGE
+            else:
+                message = (
+                    "The agent could not reach its language-model provider: "
+                    f"{PROVIDER_FAILURES.get(failure_type, 'the request failed')}."
+                )
             raise PlannerProviderError(
-                "The agent could not reach its language-model provider: "
-                f"{PROVIDER_FAILURES.get(type(exc).__name__, 'the request failed')}.",
+                message,
                 details={
                     "provider": self.provider_name,
-                    "failure": PROVIDER_CODES.get(type(exc).__name__, "provider_error"),
+                    "failure": PROVIDER_CODES.get(failure_type, "provider_error"),
                 },
             ) from exc
 
@@ -320,4 +346,11 @@ class LLMPlanner:
         )
 
 
-__all__ = ["LLMPlanner", "Planner", "WorkflowPlanner"]
+__all__ = [
+    "PROVIDER_CODES",
+    "PROVIDER_FAILURES",
+    "RATE_LIMIT_MESSAGE",
+    "LLMPlanner",
+    "Planner",
+    "WorkflowPlanner",
+]

@@ -175,6 +175,29 @@ def test_a_provider_failure_becomes_an_agent_error(
     assert "429" not in caught.value.message
 
 
+def test_a_rate_limit_gets_its_own_friendly_message() -> None:
+    """Not the generic 'could not reach its provider' sentence.
+
+    A free-tier rate limit is an expected, temporary condition — not an
+    outage — and the message a caller sees should say so plainly, in words a
+    person can act on ("wait a moment and try again") rather than the vendor's
+    own text or a generic failure sentence.
+    """
+    from agent.planner import RATE_LIMIT_MESSAGE
+
+    planner = LLMPlanner(
+        FakeLLMProvider(error=LLMRateLimitError("429 from https://api.example/v1"))
+    )
+
+    with pytest.raises(PlannerProviderError) as caught:
+        planner.decide("q", tool_definitions=[], observations=[], remaining_tool_calls=1)
+
+    assert caught.value.message == RATE_LIMIT_MESSAGE
+    assert caught.value.details["failure"] == "rate_limited"
+    assert "https://" not in caught.value.message
+    assert "429" not in caught.value.message
+
+
 def test_a_missing_credential_is_reported_as_unavailable() -> None:
     """Nothing was attempted, and retrying will not help."""
     planner = LLMPlanner(

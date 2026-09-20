@@ -67,8 +67,13 @@ DEFAULT_MODEL_BY_PROVIDER: dict[str, str] = {
 DEFAULT_API_KEY_ENV = "LLM_API_KEY"
 #: Zero, because a grounded answer should not vary between identical runs.
 DEFAULT_TEMPERATURE = 0.0
-#: Upper bound on the generated answer.
-DEFAULT_MAX_OUTPUT_TOKENS = 900
+#: Upper bound on the generated answer. Lowered from 900: a grounded,
+#: citation-bearing answer for this project's demo/portfolio scope reads
+#: comfortably within 700 tokens, and every token asked for here is a token
+#: billed against a free-tier quota measured in requests per minute, not just
+#: tokens per request — a shorter cap also means a slow generation is less
+#: likely to still be running when the next request wants the same quota.
+DEFAULT_MAX_OUTPUT_TOKENS = 700
 #: Seconds to wait for a provider before giving up.
 DEFAULT_TIMEOUT_SECONDS = 30.0
 #: Retries after a *transient* failure only. Small and bounded: a request that
