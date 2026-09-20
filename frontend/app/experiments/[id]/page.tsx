@@ -53,13 +53,24 @@ export default function ExperimentDetailPage() {
 
   return (
     <div className="space-y-6">
-      <nav aria-label="Breadcrumb" className="text-sm">
+      <nav
+        aria-label="Breadcrumb"
+        className="flex flex-wrap items-center justify-between gap-2 text-sm"
+      >
         <Link
           href="/experiments"
           className="text-accent-700 underline decoration-accent-300 underline-offset-2 hover:text-accent-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-400"
         >
           ← All experiments
         </Link>
+        {record && (
+          <Link
+            href={`/knowledge?experiment_id=${encodeURIComponent(record.experiment_id)}`}
+            className="text-accent-700 underline decoration-accent-300 underline-offset-2 hover:text-accent-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-400"
+          >
+            Ask the Knowledge Assistant about this experiment →
+          </Link>
+        )}
       </nav>
 
       {loading && (

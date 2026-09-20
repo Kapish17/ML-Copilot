@@ -72,8 +72,10 @@ class SearchKnowledgeTool(BaseTool):
         "history, and return the passages that bear on a question, each with "
         "a citation id. Use this to answer questions about how the system "
         "works, what an earlier experiment found, or what a term means in "
-        "this project. Returns evidence, never an answer, and cannot modify "
-        "anything it searches."
+        "this project. Pass 'experiment_id' to look only at one run — the one "
+        "just started in this conversation, for instance — rather than every "
+        "experiment ever recorded. Returns evidence, never an answer, and "
+        "cannot modify anything it searches."
     )
 
     def __init__(
@@ -136,15 +138,43 @@ class SearchKnowledgeTool(BaseTool):
                         else self._source_types
                     ),
                 ),
+                ArgumentField(
+                    name="experiment_id",
+                    type=STRING,
+                    description=(
+                        "Look only at this one experiment's record — its "
+                        "dataset profile, preprocessing, model selection, "
+                        "evaluation and explanation — rather than the whole "
+                        "history. The most reliable way to ask about 'this "
+                        "run' or 'my dataset' without pulling in unrelated "
+                        "experiments."
+                    ),
+                ),
+                ArgumentField(
+                    name="dataset_fingerprint",
+                    type=STRING,
+                    description=(
+                        "Look only at experiments run on this dataset "
+                        "(matched by content, not filename). Broader than "
+                        "'experiment_id': it finds every run made on the "
+                        "same data."
+                    ),
+                ),
             )
         )
 
     def run(self, arguments: Mapping[str, Any]) -> ToolResult:
         """Search, and return the evidence with its citation identifiers."""
+        equals = {
+            key: arguments[key]
+            for key in ("experiment_id", "dataset_fingerprint")
+            if arguments.get(key)
+        }
         response = self._retrieval.search(
             arguments["query"],
             top_k=arguments.get("top_k"),
             source_types=tuple(arguments.get("source_types") or ()),
+            equals=equals or None,
         )
 
         results = list(getattr(response, "results", ()) or ())

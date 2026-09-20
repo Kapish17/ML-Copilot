@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useId, useState } from "react";
+import { Suspense, useEffect, useId, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { Button } from "@/components/common/Button";
 import { Card } from "@/components/common/Card";
 import { EmptyState } from "@/components/common/EmptyState";
@@ -15,9 +16,22 @@ import {
 } from "@/lib/api/knowledge";
 import type {
   AskResponse,
+  KnowledgeFilters,
   KnowledgeStatus,
   SearchResponse,
 } from "@/lib/api/types";
+
+/**
+ * What part of the knowledge base a question should be answered from.
+ *
+ * "Everything" searches both the project's documentation and every indexed
+ * experiment at once — useful, but it is also how an answer about one run
+ * could end up citing an unrelated one. "This experiment" is the isolated
+ * mode: every result is filtered to one `experiment_id` before ranking even
+ * starts, which is what keeps two datasets from ever being mixed into one
+ * answer.
+ */
+type Scope = "everything" | "documentation" | "experiment";
 
 /**
  * The Knowledge Assistant — deliberately not the AI Data Scientist.
@@ -40,9 +54,30 @@ const EXAMPLES = [
 ];
 
 export default function KnowledgePage() {
+  return (
+    <Suspense fallback={<Loading label="Loading…" />}>
+      <KnowledgePageContent />
+    </Suspense>
+  );
+}
+
+/**
+ * The page's real content, split out only so `useSearchParams` — which reads
+ * `?experiment_id=` when a link arrives from an experiment's own page — sits
+ * inside the `Suspense` boundary Next.js requires for it.
+ */
+function KnowledgePageContent() {
   const inputId = useId();
+  const experimentInputId = useId();
+  const searchParams = useSearchParams();
+  const linkedExperimentId = searchParams?.get("experiment_id") ?? "";
+
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<"search" | "ask">("search");
+  const [scope, setScope] = useState<Scope>(
+    linkedExperimentId ? "experiment" : "everything",
+  );
+  const [experimentId, setExperimentId] = useState(linkedExperimentId);
 
   const [status, setStatus] = useState<KnowledgeStatus | null>(null);
   const [results, setResults] = useState<SearchResponse | null>(null);
@@ -58,9 +93,26 @@ export default function KnowledgePage() {
     return () => controller.abort();
   }, []);
 
+  /**
+   * The scope chosen above, translated into the filter the API understands.
+   * `undefined` when nothing narrows the search, so a plain request is sent
+   * exactly as it always was rather than an empty `filters: {}` object.
+   */
+  const filters: KnowledgeFilters | undefined = useMemo(() => {
+    if (scope === "documentation") {
+      return { source_types: ["project_documentation"] };
+    }
+    if (scope === "experiment" && experimentId.trim()) {
+      return { experiment_id: experimentId.trim() };
+    }
+    return undefined;
+  }, [scope, experimentId]);
+
+  const scopeIncomplete = scope === "experiment" && experimentId.trim().length === 0;
+
   async function submit(text: string, requested: "search" | "ask") {
     const trimmed = text.trim();
-    if (!trimmed || busy) return;
+    if (!trimmed || busy || scopeIncomplete) return;
 
     setMode(requested);
     setBusy(true);
@@ -70,9 +122,9 @@ export default function KnowledgePage() {
 
     try {
       if (requested === "search") {
-        setResults(await searchKnowledge(trimmed));
+        setResults(await searchKnowledge(trimmed, undefined, filters));
       } else {
-        setAnswer(await askKnowledge(trimmed));
+        setAnswer(await askKnowledge(trimmed, undefined, filters));
       }
     } catch (cause) {
       setError(cause);
@@ -92,9 +144,11 @@ export default function KnowledgePage() {
         <p className="mt-1 max-w-3xl text-sm text-ink-600">
           Searches this project&rsquo;s own documentation and its experiment
           history, and answers from what it finds. It runs no tools, trains
-          nothing and never sees a dataset — for that, use the{" "}
+          nothing and never sees a dataset directly — for that, use the{" "}
           <span className="font-medium text-ink-800">AI Data Scientist</span> on
-          the dashboard.
+          the dashboard, which is what produces the experiment results this
+          assistant can then be asked about. Scope a question to one
+          experiment below to keep its answer to that run alone.
         </p>
       </div>
 
@@ -119,18 +173,73 @@ export default function KnowledgePage() {
             className="mt-1 w-full rounded-md border border-ink-300 px-3 py-2 text-sm focus:border-accent-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-400 disabled:bg-ink-100"
           />
 
+          <fieldset className="mt-3">
+            <legend className="text-sm font-medium text-ink-800">
+              Where to look
+            </legend>
+            <div className="mt-1.5 flex flex-wrap gap-3 text-sm text-ink-700">
+              {(
+                [
+                  ["everything", "Everything"],
+                  ["documentation", "Project documentation only"],
+                  ["experiment", "One experiment only"],
+                ] as const
+              ).map(([value, label]) => (
+                <label key={value} className="inline-flex items-center gap-1.5">
+                  <input
+                    type="radio"
+                    name="scope"
+                    value={value}
+                    checked={scope === value}
+                    disabled={busy}
+                    onChange={() => setScope(value)}
+                    className="text-accent-600 focus:ring-accent-400"
+                  />
+                  {label}
+                </label>
+              ))}
+            </div>
+            {scope === "experiment" && (
+              <div className="mt-2">
+                <label
+                  htmlFor={experimentInputId}
+                  className="block text-xs font-medium text-ink-700"
+                >
+                  Experiment ID
+                </label>
+                <input
+                  id={experimentInputId}
+                  type="text"
+                  value={experimentId}
+                  onChange={(event) => setExperimentId(event.target.value)}
+                  disabled={busy}
+                  placeholder="exp_…"
+                  className="mt-1 w-full max-w-sm rounded-md border border-ink-300 px-3 py-1.5 font-mono text-xs focus:border-accent-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-400 disabled:bg-ink-100"
+                />
+                <p className="mt-1 text-xs text-ink-500">
+                  Only this run&rsquo;s dataset profile and results are
+                  searched — nothing from any other experiment is mixed in.
+                  Found on the run&rsquo;s own page, or follow &ldquo;Ask the
+                  Knowledge Assistant&rdquo; from there.
+                </p>
+              </div>
+            )}
+          </fieldset>
+
           <div className="mt-3 flex flex-wrap gap-2">
             <Button
               type="submit"
               variant="secondary"
-              disabled={busy || query.trim().length === 0}
+              disabled={busy || query.trim().length === 0 || scopeIncomplete}
               onClick={() => setMode("search")}
             >
               Search passages
             </Button>
             <Button
               type="button"
-              disabled={busy || query.trim().length === 0 || answeringOff}
+              disabled={
+                busy || query.trim().length === 0 || answeringOff || scopeIncomplete
+              }
               onClick={() => submit(query, "ask")}
             >
               Get a grounded answer

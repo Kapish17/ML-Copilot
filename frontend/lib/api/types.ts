@@ -709,6 +709,25 @@ export interface AgentBudgets {
 // Knowledge — search and grounded answers
 // ---------------------------------------------------------------------------
 
+/**
+ * Metadata a knowledge request may narrow the evidence by, applied by the
+ * retrieval layer *before* ranking.
+ *
+ * `experiment_id` and `dataset_fingerprint` are what make a question
+ * answerable about one dataset or one run without mixing in every other
+ * experiment this project has recorded — the isolation the Knowledge
+ * Assistant relies on when it is scoped to a run.
+ */
+export interface KnowledgeFilters {
+  source_types?: string[];
+  task_type?: string;
+  dataset_fingerprint?: string;
+  target_column?: string;
+  selected_model?: string;
+  primary_metric?: string;
+  experiment_id?: string;
+}
+
 export interface SearchResult {
   rank: number;
   score: number;

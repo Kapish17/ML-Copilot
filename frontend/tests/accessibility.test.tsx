@@ -23,6 +23,7 @@ import userEvent from "@testing-library/user-event";
 import DashboardPage from "@/app/dashboard/page";
 import KnowledgePage from "@/app/knowledge/page";
 import { AppShell } from "@/components/layout/AppShell";
+import { DashboardStateProvider } from "@/lib/state/dashboard-state";
 import { AgentAnswerCard } from "@/components/agent/AgentAnswerCard";
 import { DatasetProfileView } from "@/components/dataset/DatasetProfileView";
 import { ModelComparisonTable } from "@/components/experiments/ModelComparisonTable";
@@ -39,6 +40,7 @@ import { errorEnvelope, mockBackend, statusRoutes } from "./mockApi";
 
 vi.mock("next/navigation", () => ({
   usePathname: () => "/dashboard",
+  useSearchParams: () => new URLSearchParams(),
   useParams: () => ({ id: "exp_1" }),
   redirect: vi.fn(),
 }));
@@ -76,7 +78,11 @@ describe("headings and landmarks", () => {
 describe("forms and controls", () => {
   it("labels every interactive control on the dashboard", async () => {
     mockBackend(STATUS);
-    render(<DashboardPage />);
+    render(
+      <DashboardStateProvider>
+        <DashboardPage />
+      </DashboardStateProvider>,
+    );
 
     // The experiment form only exists once there is a file to run it on.
     await userEvent.upload(screen.getByLabelText(/dataset file/i), csvFile());
@@ -211,7 +217,11 @@ describe("status is never carried by colour alone", () => {
 describe("responsive layout", () => {
   it("collapses the dashboard's two columns on small screens", () => {
     mockBackend(STATUS);
-    const { container } = render(<DashboardPage />);
+    const { container } = render(
+      <DashboardStateProvider>
+        <DashboardPage />
+      </DashboardStateProvider>,
+    );
 
     const grid = container.querySelector("div.grid.gap-6");
     // One column by default; two only from the `lg` breakpoint upward.
@@ -256,7 +266,11 @@ describe("failures at page level", () => {
       },
       ...STATUS,
     ]);
-    render(<DashboardPage />);
+    render(
+      <DashboardStateProvider>
+        <DashboardPage />
+      </DashboardStateProvider>,
+    );
 
     await userEvent.upload(screen.getByLabelText(/dataset file/i), csvFile());
     await userEvent.click(
@@ -279,7 +293,11 @@ describe("failures at page level", () => {
           }),
       ),
     );
-    render(<DashboardPage />);
+    render(
+      <DashboardStateProvider>
+        <DashboardPage />
+      </DashboardStateProvider>,
+    );
 
     await userEvent.upload(screen.getByLabelText(/dataset file/i), csvFile());
     await userEvent.click(screen.getByRole("button", { name: /profile dataset/i }));
@@ -296,7 +314,11 @@ describe("failures at page level", () => {
       { match: "/api/v1/agent/ask-with-dataset", body: AGENT_COMPLETED },
       ...STATUS,
     ]);
-    const { container } = render(<DashboardPage />);
+    const { container } = render(
+      <DashboardStateProvider>
+        <DashboardPage />
+      </DashboardStateProvider>,
+    );
 
     await userEvent.upload(screen.getByLabelText(/dataset file/i), csvFile());
     await userEvent.click(screen.getByRole("button", { name: /profile dataset/i }));
@@ -351,7 +373,11 @@ describe("failures at page level", () => {
 describe("empty and unavailable states", () => {
   it("tells a person what to do first", () => {
     mockBackend(STATUS);
-    render(<DashboardPage />);
+    render(
+      <DashboardStateProvider>
+        <DashboardPage />
+      </DashboardStateProvider>,
+    );
 
     expect(screen.getByText(/no dataset yet/i)).toBeInTheDocument();
     expect(screen.getByText(/upload a dataset first/i)).toBeInTheDocument();
@@ -360,7 +386,11 @@ describe("empty and unavailable states", () => {
 
   it("keeps the question box disabled until a dataset is chosen", () => {
     mockBackend(STATUS);
-    render(<DashboardPage />);
+    render(
+      <DashboardStateProvider>
+        <DashboardPage />
+      </DashboardStateProvider>,
+    );
 
     expect(screen.getByLabelText(/your question about the dataset/i)).toBeDisabled();
     expect(

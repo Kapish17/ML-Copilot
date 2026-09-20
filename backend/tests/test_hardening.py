@@ -103,6 +103,27 @@ def test_a_405_says_which_methods_are_allowed(client: TestClient) -> None:
     assert response.json()["error"]["code"] == "method_not_allowed"
 
 
+def test_the_413_status_table_uses_a_constant_every_supported_starlette_has() -> None:
+    """The 413 entry must not depend on a Starlette-version-specific name.
+
+    Starlette renamed its 413 constant from ``HTTP_413_REQUEST_ENTITY_TOO_LARGE``
+    to ``HTTP_413_CONTENT_TOO_LARGE``; only the newest Starlette releases
+    define the new name, and only the oldest ones lack it entirely. Importing
+    ``app.api.error_handlers`` with an older Starlette installed (as pinned by
+    some environments) used to raise ``AttributeError`` at import time, before
+    the app could even start. Reimporting the module here — rather than only
+    relying on the app already having started for every other test in this
+    file — keeps that specific failure mode covered.
+    """
+    import importlib
+
+    from app.api import error_handlers
+
+    importlib.reload(error_handlers)
+
+    assert error_handlers._HTTP_STATUS_CODES[413] == "file_too_large"
+
+
 # ---------------------------------------------------------------------------
 # Limits enforced where they are actually reachable
 # ---------------------------------------------------------------------------

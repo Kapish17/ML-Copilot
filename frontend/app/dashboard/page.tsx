@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useMemo } from "react";
 import { Button } from "@/components/common/Button";
 import { Card } from "@/components/common/Card";
 import { EmptyState } from "@/components/common/EmptyState";
@@ -18,12 +18,8 @@ import { GlobalImportance } from "@/components/explainability/GlobalImportance";
 import { askAgentWithDataset } from "@/lib/api/agent";
 import { profileDataset } from "@/lib/api/datasets";
 import { runExperiment } from "@/lib/api/experiments";
-import type {
-  AgentAnswer,
-  DatasetProfile,
-  ExperimentOptions,
-  ExperimentRunResponse,
-} from "@/lib/api/types";
+import type { ExperimentOptions } from "@/lib/api/types";
+import { useDashboardState } from "@/lib/state/dashboard-state";
 
 /**
  * The main workflow: upload → analyse → experiment → explain.
@@ -34,9 +30,11 @@ import type {
  * using this. Everything below that is a component; this page owns the file,
  * the three request states, and nothing else.
  *
- * The `File` lives in React state for the lifetime of the page and is never
- * written to `localStorage`, `sessionStorage` or a URL. Its contents are read
- * only by `fetch`, when posting it to the configured backend.
+ * The `File` and its results live in `DashboardStateProvider`, above this
+ * page in `AppShell`, rather than in local state — that is what keeps them
+ * in place across a visit to another tab and back. Either way none of it is
+ * ever written to `localStorage`, `sessionStorage` or a URL: its contents
+ * are read only by `fetch`, when posting it to the configured backend.
  */
 
 /** The stages a person waits through, in the words of what is happening. */
@@ -47,40 +45,36 @@ const STAGE_LABELS = {
 } as const;
 
 export default function DashboardPage() {
-  const [file, setFile] = useState<File | null>(null);
-  // Shared by profiling and by the run: saying what you predict, once.
-  const [target, setTarget] = useState("");
-
-  const [profile, setProfile] = useState<DatasetProfile | null>(null);
-  const [profiling, setProfiling] = useState(false);
-  const [profileError, setProfileError] = useState<unknown>(null);
-
-  const [run, setRun] = useState<ExperimentRunResponse | null>(null);
-  const [running, setRunning] = useState(false);
-  const [runError, setRunError] = useState<unknown>(null);
-
-  const [answer, setAnswer] = useState<AgentAnswer | null>(null);
-  const [asking, setAsking] = useState(false);
-  const [agentError, setAgentError] = useState<unknown>(null);
+  const {
+    file,
+    target,
+    setTarget,
+    selectFile: onSelectFile,
+    profile,
+    setProfile,
+    profiling,
+    setProfiling,
+    profileError,
+    setProfileError,
+    run,
+    setRun,
+    running,
+    setRunning,
+    runError,
+    setRunError,
+    answer,
+    setAnswer,
+    asking,
+    setAsking,
+    agentError,
+    setAgentError,
+  } = useDashboardState();
 
   const busy = profiling || running || asking;
   const columns = useMemo(
     () => profile?.columns.map((column) => column.name) ?? [],
     [profile],
   );
-
-  const onSelectFile = useCallback((next: File | null) => {
-    // A new file invalidates everything derived from the old one. Leaving a
-    // stale profile beside a new upload is how someone reads the wrong result.
-    setFile(next);
-    setProfile(null);
-    setProfileError(null);
-    setRun(null);
-    setRunError(null);
-    setAnswer(null);
-    setAgentError(null);
-    setTarget("");
-  }, []);
 
   async function onProfile() {
     if (!file) return;

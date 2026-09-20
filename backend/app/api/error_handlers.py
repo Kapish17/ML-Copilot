@@ -51,7 +51,7 @@ _HTTP_STATUS_CODES = {
     status.HTTP_400_BAD_REQUEST: "bad_request",
     status.HTTP_404_NOT_FOUND: "not_found",
     status.HTTP_405_METHOD_NOT_ALLOWED: "method_not_allowed",
-    status.HTTP_413_CONTENT_TOO_LARGE: "file_too_large",
+    status.HTTP_413_REQUEST_ENTITY_TOO_LARGE: "file_too_large",
     status.HTTP_415_UNSUPPORTED_MEDIA_TYPE: "unsupported_file_type",
 }
 

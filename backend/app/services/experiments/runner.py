@@ -58,6 +58,8 @@ from ml.models.selection import ModelSelectionResult, select_and_evaluate_best_m
 from ml.models.spec import ModelSpec, validate_spec
 from ml.pipelines.preparation import prepare_dataset
 from ml.pipelines.result import PreparedDataset
+from rag.ingestion.experiments import documents_from_runs
+from rag.indexing import RagIndexer
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +138,7 @@ class ExperimentRunner:
         *,
         registry: ModelRegistry | None = None,
         artifact_store: ModelArtifactStore | None = None,
+        knowledge_indexer: RagIndexer | None = None,
     ) -> None:
         """Wire the runner to its collaborators.
 
@@ -153,12 +156,22 @@ class ExperimentRunner:
                 with nowhere to write — a script, a test of the pipeline
                 itself — gets, and it is also the state every run made before
                 Commit 22 is in.
+            knowledge_indexer: Where the finished record is added to the
+                knowledge base, so the Knowledge Assistant can answer
+                questions about this dataset and this run. Optional, in the
+                same spirit as ``artifact_store``: with none given, a run
+                still completes and is recorded exactly as before — it simply
+                is not searchable until the index is rebuilt by hand. Only
+                the derived record is indexed, never the raw dataset: see
+                :mod:`rag.ingestion.experiments` for what that record
+                contains.
         """
         self._settings = settings
         self._store = store
         self._datasets = dataset_service
         self._registry = registry or default_registry()
         self._artifacts = artifact_store
+        self._knowledge_indexer = knowledge_indexer
 
     # -- Entry points ------------------------------------------------------
 
@@ -322,6 +335,7 @@ class ExperimentRunner:
             record, model_artifact=self._persist_model(record, prepared, selection)
         )
         self._store.save(record)
+        self._index_for_knowledge(record, warnings)
 
         artifacts = (
             ExperimentArtifacts(
@@ -354,6 +368,42 @@ class ExperimentRunner:
         )
 
     # -- Steps -------------------------------------------------------------
+
+    def _index_for_knowledge(
+        self, record: ExperimentRun, warnings: list[str]
+    ) -> None:
+        """Add the finished record to the knowledge base, if one is wired.
+
+        Turns the record into the same kind of document
+        :func:`rag.ingestion.experiments.load_experiments` would build from
+        the whole store, and indexes only that one document — metrics, the
+        dataset profile, preprocessing decisions, the winning model and its
+        explanation. **No dataset row is ever part of it.** The document
+        carries the run's ``experiment_id`` and ``dataset_fingerprint`` as
+        searchable metadata, which is what lets a later query be scoped to
+        this run alone rather than mixed with every other one in the index.
+
+        Deliberately not fatal. An experiment is complete and already saved
+        by the time this runs; a search index that could not be updated is
+        a reason to say so, not a reason to discard a finished result. The
+        container's own entrypoint treats indexing failures the same way.
+        """
+        if self._knowledge_indexer is None:
+            return
+        try:
+            self._knowledge_indexer.index_documents(documents_from_runs([record]))
+        except Exception as exc:  # noqa: BLE001 - indexing must not fail the run
+            logger.warning(
+                "Could not add experiment %s to the knowledge index: %s",
+                record.experiment_id,
+                type(exc).__name__,
+            )
+            warnings.append(
+                "This run could not be added to the Knowledge Assistant's "
+                "index, so questions about it may find nothing until the "
+                "index is rebuilt. The experiment itself was saved "
+                "successfully."
+            )
 
     def _persist_model(
         self,
@@ -604,6 +654,7 @@ def run_experiment(
     store: ExperimentStore,
     dataset_service: DatasetProfilingService,
     artifact_store: ModelArtifactStore | None = None,
+    knowledge_indexer: RagIndexer | None = None,
     target_column: str | None = None,
     models: Sequence[str] = (),
     dataset_label: str = "dataset",
@@ -627,12 +678,21 @@ def run_experiment(
     ingested the upload — rather than guessed here, so a run the agent starts
     on a spreadsheet is recorded as having come from one. The agent itself
     never supplies it and never sees it.
+
+    ``knowledge_indexer``, when given, means an experiment the agent runs is
+    added to the Knowledge Assistant's index exactly as one run through the
+    HTTP endpoint would be — so a conversation can go on to ask about the run
+    it just started.
     """
     options = ExperimentOptions(
         target_column=target_column, models=tuple(models), **option_fields
     ).validated(settings)
     runner = ExperimentRunner(
-        settings, store, dataset_service, artifact_store=artifact_store
+        settings,
+        store,
+        dataset_service,
+        artifact_store=artifact_store,
+        knowledge_indexer=knowledge_indexer,
     )
     return runner.run_frame(
         frame,

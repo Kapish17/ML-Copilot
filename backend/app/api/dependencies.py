@@ -40,6 +40,7 @@ from ml.experiments.store import ExperimentStore
 from ml.explainability import explain_global, explain_prediction
 from ml.models.registry import default_registry
 from rag.config import RagConfig, config_from_env as rag_config_from_env
+from rag.indexing import RagIndexer
 from rag.retrieval import RetrievalService
 from rag.stores import LocalVectorStore
 
@@ -90,9 +91,23 @@ def get_experiment_runner(
     store: ExperimentStoreDep,
     datasets: DatasetServiceDep,
     artifacts: ModelArtifactStoreDep,
+    knowledge_indexer: KnowledgeIndexerDep,
 ) -> ExperimentRunner:
-    """Provide an experiment runner wired to its collaborators."""
-    return ExperimentRunner(settings, store, datasets, artifact_store=artifacts)
+    """Provide an experiment runner wired to its collaborators.
+
+    ``knowledge_indexer`` is what makes a finished run searchable: once the
+    record is saved, the runner also adds it to the same index
+    ``KnowledgeServiceDep`` reads, so a question about "my dataset" or "this
+    experiment" can be answered immediately after ``POST
+    /api/v1/experiments/run`` returns, with no separate indexing step.
+    """
+    return ExperimentRunner(
+        settings,
+        store,
+        datasets,
+        artifact_store=artifacts,
+        knowledge_indexer=knowledge_indexer,
+    )
 
 
 ExperimentRunnerDep = Annotated[ExperimentRunner, Depends(get_experiment_runner)]
@@ -156,6 +171,21 @@ def get_rag_config() -> RagConfig:
 
 
 RagConfigDep = Annotated[RagConfig, Depends(get_rag_config)]
+
+
+def get_knowledge_indexer(rag_config: RagConfigDep) -> RagIndexer:
+    """Provide the indexer used to add a finished experiment to the index.
+
+    Built fresh per request, like :func:`get_retrieval_service`: both read
+    and write the same on-disk index directory, so a run indexed here is
+    visible to the very next search or ask, and to
+    :func:`get_retrieval_service`'s own ``LocalVectorStore``, without either
+    holding an in-memory copy that could drift from the volume both share.
+    """
+    return RagIndexer(rag_config)
+
+
+KnowledgeIndexerDep = Annotated[RagIndexer, Depends(get_knowledge_indexer)]
 
 
 @lru_cache(maxsize=1)
@@ -303,6 +333,7 @@ def get_agent_registry_factory(
     store: ExperimentStoreDep,
     retrieval: RetrievalServiceDep,
     artifacts: AgentArtifactsDep,
+    knowledge_indexer: KnowledgeIndexerDep,
 ) -> Callable[[Any], ToolRegistry]:
     """Provide a way to build the tool allowlist for one run.
 
@@ -343,6 +374,7 @@ def get_agent_registry_factory(
                 settings=settings,
                 store=store,
                 dataset_service=datasets,
+                knowledge_indexer=knowledge_indexer,
                 source_format=getattr(dataset, "source_format", None),
             ),
             retrieval=retrieval,

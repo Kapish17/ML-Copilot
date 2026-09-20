@@ -17,6 +17,7 @@ import ExperimentsPage from "@/app/experiments/page";
 import KnowledgePage from "@/app/knowledge/page";
 import ExperimentDetailPage from "@/app/experiments/[id]/page";
 import { AppShell } from "@/components/layout/AppShell";
+import { DashboardStateProvider } from "@/lib/state/dashboard-state";
 import {
   AGENT_COMPLETED,
   AGENT_STATUS,
@@ -41,6 +42,7 @@ import { errorEnvelope, mockBackend, statusRoutes } from "./mockApi";
 const routeParams = { id: CLASSIFICATION_RUN.experiment_id };
 vi.mock("next/navigation", () => ({
   usePathname: () => "/dashboard",
+  useSearchParams: () => new URLSearchParams(),
   useParams: () => routeParams,
   redirect: vi.fn(),
 }));
@@ -153,7 +155,11 @@ describe("application shell", () => {
 describe("dashboard", () => {
   it("introduces the workflow and starts from an empty state", () => {
     mockBackend(STATUS);
-    render(<DashboardPage />);
+    render(
+      <DashboardStateProvider>
+        <DashboardPage />
+      </DashboardStateProvider>,
+    );
 
     expect(
       screen.getByRole("heading", { level: 1, name: /AI Data Scientist/i }),
@@ -178,7 +184,11 @@ describe("dashboard", () => {
       { match: "/api/v1/datasets/profile", body: profile },
       ...STATUS,
     ]);
-    render(<DashboardPage />);
+    render(
+      <DashboardStateProvider>
+        <DashboardPage />
+      </DashboardStateProvider>,
+    );
 
     await userEvent.upload(screen.getByLabelText(/dataset file/i), file);
     await userEvent.click(screen.getByRole("button", { name: /profile dataset/i }));
@@ -198,7 +208,11 @@ describe("dashboard", () => {
       { match: "/api/v1/datasets/profile", body: CLASSIFICATION_PROFILE, delayMs: 40 },
       ...STATUS,
     ]);
-    render(<DashboardPage />);
+    render(
+      <DashboardStateProvider>
+        <DashboardPage />
+      </DashboardStateProvider>,
+    );
 
     await userEvent.upload(screen.getByLabelText(/dataset file/i), csvFile());
     await userEvent.click(screen.getByRole("button", { name: /profile dataset/i }));
@@ -223,7 +237,11 @@ describe("dashboard", () => {
       },
       ...STATUS,
     ]);
-    render(<DashboardPage />);
+    render(
+      <DashboardStateProvider>
+        <DashboardPage />
+      </DashboardStateProvider>,
+    );
 
     await userEvent.upload(screen.getByLabelText(/dataset file/i), xlsxFile());
     await userEvent.click(screen.getByRole("button", { name: /profile dataset/i }));
@@ -241,7 +259,11 @@ describe("dashboard", () => {
       { match: "/api/v1/agent/ask-with-dataset", body: AGENT_COMPLETED },
       ...STATUS,
     ]);
-    render(<DashboardPage />);
+    render(
+      <DashboardStateProvider>
+        <DashboardPage />
+      </DashboardStateProvider>,
+    );
 
     await userEvent.upload(screen.getByLabelText(/dataset file/i), csvFile());
     await userEvent.click(
@@ -262,7 +284,11 @@ describe("dashboard", () => {
       { match: "/api/v1/experiments/run", body: CLASSIFICATION_RUN },
       ...STATUS,
     ]);
-    render(<DashboardPage />);
+    render(
+      <DashboardStateProvider>
+        <DashboardPage />
+      </DashboardStateProvider>,
+    );
 
     await userEvent.upload(screen.getByLabelText(/dataset file/i), csvFile());
     await userEvent.click(screen.getByRole("button", { name: /run experiment/i }));
@@ -279,7 +305,11 @@ describe("dashboard", () => {
       { match: "/api/v1/datasets/profile", body: CLASSIFICATION_PROFILE },
       ...STATUS,
     ]);
-    render(<DashboardPage />);
+    render(
+      <DashboardStateProvider>
+        <DashboardPage />
+      </DashboardStateProvider>,
+    );
 
     const input = screen.getByLabelText(/dataset file/i);
     await userEvent.upload(input, csvFile());
@@ -300,7 +330,11 @@ describe("dashboard", () => {
       { match: "/api/v1/agent/ask-with-dataset", body: AGENT_COMPLETED },
       ...STATUS,
     ]);
-    render(<DashboardPage />);
+    render(
+      <DashboardStateProvider>
+        <DashboardPage />
+      </DashboardStateProvider>,
+    );
 
     await userEvent.upload(screen.getByLabelText(/dataset file/i), csvFile());
     await userEvent.click(screen.getByRole("button", { name: /profile dataset/i }));
@@ -315,7 +349,11 @@ describe("dashboard", () => {
       { match: "/api/v1/datasets/profile", body: CLASSIFICATION_PROFILE },
       ...STATUS,
     ]);
-    render(<DashboardPage />);
+    render(
+      <DashboardStateProvider>
+        <DashboardPage />
+      </DashboardStateProvider>,
+    );
 
     await userEvent.upload(screen.getByLabelText(/dataset file/i), csvFile());
     await userEvent.click(screen.getByRole("button", { name: /profile dataset/i }));
@@ -323,6 +361,51 @@ describe("dashboard", () => {
 
     expect(window.location.search).toBe("");
     expect(window.location.hash).toBe("");
+  });
+
+  it("keeps the uploaded file and its profile after the page unmounts and remounts", async () => {
+    // Regression test: visiting another tab (Knowledge, an experiment's own
+    // page) unmounts DashboardPage the same way this test's first `unmount`
+    // does. Before the fix, the file lived in DashboardPage's own `useState`
+    // and vanished with it; now it lives in `DashboardStateProvider`, one
+    // level up, which this test keeps mounted across both renders — exactly
+    // as `AppShell` does for the real navigation.
+    mockBackend([
+      { match: "/api/v1/datasets/profile", body: CLASSIFICATION_PROFILE },
+      ...STATUS,
+    ]);
+
+    const { rerender } = render(
+      <DashboardStateProvider>
+        <DashboardPage />
+      </DashboardStateProvider>,
+    );
+
+    await userEvent.upload(screen.getByLabelText(/dataset file/i), csvFile());
+    await userEvent.click(screen.getByRole("button", { name: /profile dataset/i }));
+    await screen.findByText("CSV");
+
+    // Simulates following a link away from the Dashboard and back: the
+    // routed page component is torn down and a different one takes its
+    // place, but the provider around it (rendered here, `AppShell` in the
+    // app) is never unmounted — the same one instance persists throughout,
+    // which is the fix. Rendering `<DashboardPage />` again afterwards is a
+    // fresh mount of the page, into the same still-live provider.
+    rerender(
+      <DashboardStateProvider>
+        <div>Knowledge Assistant placeholder</div>
+      </DashboardStateProvider>,
+    );
+    expect(screen.queryByText("CSV")).toBeNull();
+
+    rerender(
+      <DashboardStateProvider>
+        <DashboardPage />
+      </DashboardStateProvider>,
+    );
+
+    expect(screen.getByText("CSV")).toBeInTheDocument();
+    expect(screen.queryByText(/no dataset yet/i)).toBeNull();
   });
 });
 
@@ -491,6 +574,71 @@ describe("knowledge page", () => {
     expect(await screen.findByText(/naive baseline plays no part/)).toBeInTheDocument();
     expect(screen.getByText("ML Copilot — ML Layer")).toBeInTheDocument();
     expect(screen.getByText(/score 0.3817/)).toBeInTheDocument();
+  });
+
+  it("sends no filter by default, over everything", async () => {
+    const backend = mockBackend([
+      { match: "/api/v1/search", body: SEARCH_RESPONSE },
+      ...STATUS,
+    ]);
+    render(<KnowledgePage />);
+
+    await userEvent.type(screen.getByLabelText(/your question/i), "cv");
+    await userEvent.click(screen.getByRole("button", { name: /search passages/i }));
+    await screen.findByText(/naive baseline plays no part/);
+
+    const request = backend.requests.find((r) => r.url.includes("/api/v1/search"));
+    const body = JSON.parse(String(request?.body));
+    expect(body.filters).toBeUndefined();
+  });
+
+  it("scopes a search to project documentation only", async () => {
+    const backend = mockBackend([
+      { match: "/api/v1/search", body: SEARCH_RESPONSE },
+      ...STATUS,
+    ]);
+    render(<KnowledgePage />);
+
+    await userEvent.click(
+      screen.getByRole("radio", { name: /project documentation only/i }),
+    );
+    await userEvent.type(screen.getByLabelText(/your question/i), "cv");
+    await userEvent.click(screen.getByRole("button", { name: /search passages/i }));
+    await screen.findByText(/naive baseline plays no part/);
+
+    const request = backend.requests.find((r) => r.url.includes("/api/v1/search"));
+    const body = JSON.parse(String(request?.body));
+    expect(body.filters).toEqual({ source_types: ["project_documentation"] });
+  });
+
+  it("scopes a question to one experiment, isolated from every other", async () => {
+    const backend = mockBackend([
+      { match: "/api/v1/ask", body: ASK_GROUNDED },
+      ...STATUS,
+    ]);
+    render(<KnowledgePage />);
+
+    await userEvent.click(screen.getByRole("radio", { name: /one experiment only/i }));
+    await userEvent.type(screen.getByLabelText(/experiment id/i), "exp_abc123");
+    await userEvent.type(screen.getByLabelText(/your question/i), "which model won?");
+    await userEvent.click(
+      screen.getByRole("button", { name: /get a grounded answer/i }),
+    );
+    await screen.findByText("Grounded");
+
+    const request = backend.requests.find((r) => r.url.includes("/api/v1/ask"));
+    const body = JSON.parse(String(request?.body));
+    expect(body.filters).toEqual({ experiment_id: "exp_abc123" });
+  });
+
+  it("will not search until an experiment id is given for that scope", async () => {
+    mockBackend([{ match: "/api/v1/search", body: SEARCH_RESPONSE }, ...STATUS]);
+    render(<KnowledgePage />);
+
+    await userEvent.click(screen.getByRole("radio", { name: /one experiment only/i }));
+    await userEvent.type(screen.getByLabelText(/your question/i), "cv");
+
+    expect(screen.getByRole("button", { name: /search passages/i })).toBeDisabled();
   });
 
   it("never exposes embedding or vector internals", async () => {

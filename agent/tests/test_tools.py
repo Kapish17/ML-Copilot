@@ -407,7 +407,54 @@ def test_the_search_tool_cannot_be_asked_to_modify_anything(
         with pytest.raises(ToolValidationError):
             search_tool.schema.validate(arguments)
 
-    assert search_tool.schema.field_names() == ("query", "top_k", "source_types")
+    assert search_tool.schema.field_names() == (
+        "query",
+        "top_k",
+        "source_types",
+        "experiment_id",
+        "dataset_fingerprint",
+    )
+
+
+def test_the_search_tool_scopes_a_query_to_one_experiment(
+    retrieval: FakeRetrieval,
+) -> None:
+    """``experiment_id`` reaches the retrieval layer as a metadata filter.
+
+    This is what lets a conversation ask "which features mattered in my
+    experiment?" without pulling in every other run this project has ever
+    indexed — the same isolation the knowledge API's ``filters.experiment_id``
+    gives an HTTP caller.
+    """
+    tool = SearchKnowledgeTool(retrieval)
+
+    tool.run({"query": "feature importance", "experiment_id": "exp_only_this_one"})
+
+    assert retrieval.calls[-1]["equals"] == {"experiment_id": "exp_only_this_one"}
+
+
+def test_the_search_tool_scopes_a_query_to_one_dataset(
+    retrieval: FakeRetrieval,
+) -> None:
+    """``dataset_fingerprint`` finds every run on the same data."""
+    tool = SearchKnowledgeTool(retrieval)
+
+    tool.run({"query": "target column", "dataset_fingerprint": "86494cff7a45cb7f"})
+
+    assert retrieval.calls[-1]["equals"] == {
+        "dataset_fingerprint": "86494cff7a45cb7f"
+    }
+
+
+def test_the_search_tool_sends_no_filter_when_none_is_given(
+    retrieval: FakeRetrieval,
+) -> None:
+    """An ordinary query is not silently scoped to nothing."""
+    tool = SearchKnowledgeTool(retrieval)
+
+    tool.run({"query": "what is cross-validation"})
+
+    assert retrieval.calls[-1]["equals"] is None
 
 
 # ---------------------------------------------------------------------------
